@@ -35,6 +35,14 @@ class TimeBindCollection(bpy.types.PropertyGroup):
     entries: bpy.props.CollectionProperty(type=TimeBindEntry)
     active_index: bpy.props.IntProperty()
 
+class TIMEBIND_UL_entries(bpy.types.UIList):
+    """TimeBind entriesを表示するUIList"""
+    def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
+        # item: TimeBindEntry
+        split = layout.split(factor=0.5)
+        split.label(text=item.StoryBordName if item.StoryBordName else "-")
+        split.label(text=item.Prefix if item.Prefix else "-")
+
 # -------------------------------
 # 抽出（保存）オペレーター
 # -------------------------------
@@ -322,7 +330,6 @@ class DRONE_OT_LoadKeys(Operator):
         blend_dir = os.path.dirname(bpy.data.filepath) if bpy.data.filepath else os.getcwd()
         load_path = os.path.join(blend_dir, file_name)
         import_light_effects_from_json(load_path)
-        current_frame = bpy.context.scene.frame_current
         # 全テクスチャをチェック
         for tex in bpy.data.textures:
             # 名前が prefix で始まる場合のみ処理
@@ -342,6 +349,49 @@ class DRONE_OT_LoadKeys(Operator):
         self.report({'INFO'}, f"Keys loaded: {load_path}")
         return {'FINISHED'}
   
+class TIMEBIND_OT_entry_add(bpy.types.Operator):
+    bl_idname = "timebind.entry_add"
+    bl_label = "Add TimeBind Entry"
+
+    def execute(self, context):
+        tb = context.scene.time_bind
+        new_entry = tb.entries.add()
+        new_entry.StoryBordName = "New"
+        new_entry.Prefix = ""
+        new_entry.StartFrame = 0
+        tb.active_index = len(tb.entries) - 1
+        return {'FINISHED'}
+
+
+class TIMEBIND_OT_entry_remove(bpy.types.Operator):
+    bl_idname = "timebind.entry_remove"
+    bl_label = "Remove TimeBind Entry"
+
+    def execute(self, context):
+        tb = context.scene.time_bind
+        if tb.entries and tb.active_index >= 0:
+            tb.entries.remove(tb.active_index)
+            tb.active_index = min(tb.active_index, len(tb.entries) - 1)
+        return {'FINISHED'}
+
+
+class TIMEBIND_OT_entry_move(bpy.types.Operator):
+    """Move entry up or down"""
+    bl_idname = "timebind.entry_move"
+    bl_label = "Move Entry"
+    direction: bpy.props.EnumProperty(items=(('UP', "Up", ""), ('DOWN', "Down", "")))
+
+    def execute(self, context):
+        tb = context.scene.time_bind
+        idx = tb.active_index
+        if self.direction == 'UP' and idx > 0:
+            tb.entries.move(idx, idx - 1)
+            tb.active_index -= 1
+        elif self.direction == 'DOWN' and idx < len(tb.entries) - 1:
+            tb.entries.move(idx, idx + 1)
+            tb.active_index += 1
+        return {'FINISHED'}
+    
 class TIMEBIND_OT_refresh(bpy.types.Operator):
     bl_idname = "timebind.refresh"
     bl_label = "Refresh TimeBind"
@@ -351,23 +401,22 @@ class TIMEBIND_OT_refresh(bpy.types.Operator):
         storyboard = scene.skybrush.storyboard
         light_effects = scene.skybrush.light_effects
 
-        # TimeBindエントリごとに処理
         for bind_entry in scene.time_bind.entries:
+            # Storyboardエントリ検索
             for sb_entry in storyboard.entries:
                 if sb_entry.name == bind_entry.StoryBordName:
                     # 差分計算
                     diff = sb_entry.StartFrame - bind_entry.StartFrame
 
-                    # light_effectsのentriesに反映（Prefixが先頭一致するもの）
+                    # light_effectsのPrefix一致（startswith）
                     for le_entry in light_effects.entries:
                         if le_entry.name.startswith(bind_entry.Prefix):
                             le_entry.StartFrame += diff
 
-                    # TimeBindのStartFrameをStoryboardに同期
+                    # TimeBindをStoryboardに同期
                     bind_entry.StartFrame = sb_entry.StartFrame
 
         return {'FINISHED'}
-
     
 # -------------------------------
 # UIパネル
@@ -381,10 +430,38 @@ class DRONE_PT_KeyTransfer(Panel):
 
     def draw(self, context):
         layout = self.layout
+        tb = context.scene.time_bind
 
         layout.prop(context.scene.drone_key_props, "file_name")
         layout.operator("drone.save_keys", text="Save")
         layout.operator("drone.load_keys", text="Load")
+
+                # Refreshボタン
+        layout.operator("timebind.refresh", text="Refresh", icon='FILE_REFRESH')
+
+        # UIList
+        row = layout.row()
+        row.template_list(
+            "TIMEBIND_UL_entries", "", 
+            tb, "entries", 
+            tb, "active_index"
+        )
+
+        # 右側の操作ボタン
+        col = row.column(align=True)
+        col.operator("timebind.entry_add", icon='ADD', text="")
+        col.operator("timebind.entry_remove", icon='REMOVE', text="")
+        col.separator()
+        col.operator("timebind.entry_move", icon='TRIA_UP', text="").direction = 'UP'
+        col.operator("timebind.entry_move", icon='TRIA_DOWN', text="").direction = 'DOWN'
+
+        # 詳細編集
+        if tb.entries and tb.active_index >= 0:
+            entry = tb.entries[tb.active_index]
+            box = layout.box()
+            box.prop(entry, "StoryBordName")
+            box.prop(entry, "Prefix")
+            box.prop(entry, "StartFrame")
 
 # -------------------------------
 # 登録
@@ -394,6 +471,13 @@ classes = (
     DRONE_OT_SaveKeys,
     DRONE_OT_LoadKeys,
     DRONE_PT_KeyTransfer,
+    TimeBindEntry,
+    TimeBindCollection,
+    TIMEBIND_UL_entries,
+    TIMEBIND_OT_entry_add,
+    TIMEBIND_OT_entry_remove,
+    TIMEBIND_OT_entry_move,
+    TIMEBIND_OT_refresh,
 )
 
 def register():
