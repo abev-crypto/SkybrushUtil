@@ -337,7 +337,14 @@ class DRONE_OT_shift_collecion(bpy.types.Operator):
         shift_collection_name = context.scene.drone_key_props.file_name + "_Animated"
         shift_collection = bpy.data.collections.new(shift_collection_name)
         bpy.context.scene.collection.children.link(shift_collection)
-        _shift_col_anim(shift_collection_name)
+        
+        # 選択中のオブジェクトを新コレクションにリンク
+        selected_objects = bpy.context.selected_objects
+        for obj in selected_objects:
+            # リンク（移動ではない）
+            if obj.name not in shift_collection.objects:
+                shift_collection.objects.link(obj)
+        _shift_col_anim(shift_collection)
         return {'FINISHED'}
 
 class TIMEBIND_OT_entry_add(bpy.types.Operator):
@@ -404,7 +411,7 @@ class TIMEBIND_OT_refresh(bpy.types.Operator):
                     
                     _update_texAnim(bind_entry.Prefix, diff)
                     if bind_entry.Prefix + "_Animated" in bpy.data.collections:
-                        _shift_col_anim(bind_entry.Prefix + "_Animated")
+                        _shift_col_anim(bpy.data.collections.get(bind_entry.Prefix + "_Animated"))
                     # Drones内のオブジェクトキーを移動
                     if drones_collection:
                         self.move_material_keys(drones_collection.objects,
@@ -454,22 +461,24 @@ def _shift_col_anim(shift_collection):
     # === 設定 ===
     shift_amount = bpy.context.scene.frame_current  # 現在フレーム分シフト
 
-    # 選択中のオブジェクトを新コレクションにリンク
-    selected_objects = bpy.context.selected_objects
-    for obj in selected_objects:
-        # リンク（移動ではない）
-        if obj.name not in shift_collection.objects:
-            shift_collection.objects.link(obj)
-
-    # 新コレクション内のオブジェクトのキーをシフト
-    for obj in shift_collection.all_objects:
-        if obj.animation_data and obj.animation_data.action:
-            action = obj.animation_data.action
-            for fcurve in action.fcurves:
+        # --- 汎用キーシフト関数 ---
+    def shift_keyframes(anim_data, amount):
+        if anim_data and anim_data.action:
+            for fcurve in anim_data.action.fcurves:
                 for keyframe in fcurve.keyframe_points:
-                    keyframe.co.x += shift_amount
-                    keyframe.handle_left.x += shift_amount
-            keyframe.handle_right.x += shift_amount
+                    keyframe.co.x += amount
+                    keyframe.handle_left.x += amount
+                    keyframe.handle_right.x += amount
+
+    # --- コレクション内すべてのオブジェクト処理 ---
+    for obj in shift_collection.all_objects:
+        # オブジェクト本体
+        shift_keyframes(obj.animation_data, shift_amount)
+
+        # シェイプキー
+        if obj.data and hasattr(obj.data, "shape_keys") and obj.data.shape_keys:
+            shift_keyframes(obj.data.shape_keys.animation_data, shift_amount)
+
 
 def _add_PG(context, prefix, frame):
     tb = context.scene.time_bind
