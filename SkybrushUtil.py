@@ -14,14 +14,6 @@ from bpy.types import Panel, Operator, PropertyGroup
 from mathutils import Vector
 import json, os
 
-"""
-TODO
-
-キーを後でまとめて読み込みするシステム
-
-再読み込み保証
-
-"""
 
 KeydataStr = "_KeyData.json"
 LightdataStr = "_LightData.json"
@@ -38,7 +30,6 @@ class DroneKeyTransferProperties(PropertyGroup):
 
 # TimeBind用のPropertyGroup
 class TimeBindEntry(bpy.types.PropertyGroup):
-    StoryBordName : StringProperty(name="Storyboard Name")
     Prefix : StringProperty(name="Prefix")
     StartFrame : bpy.props.IntProperty(name="Start Frame")
 
@@ -52,7 +43,6 @@ class TIMEBIND_UL_entries(bpy.types.UIList):
     def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
         # item: TimeBindEntry
         split = layout.split(factor=0.5)
-        split.label(text=item.StoryBordName if item.StoryBordName else "-")
         split.label(text=item.Prefix if item.Prefix else "-")
 
 # -------------------------------
@@ -121,45 +111,22 @@ class DRONE_OT_SaveKeys(Operator):
                 json.dump(effects_data, f, ensure_ascii=False, indent=4)
                 props = context.scene.drone_key_props
         
-        def export_key():
-            save_path = os.path.join(blend_dir, KeydataStr)
-
-            drones_collection = bpy.data.collections.get("Drones")
-            data = []
-
-            for obj in drones_collection.objects:
-                mat = obj.active_material
-                if not mat or not mat.node_tree or not mat.node_tree.animation_data:
-                    continue
-
-                action = mat.node_tree.animation_data.action
-                if not action:
-                    continue
-
-                # inputs[0].default_value を持つFカーブを抽出
-                node_color_curves = [fc for fc in action.fcurves if 'inputs[0].default_value' in fc.data_path]
-                if not node_color_curves:
-                    continue
-
-                keys = {0: [], 1: [], 2: [], 3: []}
-                for fc in node_color_curves:
-                    for kp in fc.keyframe_points:
-                        keys[fc.array_index].append((kp.co.x, kp.co.y))
-
-                data.append({
-                    "name": obj.name,
-                    "location": list(obj.matrix_world.translation),
-                    "keys": keys
-                })
-
-            with open(save_path, "w") as f:
-                json.dump(data, f)
-
         blend_dir = os.path.dirname(bpy.data.filepath) if bpy.data.filepath else os.getcwd()
         props = context.scene.drone_key_props
         add_prefix_le_tex(context)
-        export_key()
-        export_light_effects_to_json(os.path.join(blend_dir, props.file_name + KeydataStr))
+        export_key(os.path.join(blend_dir, props.file_name + KeydataStr))
+        export_light_effects_to_json(os.path.join(blend_dir, props.file_name + LightdataStr))
+        self.report({'INFO'}, f"Keys saved: {blend_dir}")
+        return {'FINISHED'}
+    
+class DRONE_OT_SaveSignleKeys(Operator):
+    bl_idname = "drone.save_single_keys"
+    bl_label = "Save Single Keys"
+
+    def execute(self, context):
+        props = context.scene.drone_key_props
+        blend_dir = os.path.dirname(bpy.data.filepath) if bpy.data.filepath else os.getcwd()
+        export_key(os.path.join(blend_dir, props.file_name + KeydataStr))
         self.report({'INFO'}, f"Keys saved: {blend_dir}")
         return {'FINISHED'}
 
@@ -211,6 +178,8 @@ class DRONE_OT_LoadAllKeys(Operator):
                 flog.append(pref)
         if flog:
             self.report({'INFO'}, f"Keys loaded: {blend_dir} from {flog}")
+        else:
+            self.report({'INFO'}, "Not loaded")
         return {'FINISHED'}
   
 class LIGHTEFFECT_OTadd_prefix_le_tex(bpy.types.Operator):
@@ -291,7 +260,7 @@ class TIMEBIND_OT_refresh(bpy.types.Operator):
         for bind_entry in scene.time_bind.entries:
             # Storyboardエントリ検索
             for sb_entry in storyboard.entries:
-                if sb_entry.name == bind_entry.StoryBordName:
+                if sb_entry.name.startswith(bind_entry.Prefix):
                     # 差分計算
                     diff = sb_entry.frame_start - bind_entry.StartFrame
 
@@ -373,8 +342,11 @@ def shift_collection_key(shift_collection):
 
 def add_timebind_prop(context, prefix, frame):
     tb = context.scene.time_bind
+    for entry in tb:
+        if entry.Prefix == prefix:
+            entry.StartFrame = frame
+            return
     new_entry = tb.entries.add()
-    new_entry.StoryBordName = "ANYSTORYBORDNAME"
     new_entry.Prefix = prefix
     new_entry.StartFrame = frame
     tb.active_index = len(tb.entries) - 1
@@ -565,6 +537,39 @@ def apply_key(filepath, frame_offset, duration=0):
             break
         available_objects.remove(nearest_obj)
 
+def export_key(save_path):
+    drones_collection = bpy.data.collections.get("Drones")
+    data = []
+
+    for obj in drones_collection.objects:
+        mat = obj.active_material
+        if not mat or not mat.node_tree or not mat.node_tree.animation_data:
+            continue
+
+        action = mat.node_tree.animation_data.action
+        if not action:
+            continue
+
+        # inputs[0].default_value を持つFカーブを抽出
+        node_color_curves = [fc for fc in action.fcurves if 'inputs[0].default_value' in fc.data_path]
+        if not node_color_curves:
+            continue
+
+        keys = {0: [], 1: [], 2: [], 3: []}
+        for fc in node_color_curves:
+            for kp in fc.keyframe_points:
+                keys[fc.array_index].append((kp.co.x, kp.co.y))
+
+        data.append({
+            "name": obj.name,
+            "location": list(obj.matrix_world.translation),
+            "keys": keys
+        })
+
+    with open(save_path, "w") as f:
+        json.dump(data, f)
+
+
 # -------------------------------
 # UIパネル
 # -------------------------------
@@ -581,6 +586,7 @@ class DRONE_PT_KeyTransfer(Panel):
 
         layout.prop(context.scene.drone_key_props, "file_name")
         layout.operator("drone.save_keys", text="Save")
+        layout.operator("drone.save_single_keys", text="Key Save")
         layout.operator("drone.load_keys", text="Load")
         layout.operator("drone.load_all_keys", text="All Load")
         layout.operator("drone.add_prefix", text="Add Prefix")
@@ -609,7 +615,6 @@ class DRONE_PT_KeyTransfer(Panel):
         if tb.entries and tb.active_index >= 0:
             entry = tb.entries[tb.active_index]
             box = layout.box()
-            box.prop(entry, "StoryBordName")
             box.prop(entry, "Prefix")
             box.prop(entry, "StartFrame")
 
@@ -620,6 +625,7 @@ classes = (
     DroneKeyTransferProperties,
     DRONE_OT_shift_collecion,
     DRONE_OT_SaveKeys,
+    DRONE_OT_SaveSignleKeys,
     DRONE_OT_LoadKeys,
     DRONE_PT_KeyTransfer,
     DRONE_OT_LoadAllKeys,
