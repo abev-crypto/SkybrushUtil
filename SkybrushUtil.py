@@ -114,7 +114,7 @@ class DRONE_OT_SaveKeys(Operator):
         blend_dir = os.path.dirname(bpy.data.filepath) if bpy.data.filepath else os.getcwd()
         props = context.scene.drone_key_props
         add_prefix_le_tex(context)
-        export_key(os.path.join(blend_dir, props.file_name + KeydataStr))
+        export_key(context, os.path.join(blend_dir, props.file_name + KeydataStr))
         export_light_effects_to_json(os.path.join(blend_dir, props.file_name + LightdataStr))
         self.report({'INFO'}, f"Keys saved: {blend_dir}")
         return {'FINISHED'}
@@ -126,7 +126,7 @@ class DRONE_OT_SaveSignleKeys(Operator):
     def execute(self, context):
         props = context.scene.drone_key_props
         blend_dir = os.path.dirname(bpy.data.filepath) if bpy.data.filepath else os.getcwd()
-        export_key(os.path.join(blend_dir, props.file_name + KeydataStr))
+        export_key(context, os.path.join(blend_dir, props.file_name + KeydataStr))
         self.report({'INFO'}, f"Keys saved: {blend_dir}")
         return {'FINISHED'}
 
@@ -342,7 +342,7 @@ def shift_collection_key(shift_collection):
 
 def add_timebind_prop(context, prefix, frame):
     tb = context.scene.time_bind
-    for entry in tb:
+    for entry in tb.entries:
         if entry.Prefix == prefix:
             entry.StartFrame = frame
             return
@@ -537,9 +537,19 @@ def apply_key(filepath, frame_offset, duration=0):
             break
         available_objects.remove(nearest_obj)
 
-def export_key(save_path):
+def export_key(context, save_path):
     drones_collection = bpy.data.collections.get("Drones")
     data = []
+    frame_start = 0
+    duration = 0
+
+    storyboard = context.scene.skybrush.storyboard
+    tb = context.scene.time_bind
+    for sb_entry in storyboard.entries:
+        for tb_entry in tb.entries:
+            if tb_entry.Prefix == sb_entry.name.split("_")[0]:
+                frame_start = sb_entry.frame_start
+                duration = sb_entry.duration
 
     for obj in drones_collection.objects:
         mat = obj.active_material
@@ -558,7 +568,11 @@ def export_key(save_path):
         keys = {0: [], 1: [], 2: [], 3: []}
         for fc in node_color_curves:
             for kp in fc.keyframe_points:
-                keys[fc.array_index].append((kp.co.x, kp.co.y))
+                    frame = kp.co.x
+                    value = kp.co.y
+                    # 指定範囲のみ保存
+                    if frame_start <= frame <= frame_start + duration or duration == 0:
+                        keys[fc.array_index].append((frame, value))
 
         data.append({
             "name": obj.name,
