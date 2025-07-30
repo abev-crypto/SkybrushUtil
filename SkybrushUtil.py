@@ -114,7 +114,7 @@ class DRONE_OT_SaveKeys(Operator):
         blend_dir = os.path.dirname(bpy.data.filepath) if bpy.data.filepath else os.getcwd()
         props = context.scene.drone_key_props
         add_prefix_le_tex(context)
-        export_key(context, os.path.join(blend_dir, props.file_name + KeydataStr))
+        export_key(context, blend_dir, props.file_name)
         export_light_effects_to_json(os.path.join(blend_dir, props.file_name + LightdataStr))
         self.report({'INFO'}, f"Keys saved: {blend_dir}")
         return {'FINISHED'}
@@ -126,7 +126,7 @@ class DRONE_OT_SaveSignleKeys(Operator):
     def execute(self, context):
         props = context.scene.drone_key_props
         blend_dir = os.path.dirname(bpy.data.filepath) if bpy.data.filepath else os.getcwd()
-        export_key(context, os.path.join(blend_dir, props.file_name + KeydataStr))
+        export_key(context, blend_dir, props.file_name)
         self.report({'INFO'}, f"Keys saved: {blend_dir}")
         return {'FINISHED'}
 
@@ -537,51 +537,53 @@ def apply_key(filepath, frame_offset, duration=0):
             break
         available_objects.remove(nearest_obj)
 
-def export_key(context, save_path):
+def export_key(context, br_path, pref):
+    def extract():
+        for obj in drones_collection.objects:
+            mat = obj.active_material
+            if not mat or not mat.node_tree or not mat.node_tree.animation_data:
+                continue
+
+            action = mat.node_tree.animation_data.action
+            if not action:
+                continue
+
+            # inputs[0].default_value を持つFカーブを抽出
+            node_color_curves = [fc for fc in action.fcurves if 'inputs[0].default_value' in fc.data_path]
+            if not node_color_curves:
+                continue
+
+            keys = {0: [], 1: [], 2: [], 3: []}
+            for fc in node_color_curves:
+                for kp in fc.keyframe_points:
+                        frame = kp.co.x
+                        value = kp.co.y
+                        # 指定範囲のみ保存
+                        if frame_start <= frame <= frame_start + duration or duration == 0:
+                            keys[fc.array_index].append((frame, value))
+
+            data.append({
+                "name": obj.name,
+                "location": list(obj.matrix_world.translation),
+                "keys": keys
+            })
+
+        with open(os.path.join(br_path, pref + "KeyData.json"), "w") as f:
+            json.dump(data, f)
+
     drones_collection = bpy.data.collections.get("Drones")
     data = []
     frame_start = 0
     duration = 0
-
     storyboard = context.scene.skybrush.storyboard
-    tb = context.scene.time_bind
     for sb_entry in storyboard.entries:
-        for tb_entry in tb.entries:
-            if tb_entry.Prefix == sb_entry.name.split("_")[0]:
-                frame_start = sb_entry.frame_start
-                duration = sb_entry.duration
+        if pref == sb_entry.name.split("_")[0]:
+            frame_start = sb_entry.frame_start
+            duration = sb_entry.duration
+            extract()
+            return
+    extract()
 
-    for obj in drones_collection.objects:
-        mat = obj.active_material
-        if not mat or not mat.node_tree or not mat.node_tree.animation_data:
-            continue
-
-        action = mat.node_tree.animation_data.action
-        if not action:
-            continue
-
-        # inputs[0].default_value を持つFカーブを抽出
-        node_color_curves = [fc for fc in action.fcurves if 'inputs[0].default_value' in fc.data_path]
-        if not node_color_curves:
-            continue
-
-        keys = {0: [], 1: [], 2: [], 3: []}
-        for fc in node_color_curves:
-            for kp in fc.keyframe_points:
-                    frame = kp.co.x
-                    value = kp.co.y
-                    # 指定範囲のみ保存
-                    if frame_start <= frame <= frame_start + duration or duration == 0:
-                        keys[fc.array_index].append((frame, value))
-
-        data.append({
-            "name": obj.name,
-            "location": list(obj.matrix_world.translation),
-            "keys": keys
-        })
-
-    with open(save_path, "w") as f:
-        json.dump(data, f)
 
 
 # -------------------------------
