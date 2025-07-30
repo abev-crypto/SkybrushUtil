@@ -216,6 +216,21 @@ class TIMEBIND_OT_entry_add(bpy.types.Operator):
     def execute(self, context):
         add_timebind_prop(context, "ANYPREFIX", 0)
         return {'FINISHED'}
+    
+class TIMEBIND_OT_goto_startframe(bpy.types.Operator):
+    bl_idname = "timebind.goto_startframe"
+    bl_label = "Goto StartFrame"
+
+    def execute(self, context):
+        tb_entries = context.scene.time_bind.entries
+        index = context.scene.time_bind.active_index
+        storyboard = context.scene.skybrush.storyboard
+        if 0 <= index < len(tb_entries) and tb_entries:
+            for sb_entry in storyboard.entries:
+                if sb_entry.name.startswith(tb_entries[index].Prefix):
+                    context.scene.frame_set(sb_entry.frame_start)
+                    break
+        return {'FINISHED'}
 
 class TIMEBIND_OT_entry_remove(bpy.types.Operator):
     bl_idname = "timebind.entry_remove"
@@ -576,6 +591,10 @@ def export_key(context, br_path, pref):
     frame_start = 0
     duration = 0
     storyboard = context.scene.skybrush.storyboard
+    tb_entries = context.scene.time_bind.entries
+    index = context.scene.time_bind.active_index
+    if 0 <= index < len(tb_entries) and tb_entries:
+        pref = tb_entries[index].Prefix
     for sb_entry in storyboard.entries:
         if pref == sb_entry.name.split("_")[0]:
             frame_start = sb_entry.frame_start
@@ -607,6 +626,7 @@ class DRONE_PT_KeyTransfer(Panel):
         layout.operator("drone.load_all_keys", text="All Load")
         layout.operator("drone.add_prefix", text="Add Prefix")
         layout.operator("drone.shift_coll_frame", text="Shift Collection")
+        layout.operator("timebind.goto_startframe", text="Goto Start")
 
                 # Refreshボタン
         layout.operator("timebind.refresh", text="Refresh", icon='FILE_REFRESH')
@@ -646,6 +666,7 @@ classes = (
     DRONE_PT_KeyTransfer,
     DRONE_OT_LoadAllKeys,
     LIGHTEFFECT_OTadd_prefix_le_tex,
+    TIMEBIND_OT_goto_startframe,
     TimeBindEntry,
     TimeBindCollection,
     TIMEBIND_UL_entries,
