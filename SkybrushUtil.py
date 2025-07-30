@@ -1,7 +1,7 @@
 bl_info = {
     "name": "SkyBrushUtil",
     "author": "ABEYUYA",
-    "version": (1, 4),
+    "version": (1, 5),
     "blender": (4, 3, 0),
     "location": "3D View > Sidebar > SBUtil",
     "description": "SkybrushTransfarUtil",
@@ -38,8 +38,8 @@ class DroneKeyTransferProperties(PropertyGroup):
 
 # TimeBind用のPropertyGroup
 class TimeBindEntry(bpy.types.PropertyGroup):
-    StoryBordName : bpy.props.StringProperty(name="Storyboard Name")
-    Prefix : bpy.props.StringProperty(name="Prefix")
+    StoryBordName : StringProperty(name="Storyboard Name")
+    Prefix : StringProperty(name="Prefix")
     StartFrame : bpy.props.IntProperty(name="Start Frame")
 
 # コレクション全体の管理用
@@ -120,50 +120,47 @@ class DRONE_OT_SaveKeys(Operator):
             with open(filepath, 'w', encoding='utf-8') as f:
                 json.dump(effects_data, f, ensure_ascii=False, indent=4)
                 props = context.scene.drone_key_props
-        file_name = props.file_name + KeydataStr
+        
+        def export_key():
+            save_path = os.path.join(blend_dir, KeydataStr)
 
-        add_prefix_le_tex(context)
+            drones_collection = bpy.data.collections.get("Drones")
+            data = []
 
-        # 保存先（Blendファイルと同じ場所）
+            for obj in drones_collection.objects:
+                mat = obj.active_material
+                if not mat or not mat.node_tree or not mat.node_tree.animation_data:
+                    continue
+
+                action = mat.node_tree.animation_data.action
+                if not action:
+                    continue
+
+                # inputs[0].default_value を持つFカーブを抽出
+                node_color_curves = [fc for fc in action.fcurves if 'inputs[0].default_value' in fc.data_path]
+                if not node_color_curves:
+                    continue
+
+                keys = {0: [], 1: [], 2: [], 3: []}
+                for fc in node_color_curves:
+                    for kp in fc.keyframe_points:
+                        keys[fc.array_index].append((kp.co.x, kp.co.y))
+
+                data.append({
+                    "name": obj.name,
+                    "location": list(obj.matrix_world.translation),
+                    "keys": keys
+                })
+
+            with open(save_path, "w") as f:
+                json.dump(data, f)
+
         blend_dir = os.path.dirname(bpy.data.filepath) if bpy.data.filepath else os.getcwd()
-        save_path = os.path.join(blend_dir, file_name)
-
-        drones_collection = bpy.data.collections.get("Drones")
-        data = []
-
-        for obj in drones_collection.objects:
-            mat = obj.active_material
-            if not mat or not mat.node_tree or not mat.node_tree.animation_data:
-                continue
-
-            action = mat.node_tree.animation_data.action
-            if not action:
-                continue
-
-            # inputs[0].default_value を持つFカーブを抽出
-            node_color_curves = [fc for fc in action.fcurves if 'inputs[0].default_value' in fc.data_path]
-            if not node_color_curves:
-                continue
-
-            keys = {0: [], 1: [], 2: [], 3: []}
-            for fc in node_color_curves:
-                for kp in fc.keyframe_points:
-                    keys[fc.array_index].append((kp.co.x, kp.co.y))
-
-            data.append({
-                "name": obj.name,
-                "location": list(obj.matrix_world.translation),
-                "keys": keys
-            })
-
-        with open(save_path, "w") as f:
-            json.dump(data, f)
         props = context.scene.drone_key_props
-        file_name = props.file_name + KeydataStr
-        blend_dir = os.path.dirname(bpy.data.filepath) if bpy.data.filepath else os.getcwd()
-        load_path = os.path.join(blend_dir, file_name)
-        export_light_effects_to_json(load_path)
-        self.report({'INFO'}, f"Keys saved: {save_path}")
+        add_prefix_le_tex(context)
+        export_key()
+        export_light_effects_to_json(os.path.join(blend_dir, props.file_name + KeydataStr))
+        self.report({'INFO'}, f"Keys saved: {blend_dir}")
         return {'FINISHED'}
 
 # -------------------------------
@@ -177,8 +174,13 @@ class DRONE_OT_LoadKeys(Operator):
         props = context.scene.drone_key_props
         blend_dir = os.path.dirname(bpy.data.filepath) if bpy.data.filepath else os.getcwd()
         current_frame = bpy.context.scene.frame_current
-        apply_key(os.path.join(blend_dir, props.file_name + KeydataStr), current_frame)
-        import_light_effects_from_json(os.path.join(blend_dir, props.file_name + KeydataStr), current_frame, context)
+        storyboard = context.scene.skybrush.storyboard
+        duration = 0
+        for entry in storyboard.entries:
+            if entry.name.startswith(props.file_name):
+                duration = entry.duration
+        apply_key(os.path.join(blend_dir, props.file_name + KeydataStr), current_frame, duration)
+        import_light_effects_from_json(os.path.join(blend_dir, props.file_name + LightdataStr), current_frame, context)
         update_texture_key(props.file_name + "_", current_frame)
         add_timebind_prop(context, props.file_name + "_", current_frame)
         self.report({'INFO'}, f"Keys loaded: {blend_dir}")
@@ -198,14 +200,17 @@ class DRONE_OT_LoadAllKeys(Operator):
         scene = context.scene
         storyboard = scene.skybrush.storyboard
         blend_dir = os.path.dirname(bpy.data.filepath) if bpy.data.filepath else os.getcwd()
+        flog = []
         for sb_entry in storyboard.entries:
             pref = sb_entry.name.split("_")[0]
-            if check_file(pref):
-                apply_key(os.path.join(blend_dir, pref + KeydataStr), sb_entry.frame_start)
-                import_light_effects_from_json(os.path.join(blend_dir, pref + KeydataStr), sb_entry.frame_start, context)
+            if check_file(blend_dir, pref):
+                apply_key(os.path.join(blend_dir, pref + KeydataStr), sb_entry.frame_start, sb_entry.duration)
+                import_light_effects_from_json(os.path.join(blend_dir, pref + LightdataStr), sb_entry.frame_start, context)
                 update_texture_key(pref + "_", sb_entry.frame_start)
                 add_timebind_prop(context, pref + "_", sb_entry.frame_start)
-        self.report({'INFO'}, f"Keys loaded: {blend_dir}")
+                flog.append(pref)
+        if flog:
+            self.report({'INFO'}, f"Keys loaded: {blend_dir} from {flog}")
         return {'FINISHED'}
   
 class LIGHTEFFECT_OTadd_prefix_le_tex(bpy.types.Operator):
@@ -482,9 +487,9 @@ def import_light_effects_from_json(filepath, frame_offset, context):
     scene = bpy.context.scene
     entries = scene.skybrush.light_effects.entries
     props = context.scene.drone_key_props
-    for entry in entries:
-        if entry.name.startswith(props.file_name):
-            entries.remove(entry)
+    for i in reversed(range(len(entries))):
+        if entries[i].name.startswith(props.file_name):
+            entries.remove(i)
 
     # JSON読み込み
     with open(filepath, 'r', encoding='utf-8') as f:
@@ -500,8 +505,10 @@ def import_light_effects_from_json(filepath, frame_offset, context):
         # color_rampデータを一時退避
         color_ramp_data = effect_data.pop("color_ramp", [])
 
-        effect_data["frame_start"] += frame_offset
-        effect_data["frame_end"] += frame_offset
+        if "frame_start" in effect_data:
+            effect_data["frame_start"] += frame_offset
+        if "frame_end" in effect_data:
+            effect_data["frame_end"] += frame_offset
 
         # ColorRamp復元
         if effect.type == "COLOR_RAMP" and color_ramp_data:
@@ -510,7 +517,7 @@ def import_light_effects_from_json(filepath, frame_offset, context):
         # プロパティをセット
         set_propertygroup_from_dict(effect, effect_data)
 
-def apply_key(filepath, frame_offset):
+def apply_key(filepath, frame_offset, duration=0):
     def find_nearest_object(location):
         nearest_obj = None
         min_dist = float('inf')
@@ -520,6 +527,19 @@ def apply_key(filepath, frame_offset):
                 min_dist = dist
                 nearest_obj = obj
         return nearest_obj
+    
+    drones_collection = bpy.data.collections.get("Drones")
+    available_objects = list(drones_collection.objects)
+    if duration is not 0:
+        for obj in available_objects:
+            mat = obj.active_material
+            anim = mat.node_tree.animation_data
+            if not anim or not anim.action:
+                continue
+            for fcurve in anim.action.fcurves:
+                for keyframe in reversed(fcurve.keyframe_points):
+                    if frame_offset <= keyframe.co.x <= frame_offset + duration:
+                        fcurve.keyframe_points.remove(keyframe)
     with open(filepath, "r") as f:
         color_key_data = json.load(f)
 
@@ -527,8 +547,6 @@ def apply_key(filepath, frame_offset):
     for d in color_key_data:
         d["keys"] = {int(k): v for k, v in d["keys"].items()}
 
-    drones_collection = bpy.data.collections.get("Drones")
-    available_objects = list(drones_collection.objects)
     for data in color_key_data:
         nearest_obj = find_nearest_object(Vector(data["location"]))
         mat = nearest_obj.active_material
