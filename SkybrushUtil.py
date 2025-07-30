@@ -1,7 +1,7 @@
 bl_info = {
     "name": "SkyBrushUtil",
     "author": "ABEYUYA",
-    "version": (1, 2),
+    "version": (1, 4),
     "blender": (4, 3, 0),
     "location": "3D View > Sidebar > SBUtil",
     "description": "SkybrushTransfarUtil",
@@ -189,6 +189,7 @@ class DRONE_OT_LoadKeys(Operator):
                 if dist < min_dist:
                     min_dist = dist
                     nearest_obj = obj
+            print(min_dist)
             return nearest_obj
 
         for data in color_key_data:
@@ -276,7 +277,7 @@ class DRONE_OT_LoadKeys(Operator):
                 elem = color_ramp.elements.new(point["position"])
                 elem.color = point["color"]
 
-        def import_light_effects_from_json(filepath, frame_offset=0):
+        def import_light_effects_from_json(filepath, frame_offset):
             """
             JSONからLightEffectsを復元する
             frame_offset: frame_start / frame_end に加算するオフセット
@@ -298,8 +299,8 @@ class DRONE_OT_LoadKeys(Operator):
                 # color_rampデータを一時退避
                 color_ramp_data = effect_data.pop("color_ramp", [])
 
-                effect.frame_start += frame_offset
-                effect.frame_end += frame_offset
+                effect_data["frame_start"] += frame_offset
+                effect_data["frame_end"] += frame_offset
 
                 # ColorRamp復元
                 if effect.type == "COLOR_RAMP" and color_ramp_data:
@@ -325,6 +326,18 @@ class LIGHTEFFECT_OT_add_prefix(bpy.types.Operator):
 
     def execute(self, context):
         _add_prefix(context)
+        return {'FINISHED'}
+    
+class DRONE_OT_shift_collecion(bpy.types.Operator):
+    bl_idname = "drone.shift_coll_frame"
+    bl_label = "ShiftCollectionFrame"
+
+    def execute(self, context):
+        # 新しいコレクションを作成
+        shift_collection_name = context.scene.drone_key_props.file_name + "_Animated"
+        shift_collection = bpy.data.collections.new(shift_collection_name)
+        bpy.context.scene.collection.children.link(shift_collection)
+        _shift_col_anim(shift_collection_name)
         return {'FINISHED'}
 
 class TIMEBIND_OT_entry_add(bpy.types.Operator):
@@ -390,7 +403,8 @@ class TIMEBIND_OT_refresh(bpy.types.Operator):
                             le_entry.frame_end += diff
                     
                     _update_texAnim(bind_entry.Prefix, diff)
-
+                    if bind_entry.Prefix + "_Animated" in bpy.data.collections:
+                        _shift_col_anim(bind_entry.Prefix + "_Animated")
                     # Drones内のオブジェクトキーを移動
                     if drones_collection:
                         self.move_material_keys(drones_collection.objects,
@@ -436,6 +450,26 @@ class TIMEBIND_OT_refresh(bpy.types.Operator):
                                 keyframe.handle_left.x += diff
                                 keyframe.handle_right.x += diff
 
+def _shift_col_anim(shift_collection):
+    # === 設定 ===
+    shift_amount = bpy.context.scene.frame_current  # 現在フレーム分シフト
+
+    # 選択中のオブジェクトを新コレクションにリンク
+    selected_objects = bpy.context.selected_objects
+    for obj in selected_objects:
+        # リンク（移動ではない）
+        if obj.name not in shift_collection.objects:
+            shift_collection.objects.link(obj)
+
+    # 新コレクション内のオブジェクトのキーをシフト
+    for obj in shift_collection.all_objects:
+        if obj.animation_data and obj.animation_data.action:
+            action = obj.animation_data.action
+            for fcurve in action.fcurves:
+                for keyframe in fcurve.keyframe_points:
+                    keyframe.co.x += shift_amount
+                    keyframe.handle_left.x += shift_amount
+            keyframe.handle_right.x += shift_amount
 
 def _add_PG(context, prefix, frame):
     tb = context.scene.time_bind
@@ -499,6 +533,7 @@ class DRONE_PT_KeyTransfer(Panel):
         layout.operator("drone.save_keys", text="Save")
         layout.operator("drone.load_keys", text="Load")
         layout.operator("drone.add_prefix", text="Add Prefix")
+        layout.operator("drone.shift_coll_frame", text="Shift Collection")
 
                 # Refreshボタン
         layout.operator("timebind.refresh", text="Refresh", icon='FILE_REFRESH')
@@ -532,6 +567,7 @@ class DRONE_PT_KeyTransfer(Panel):
 # -------------------------------
 classes = (
     DroneKeyTransferProperties,
+    DRONE_OT_shift_collecion,
     DRONE_OT_SaveKeys,
     DRONE_OT_LoadKeys,
     DRONE_PT_KeyTransfer,
