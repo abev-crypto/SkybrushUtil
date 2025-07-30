@@ -568,7 +568,7 @@ def export_key(context, br_path, pref):
                 "keys": keys
             })
 
-        with open(os.path.join(br_path, pref + "KeyData.json"), "w") as f:
+        with open(os.path.join(br_path, pref + KeydataStr), "w") as f:
             json.dump(data, f)
 
     drones_collection = bpy.data.collections.get("Drones")
