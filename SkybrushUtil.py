@@ -14,6 +14,18 @@ from bpy.types import Panel, Operator, PropertyGroup
 from mathutils import Vector
 import json, os
 
+"""
+TODO
+
+キーを後でまとめて読み込みするシステム
+
+再読み込み保証
+
+"""
+
+KeydataStr = "_KeyData.json"
+LightdataStr = "_LightData.json"
+
 # -------------------------------
 # プロパティ
 # -------------------------------
@@ -51,45 +63,6 @@ class DRONE_OT_SaveKeys(Operator):
     bl_label = "Save Keys"
 
     def execute(self, context):
-        props = context.scene.drone_key_props
-        file_name = props.file_name + "_KeyData.json"
-
-        _add_prefix(context)
-
-        # 保存先（Blendファイルと同じ場所）
-        blend_dir = os.path.dirname(bpy.data.filepath) if bpy.data.filepath else os.getcwd()
-        save_path = os.path.join(blend_dir, file_name)
-
-        drones_collection = bpy.data.collections.get("Drones")
-        data = []
-
-        for obj in drones_collection.objects:
-            mat = obj.active_material
-            if not mat or not mat.node_tree or not mat.node_tree.animation_data:
-                continue
-
-            action = mat.node_tree.animation_data.action
-            if not action:
-                continue
-
-            # inputs[0].default_value を持つFカーブを抽出
-            node_color_curves = [fc for fc in action.fcurves if 'inputs[0].default_value' in fc.data_path]
-            if not node_color_curves:
-                continue
-
-            keys = {0: [], 1: [], 2: [], 3: []}
-            for fc in node_color_curves:
-                for kp in fc.keyframe_points:
-                    keys[fc.array_index].append((kp.co.x, kp.co.y))
-
-            data.append({
-                "name": obj.name,
-                "location": list(obj.matrix_world.translation),
-                "keys": keys
-            })
-
-        with open(save_path, "w") as f:
-            json.dump(data, f)
         def convert_value(value):
             """Blender固有型やPropertyGroupをJSON化可能な値に変換"""
             if hasattr(value, "__annotations__"):
@@ -146,15 +119,52 @@ class DRONE_OT_SaveKeys(Operator):
 
             with open(filepath, 'w', encoding='utf-8') as f:
                 json.dump(effects_data, f, ensure_ascii=False, indent=4)
+                props = context.scene.drone_key_props
+        file_name = props.file_name + KeydataStr
 
+        add_prefix_le_tex(context)
+
+        # 保存先（Blendファイルと同じ場所）
+        blend_dir = os.path.dirname(bpy.data.filepath) if bpy.data.filepath else os.getcwd()
+        save_path = os.path.join(blend_dir, file_name)
+
+        drones_collection = bpy.data.collections.get("Drones")
+        data = []
+
+        for obj in drones_collection.objects:
+            mat = obj.active_material
+            if not mat or not mat.node_tree or not mat.node_tree.animation_data:
+                continue
+
+            action = mat.node_tree.animation_data.action
+            if not action:
+                continue
+
+            # inputs[0].default_value を持つFカーブを抽出
+            node_color_curves = [fc for fc in action.fcurves if 'inputs[0].default_value' in fc.data_path]
+            if not node_color_curves:
+                continue
+
+            keys = {0: [], 1: [], 2: [], 3: []}
+            for fc in node_color_curves:
+                for kp in fc.keyframe_points:
+                    keys[fc.array_index].append((kp.co.x, kp.co.y))
+
+            data.append({
+                "name": obj.name,
+                "location": list(obj.matrix_world.translation),
+                "keys": keys
+            })
+
+        with open(save_path, "w") as f:
+            json.dump(data, f)
         props = context.scene.drone_key_props
-        file_name = props.file_name + "_LightData.json"
+        file_name = props.file_name + KeydataStr
         blend_dir = os.path.dirname(bpy.data.filepath) if bpy.data.filepath else os.getcwd()
         load_path = os.path.join(blend_dir, file_name)
         export_light_effects_to_json(load_path)
         self.report({'INFO'}, f"Keys saved: {save_path}")
         return {'FINISHED'}
-
 
 # -------------------------------
 # 移植（ロード）オペレーター
@@ -165,167 +175,45 @@ class DRONE_OT_LoadKeys(Operator):
 
     def execute(self, context):
         props = context.scene.drone_key_props
-        file_name = props.file_name + "_KeyData.json"
-
         blend_dir = os.path.dirname(bpy.data.filepath) if bpy.data.filepath else os.getcwd()
-        load_path = os.path.join(blend_dir, file_name)
-
-        with open(load_path, "r") as f:
-            color_key_data = json.load(f)
-
-        # JSONキーをintに変換
-        for d in color_key_data:
-            d["keys"] = {int(k): v for k, v in d["keys"].items()}
-
-        drones_collection = bpy.data.collections.get("Drones")
         current_frame = bpy.context.scene.frame_current
-        available_objects = list(drones_collection.objects)
+        apply_key(os.path.join(blend_dir, props.file_name + KeydataStr), current_frame)
+        import_light_effects_from_json(os.path.join(blend_dir, props.file_name + KeydataStr), current_frame, context)
+        update_texture_key(props.file_name + "_", current_frame)
+        add_timebind_prop(context, props.file_name + "_", current_frame)
+        self.report({'INFO'}, f"Keys loaded: {blend_dir}")
+        return {'FINISHED'}
+    
+class DRONE_OT_LoadAllKeys(Operator):
+    bl_idname = "drone.load_all_keys"
+    bl_label = "Load All Keys"
 
-        def find_nearest_object(location):
-            nearest_obj = None
-            min_dist = float('inf')
-            for obj in available_objects:
-                dist = (Vector(location) - obj.matrix_world.translation).length
-                if dist < min_dist:
-                    min_dist = dist
-                    nearest_obj = obj
-            print(min_dist)
-            return nearest_obj
-
-        for data in color_key_data:
-            nearest_obj = find_nearest_object(Vector(data["location"]))
-            mat = nearest_obj.active_material
-
-            for node in mat.node_tree.nodes:
-                if not node.inputs or node.inputs[0].type != 'RGBA':
-                    continue
-
-                # キー移植
-                for channel, keyframes in data["keys"].items():
-                    for frame, value in keyframes:
-                        node.inputs[0].default_value[channel] = value
-                        node.inputs[0].keyframe_insert(
-                            "default_value",
-                            frame=current_frame + frame,
-                            index=channel
-                        )
-                break
-
-            available_objects.remove(nearest_obj)
-        def set_propertygroup_from_dict(pg, data):
-            """辞書データをPropertyGroupにセット（texture/meshのみ特殊処理）"""
-            for key, value in data.items():
-                if key not in pg.__annotations__:
-                    continue  # JSONに余分なキーがあっても無視
-
-                # 空文字や None はスキップ
-                if value == "" or value is None:
-                    continue
-
-                # texture / mesh は名前から検索して代入
-                if key == "texture":
-                    tex = bpy.data.textures.get(value)
-                    if tex:
-                        setattr(pg, key, tex)
-                    continue
-
-                if key == "mesh":
-                    obj = bpy.data.objects.get(value)
-                    if obj:
-                        setattr(pg, key, obj)
-                    continue
-
-                current_value = getattr(pg, key)
-
-                # ネストしたPropertyGroupの場合
-                if hasattr(current_value, "__annotations__") and isinstance(value, dict):
-                    set_propertygroup_from_dict(current_value, value)
-                    continue
-
-                # EnumProperty の場合（候補外はスキップ）
-                if "EnumProperty" in str(type(pg.__annotations__[key])):
-                    enum_items = pg.__annotations__[key].keywords["items"]
-                    if value not in [item[0] for item in enum_items]:
-                        continue
-                    setattr(pg, key, value)
-                    continue
-
-                # 通常プロパティ
-                setattr(pg, key, value)
-
-
-        def apply_color_ramp(texture, ramp_data):
-            """ColorRamp情報をTextureに適用"""
-            if not texture or not hasattr(texture, "color_ramp"):
-                return
-            if texture and texture.animation_data and texture.animation_data.action:
-                return
-
-            color_ramp = texture.color_ramp
-
-            # 1つだけ残して全削除
-            while len(color_ramp.elements) > 1:
-                color_ramp.elements.remove(color_ramp.elements[-1])
-
-            # 残した要素を最初のJSONデータで上書き
-            if ramp_data:
-                color_ramp.elements[0].position = ramp_data[0]["position"]
-                color_ramp.elements[0].color = ramp_data[0]["color"]
-
-            # 2番目以降の要素を追加
-            for point in ramp_data[1:]:
-                elem = color_ramp.elements.new(point["position"])
-                elem.color = point["color"]
-
-        def import_light_effects_from_json(filepath, frame_offset):
-            """
-            JSONからLightEffectsを復元する
-            frame_offset: frame_start / frame_end に加算するオフセット
-            """
-            scene = bpy.context.scene
-            entries = scene.skybrush.light_effects.entries
-
-            # JSON読み込み
-            with open(filepath, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-
-            for effect_data in data:
-                effect = entries.add()
-
-                # JSONのnameキーをUIリストの名前に反映
-                if "name" in effect_data:
-                    effect.name = effect_data["name"]
-
-                # color_rampデータを一時退避
-                color_ramp_data = effect_data.pop("color_ramp", [])
-
-                effect_data["frame_start"] += frame_offset
-                effect_data["frame_end"] += frame_offset
-
-                # ColorRamp復元
-                if effect.type == "COLOR_RAMP" and color_ramp_data:
-                    apply_color_ramp(effect.texture, color_ramp_data)
-
-                # プロパティをセット
-                set_propertygroup_from_dict(effect, effect_data)
-
-
-        props = context.scene.drone_key_props
-        file_name = props.file_name + "_LightData.json"
+    def execute(self, context):
+        def check_file(dir, name):
+            # ディレクトリ内の全ファイルを取得
+            for file_name in os.listdir(dir):
+                if file_name.startswith(name):
+                    return True  # そのPrefixのファイルが存在
+            return False  # 存在しない場合
+        scene = context.scene
+        storyboard = scene.skybrush.storyboard
         blend_dir = os.path.dirname(bpy.data.filepath) if bpy.data.filepath else os.getcwd()
-        load_path = os.path.join(blend_dir, file_name)
-        import_light_effects_from_json(load_path, current_frame)
-        _update_texAnim(props.file_name + "_", current_frame)
-        _add_PG(context, props.file_name + "_", current_frame)
-        self.report({'INFO'}, f"Keys loaded: {load_path}")
+        for sb_entry in storyboard.entries:
+            pref = sb_entry.name.split("_")[0]
+            if check_file(pref):
+                apply_key(os.path.join(blend_dir, pref + KeydataStr), sb_entry.frame_start)
+                import_light_effects_from_json(os.path.join(blend_dir, pref + KeydataStr), sb_entry.frame_start, context)
+                update_texture_key(pref + "_", sb_entry.frame_start)
+                add_timebind_prop(context, pref + "_", sb_entry.frame_start)
+        self.report({'INFO'}, f"Keys loaded: {blend_dir}")
         return {'FINISHED'}
   
-class LIGHTEFFECT_OT_add_prefix(bpy.types.Operator):
+class LIGHTEFFECT_OTadd_prefix_le_tex(bpy.types.Operator):
     bl_idname = "drone.add_prefix"
     bl_label = "Add Prefix"
 
     def execute(self, context):
-        _add_prefix(context)
+        add_prefix_le_tex(context)
         return {'FINISHED'}
     
 class DRONE_OT_shift_collecion(bpy.types.Operator):
@@ -344,7 +232,7 @@ class DRONE_OT_shift_collecion(bpy.types.Operator):
             # リンク（移動ではない）
             if obj.name not in shift_collection.objects:
                 shift_collection.objects.link(obj)
-        _shift_col_anim(shift_collection)
+        shift_collection_key(shift_collection)
         return {'FINISHED'}
 
 class TIMEBIND_OT_entry_add(bpy.types.Operator):
@@ -352,7 +240,7 @@ class TIMEBIND_OT_entry_add(bpy.types.Operator):
     bl_label = "Add TimeBind Entry"
 
     def execute(self, context):
-        _add_PG(context, "ANYPREFIX", 0)
+        add_timebind_prop(context, "ANYPREFIX", 0)
         return {'FINISHED'}
 
 class TIMEBIND_OT_entry_remove(bpy.types.Operator):
@@ -365,7 +253,6 @@ class TIMEBIND_OT_entry_remove(bpy.types.Operator):
             tb.entries.remove(tb.active_index)
             tb.active_index = min(tb.active_index, len(tb.entries) - 1)
         return {'FINISHED'}
-
 
 class TIMEBIND_OT_entry_move(bpy.types.Operator):
     """Move entry up or down"""
@@ -409,9 +296,9 @@ class TIMEBIND_OT_refresh(bpy.types.Operator):
                             le_entry.frame_start += diff
                             le_entry.frame_end += diff
                     
-                    _update_texAnim(bind_entry.Prefix, diff)
+                    update_texture_key(bind_entry.Prefix, diff)
                     if bind_entry.Prefix + "_Animated" in bpy.data.collections:
-                        _shift_col_anim(bpy.data.collections.get(bind_entry.Prefix + "_Animated"))
+                        shift_collection_key(bpy.data.collections.get(bind_entry.Prefix + "_Animated"))
                     # Drones内のオブジェクトキーを移動
                     if drones_collection:
                         self.move_material_keys(drones_collection.objects,
@@ -457,7 +344,7 @@ class TIMEBIND_OT_refresh(bpy.types.Operator):
                                 keyframe.handle_left.x += diff
                                 keyframe.handle_right.x += diff
 
-def _shift_col_anim(shift_collection):
+def shift_collection_key(shift_collection):
     # === 設定 ===
     shift_amount = bpy.context.scene.frame_current  # 現在フレーム分シフト
 
@@ -479,8 +366,7 @@ def _shift_col_anim(shift_collection):
         if obj.data and hasattr(obj.data, "shape_keys") and obj.data.shape_keys:
             shift_keyframes(obj.data.shape_keys.animation_data, shift_amount)
 
-
-def _add_PG(context, prefix, frame):
+def add_timebind_prop(context, prefix, frame):
     tb = context.scene.time_bind
     new_entry = tb.entries.add()
     new_entry.StoryBordName = "ANYSTORYBORDNAME"
@@ -488,7 +374,7 @@ def _add_PG(context, prefix, frame):
     new_entry.StartFrame = frame
     tb.active_index = len(tb.entries) - 1
 
-def _update_texAnim(prefix, diff):
+def update_texture_key(prefix, diff):
     # 全テクスチャをチェック
     for tex in bpy.data.textures:
         # 名前が prefix で始まる場合のみ処理
@@ -506,7 +392,7 @@ def _update_texAnim(prefix, diff):
                 for fcurve in action.fcurves:
                     fcurve.update()
 
-def _add_prefix(context):
+def add_prefix_le_tex(context):
     def prefix_light_effect_names(prefix):
         """
         LightEffectCollection 内の全 name にプレフィックスを追加する
@@ -524,11 +410,148 @@ def _add_prefix(context):
         if not tex.name.startswith(props.file_name + "_"):
             tex.name = props.file_name + "_" + tex.name
 
+def set_propertygroup_from_dict(pg, data):
+    """辞書データをPropertyGroupにセット（texture/meshのみ特殊処理）"""
+    for key, value in data.items():
+        if key not in pg.__annotations__:
+            continue  # JSONに余分なキーがあっても無視
+
+        # 空文字や None はスキップ
+        if value == "" or value is None:
+            continue
+
+        # texture / mesh は名前から検索して代入
+        if key == "texture":
+            tex = bpy.data.textures.get(value)
+            if tex:
+                setattr(pg, key, tex)
+            continue
+
+        if key == "mesh":
+            obj = bpy.data.objects.get(value)
+            if obj:
+                setattr(pg, key, obj)
+            continue
+
+        current_value = getattr(pg, key)
+
+        # ネストしたPropertyGroupの場合
+        if hasattr(current_value, "__annotations__") and isinstance(value, dict):
+            set_propertygroup_from_dict(current_value, value)
+            continue
+
+        # EnumProperty の場合（候補外はスキップ）
+        if "EnumProperty" in str(type(pg.__annotations__[key])):
+            enum_items = pg.__annotations__[key].keywords["items"]
+            if value not in [item[0] for item in enum_items]:
+                continue
+            setattr(pg, key, value)
+            continue
+
+        # 通常プロパティ
+        setattr(pg, key, value)
+
+def apply_color_ramp(texture, ramp_data):
+    """ColorRamp情報をTextureに適用"""
+    if not texture or not hasattr(texture, "color_ramp"):
+        return
+    if texture and texture.animation_data and texture.animation_data.action:
+        return
+
+    color_ramp = texture.color_ramp
+
+    # 1つだけ残して全削除
+    while len(color_ramp.elements) > 1:
+        color_ramp.elements.remove(color_ramp.elements[-1])
+
+    # 残した要素を最初のJSONデータで上書き
+    if ramp_data:
+        color_ramp.elements[0].position = ramp_data[0]["position"]
+        color_ramp.elements[0].color = ramp_data[0]["color"]
+
+    # 2番目以降の要素を追加
+    for point in ramp_data[1:]:
+        elem = color_ramp.elements.new(point["position"])
+        elem.color = point["color"]
+
+def import_light_effects_from_json(filepath, frame_offset, context):
+    """
+    JSONからLightEffectsを復元する
+    frame_offset: frame_start / frame_end に加算するオフセット
+    """
+    scene = bpy.context.scene
+    entries = scene.skybrush.light_effects.entries
+    props = context.scene.drone_key_props
+    for entry in entries:
+        if entry.name.startswith(props.file_name):
+            entries.remove(entry)
+
+    # JSON読み込み
+    with open(filepath, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+
+    for effect_data in data:
+        effect = entries.add()
+
+        # JSONのnameキーをUIリストの名前に反映
+        if "name" in effect_data:
+            effect.name = effect_data["name"]
+
+        # color_rampデータを一時退避
+        color_ramp_data = effect_data.pop("color_ramp", [])
+
+        effect_data["frame_start"] += frame_offset
+        effect_data["frame_end"] += frame_offset
+
+        # ColorRamp復元
+        if effect.type == "COLOR_RAMP" and color_ramp_data:
+            apply_color_ramp(effect.texture, color_ramp_data)
+
+        # プロパティをセット
+        set_propertygroup_from_dict(effect, effect_data)
+
+def apply_key(filepath, frame_offset):
+    def find_nearest_object(location):
+        nearest_obj = None
+        min_dist = float('inf')
+        for obj in available_objects:
+            dist = (Vector(location) - obj.matrix_world.translation).length
+            if dist < min_dist:
+                min_dist = dist
+                nearest_obj = obj
+        return nearest_obj
+    with open(filepath, "r") as f:
+        color_key_data = json.load(f)
+
+    # JSONキーをintに変換
+    for d in color_key_data:
+        d["keys"] = {int(k): v for k, v in d["keys"].items()}
+
+    drones_collection = bpy.data.collections.get("Drones")
+    available_objects = list(drones_collection.objects)
+    for data in color_key_data:
+        nearest_obj = find_nearest_object(Vector(data["location"]))
+        mat = nearest_obj.active_material
+        for node in mat.node_tree.nodes:
+            if not node.inputs or node.inputs[0].type != 'RGBA':
+                continue
+            # キー移植
+            for channel, keyframes in data["keys"].items():
+                for frame, value in keyframes:
+                    node.inputs[0].default_value[channel] = value
+                    node.inputs[0].keyframe_insert(
+                        "default_value",
+                        frame=frame_offset + frame,
+                        index=channel
+                    )
+            break
+        available_objects.remove(nearest_obj)
+
 # -------------------------------
 # UIパネル
 # -------------------------------
 class DRONE_PT_KeyTransfer(Panel):
-    bl_label = "Drone Key Transfer"
+    bl_label = "Drone Transfer"
     bl_idname = "DRONE_PT_key_transfer"
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
@@ -541,6 +564,7 @@ class DRONE_PT_KeyTransfer(Panel):
         layout.prop(context.scene.drone_key_props, "file_name")
         layout.operator("drone.save_keys", text="Save")
         layout.operator("drone.load_keys", text="Load")
+        layout.operator("drone.load_all_keys", text="All Load")
         layout.operator("drone.add_prefix", text="Add Prefix")
         layout.operator("drone.shift_coll_frame", text="Shift Collection")
 
@@ -580,7 +604,8 @@ classes = (
     DRONE_OT_SaveKeys,
     DRONE_OT_LoadKeys,
     DRONE_PT_KeyTransfer,
-    LIGHTEFFECT_OT_add_prefix,
+    DRONE_OT_LoadAllKeys,
+    LIGHTEFFECT_OTadd_prefix_le_tex,
     TimeBindEntry,
     TimeBindCollection,
     TIMEBIND_UL_entries,
