@@ -84,7 +84,7 @@ class DRONE_OT_SaveKeys(Operator):
 
             data.append({
                 "name": obj.name,
-                "location": list(obj.location),
+                "location": list(obj.matrix_world.translation),
                 "keys": keys
             })
 
@@ -185,7 +185,7 @@ class DRONE_OT_LoadKeys(Operator):
             nearest_obj = None
             min_dist = float('inf')
             for obj in available_objects:
-                dist = (Vector(location) - obj.location).length
+                dist = (Vector(location) - obj.matrix_world.translation).length
                 if dist < min_dist:
                     min_dist = dist
                     nearest_obj = obj
@@ -298,23 +298,22 @@ class DRONE_OT_LoadKeys(Operator):
                 # color_rampデータを一時退避
                 color_ramp_data = effect_data.pop("color_ramp", [])
 
-                # プロパティをセット
-                set_propertygroup_from_dict(effect, effect_data)
-
-                # frame_offsetを適用
-                if hasattr(effect, "frame_start"):
-                    effect.frame_start += frame_offset
-                if hasattr(effect, "frame_end"):
-                    effect.frame_end += frame_offset
+                effect.frame_start += frame_offset
+                effect.frame_end += frame_offset
 
                 # ColorRamp復元
                 if effect.type == "COLOR_RAMP" and color_ramp_data:
                     apply_color_ramp(effect.texture, color_ramp_data)
+
+                # プロパティをセット
+                set_propertygroup_from_dict(effect, effect_data)
+
+
         props = context.scene.drone_key_props
         file_name = props.file_name + "_LightData.json"
         blend_dir = os.path.dirname(bpy.data.filepath) if bpy.data.filepath else os.getcwd()
         load_path = os.path.join(blend_dir, file_name)
-        import_light_effects_from_json(load_path)
+        import_light_effects_from_json(load_path, current_frame)
         _update_texAnim(props.file_name + "_", current_frame)
         _add_PG(context, props.file_name + "_", current_frame)
         self.report({'INFO'}, f"Keys loaded: {load_path}")
