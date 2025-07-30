@@ -18,7 +18,7 @@ import json, os
 # プロパティ
 # -------------------------------
 class DroneKeyTransferProperties(PropertyGroup):
-    file_name: StringProperty(
+    file_name : StringProperty(
         name="File Name",
         default="color_key_data",
         description="Save/Load JSON file name"
@@ -26,14 +26,14 @@ class DroneKeyTransferProperties(PropertyGroup):
 
 # TimeBind用のPropertyGroup
 class TimeBindEntry(bpy.types.PropertyGroup):
-    StoryBordName: bpy.props.StringProperty(name="Storyboard Name")
-    Prefix: bpy.props.StringProperty(name="Prefix")
-    StartFrame: bpy.props.IntProperty(name="Start Frame")
+    StoryBordName : bpy.props.StringProperty(name="Storyboard Name")
+    Prefix : bpy.props.StringProperty(name="Prefix")
+    StartFrame : bpy.props.IntProperty(name="Start Frame")
 
 # コレクション全体の管理用
 class TimeBindCollection(bpy.types.PropertyGroup):
-    entries: bpy.props.CollectionProperty(type=TimeBindEntry)
-    active_index: bpy.props.IntProperty()
+    entries : bpy.props.CollectionProperty(type=TimeBindEntry)
+    active_index : bpy.props.IntProperty()
 
 class TIMEBIND_UL_entries(bpy.types.UIList):
     """TimeBind entriesを表示するUIList"""
@@ -52,7 +52,7 @@ class DRONE_OT_SaveKeys(Operator):
 
     def execute(self, context):
         props = context.scene.drone_key_props
-        file_name = props.file_name + ".json"
+        file_name = props.file_name + "_KeyData.json"
 
         def prefix_light_effect_names(prefix):
             """
@@ -65,11 +65,11 @@ class DRONE_OT_SaveKeys(Operator):
                 if not effect.name.startswith(prefix):
                     effect.name = prefix + effect.name
         props = context.scene.drone_key_props
-        prefix_light_effect_names(props.le_prefix)
+        prefix_light_effect_names(props.file_name + "_")
         for tex in bpy.data.textures:
             # すでにプレフィックスが付いていない場合のみ追加
-            if not tex.name.startswith(props.le_prefix):
-                tex.name = props.le_prefix + tex.name
+            if not tex.name.startswith(props.file_name + "_"):
+                tex.name = props.file_name + "_" + tex.name
 
         # 保存先（Blendファイルと同じ場所）
         blend_dir = os.path.dirname(bpy.data.filepath) if bpy.data.filepath else os.getcwd()
@@ -163,7 +163,7 @@ class DRONE_OT_SaveKeys(Operator):
                 json.dump(effects_data, f, ensure_ascii=False, indent=4)
 
         props = context.scene.drone_key_props
-        file_name = props.file_name + "_LE.json"
+        file_name = props.file_name + "_LightData.json"
         blend_dir = os.path.dirname(bpy.data.filepath) if bpy.data.filepath else os.getcwd()
         load_path = os.path.join(blend_dir, file_name)
         export_light_effects_to_json(load_path)
@@ -180,7 +180,7 @@ class DRONE_OT_LoadKeys(Operator):
 
     def execute(self, context):
         props = context.scene.drone_key_props
-        file_name = props.file_name + ".json"
+        file_name = props.file_name + "_KeyData.json"
 
         blend_dir = os.path.dirname(bpy.data.filepath) if bpy.data.filepath else os.getcwd()
         load_path = os.path.join(blend_dir, file_name)
@@ -326,26 +326,12 @@ class DRONE_OT_LoadKeys(Operator):
                 if effect.type == "COLOR_RAMP" and color_ramp_data:
                     apply_color_ramp(effect.texture, color_ramp_data)
         props = context.scene.drone_key_props
-        file_name = props.file_name + "_LE.json"
+        file_name = props.file_name + "_LightData.json"
         blend_dir = os.path.dirname(bpy.data.filepath) if bpy.data.filepath else os.getcwd()
         load_path = os.path.join(blend_dir, file_name)
         import_light_effects_from_json(load_path)
-        # 全テクスチャをチェック
-        for tex in bpy.data.textures:
-            # 名前が prefix で始まる場合のみ処理
-            if tex.name.startswith(props.le_prefix):
-                if tex.animation_data and tex.animation_data.action:
-                    action = tex.animation_data.action
-                    for fcurve in action.fcurves:
-                        for keyframe in fcurve.keyframe_points:
-                            # フレーム位置を +CurrentFrame
-                            keyframe.co.x += current_frame
-                            keyframe.handle_left.x += current_frame
-                            keyframe.handle_right.x += current_frame
-
-                    # 更新を通知
-                    for fcurve in action.fcurves:
-                        fcurve.update()
+        _update_texAnim(props.file_name + "_", current_frame)
+        _add_PG(context, props.file_name + "_", current_frame)
         self.report({'INFO'}, f"Keys loaded: {load_path}")
         return {'FINISHED'}
   
@@ -354,12 +340,7 @@ class TIMEBIND_OT_entry_add(bpy.types.Operator):
     bl_label = "Add TimeBind Entry"
 
     def execute(self, context):
-        tb = context.scene.time_bind
-        new_entry = tb.entries.add()
-        new_entry.StoryBordName = "New"
-        new_entry.Prefix = ""
-        new_entry.StartFrame = 0
-        tb.active_index = len(tb.entries) - 1
+        _add_PG(context, "ANYPREFIX", 0)
         return {'FINISHED'}
 
 
@@ -379,7 +360,7 @@ class TIMEBIND_OT_entry_move(bpy.types.Operator):
     """Move entry up or down"""
     bl_idname = "timebind.entry_move"
     bl_label = "Move Entry"
-    direction: bpy.props.EnumProperty(items=(('UP', "Up", ""), ('DOWN', "Down", "")))
+    direction : bpy.props.EnumProperty(items=(('UP', "Up", ""), ('DOWN', "Down", "")))
 
     def execute(self, context):
         tb = context.scene.time_bind
@@ -401,22 +382,95 @@ class TIMEBIND_OT_refresh(bpy.types.Operator):
         storyboard = scene.skybrush.storyboard
         light_effects = scene.skybrush.light_effects
 
+        # Dronesコレクション参照
+        drones_collection = bpy.data.collections.get("Drones")
+
         for bind_entry in scene.time_bind.entries:
             # Storyboardエントリ検索
             for sb_entry in storyboard.entries:
                 if sb_entry.name == bind_entry.StoryBordName:
                     # 差分計算
-                    diff = sb_entry.StartFrame - bind_entry.StartFrame
+                    diff = sb_entry.frame_start - bind_entry.StartFrame
 
                     # light_effectsのPrefix一致（startswith）
                     for le_entry in light_effects.entries:
                         if le_entry.name.startswith(bind_entry.Prefix):
-                            le_entry.StartFrame += diff
+                            le_entry.frame_start += diff
+                            le_entry.frame_end += diff
+                    
+                    _update_texAnim(bind_entry.Prefix, diff)
 
+                    # Drones内のオブジェクトキーを移動
+                    if drones_collection:
+                        self.move_material_keys(drones_collection.objects,
+                                                bind_entry.StartFrame,
+                                                sb_entry.duration,  # Duration使う
+                                                diff)
                     # TimeBindをStoryboardに同期
-                    bind_entry.StartFrame = sb_entry.StartFrame
-
+                    bind_entry.StartFrame = sb_entry.frame_start
         return {'FINISHED'}
+
+    def move_material_keys(self, objects, start_frame, duration, diff):
+        end_frame = start_frame + duration
+
+        for obj in objects:
+            # オブジェクトにマテリアルがなければスキップ
+            if not obj.material_slots:
+                continue
+
+            for slot in obj.material_slots:
+                mat = slot.material
+                if not mat or not mat.node_tree:
+                    continue
+
+                # マテリアル内のノード探索（RGBA入力を持つノード）
+                for node in mat.node_tree.nodes:
+                    if not node.inputs or node.inputs[0].type != 'RGBA':
+                        continue
+
+                    # アクション(F-Curve)があるかチェック
+                    anim = mat.node_tree.animation_data
+                    if not anim or not anim.action:
+                        continue
+
+                    for fcurve in anim.action.fcurves:
+                        # default_value だけ対象（R,G,B,Aそれぞれindex別）
+                        if "default_value" not in fcurve.data_path:
+                            continue
+
+                        for keyframe in fcurve.keyframe_points:
+                            frame = keyframe.co.x
+                            if start_frame <= frame <= end_frame:
+                                keyframe.co.x += diff
+                                keyframe.handle_left.x += diff
+                                keyframe.handle_right.x += diff
+
+
+def _add_PG(context, prefix, frame):
+    tb = context.scene.time_bind
+    new_entry = tb.entries.add()
+    new_entry.StoryBordName = "ANYSTORYBORDNAME"
+    new_entry.Prefix = prefix
+    new_entry.StartFrame = frame
+    tb.active_index = len(tb.entries) - 1
+
+def _update_texAnim(prefix, diff):
+    # 全テクスチャをチェック
+    for tex in bpy.data.textures:
+        # 名前が prefix で始まる場合のみ処理
+        if tex.name.startswith(prefix):
+            if tex.animation_data and tex.animation_data.action:
+                action = tex.animation_data.action
+                for fcurve in action.fcurves:
+                    for keyframe in fcurve.keyframe_points:
+                        # フレーム位置を +CurrentFrame
+                        keyframe.co.x += diff
+                        keyframe.handle_left.x += diff
+                        keyframe.handle_right.x += diff
+
+                # 更新を通知
+                for fcurve in action.fcurves:
+                    fcurve.update()
     
 # -------------------------------
 # UIパネル
