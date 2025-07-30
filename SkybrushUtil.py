@@ -1,7 +1,7 @@
 bl_info = {
     "name": "SkyBrushUtil",
     "author": "ABEYUYA",
-    "version": (1, 1),
+    "version": (1, 2),
     "blender": (4, 3, 0),
     "location": "3D View > Sidebar > SBUtil",
     "description": "SkybrushTransfarUtil",
@@ -54,22 +54,7 @@ class DRONE_OT_SaveKeys(Operator):
         props = context.scene.drone_key_props
         file_name = props.file_name + "_KeyData.json"
 
-        def prefix_light_effect_names(prefix):
-            """
-            LightEffectCollection 内の全 name にプレフィックスを追加する
-            """
-            entries = bpy.context.scene.skybrush.light_effects.entries
-
-            for effect in entries:
-                # 既に prefix が付いている場合は重複しないようにする（任意）
-                if not effect.name.startswith(prefix):
-                    effect.name = prefix + effect.name
-        props = context.scene.drone_key_props
-        prefix_light_effect_names(props.file_name + "_")
-        for tex in bpy.data.textures:
-            # すでにプレフィックスが付いていない場合のみ追加
-            if not tex.name.startswith(props.file_name + "_"):
-                tex.name = props.file_name + "_" + tex.name
+        _add_prefix(context)
 
         # 保存先（Blendファイルと同じ場所）
         blend_dir = os.path.dirname(bpy.data.filepath) if bpy.data.filepath else os.getcwd()
@@ -335,6 +320,14 @@ class DRONE_OT_LoadKeys(Operator):
         self.report({'INFO'}, f"Keys loaded: {load_path}")
         return {'FINISHED'}
   
+class LIGHTEFFECT_OT_add_prefix(bpy.types.Operator):
+    bl_idname = "drone.add_prefix"
+    bl_label = "Add Prefix"
+
+    def execute(self, context):
+        _add_prefix(context)
+        return {'FINISHED'}
+
 class TIMEBIND_OT_entry_add(bpy.types.Operator):
     bl_idname = "timebind.entry_add"
     bl_label = "Add TimeBind Entry"
@@ -342,7 +335,6 @@ class TIMEBIND_OT_entry_add(bpy.types.Operator):
     def execute(self, context):
         _add_PG(context, "ANYPREFIX", 0)
         return {'FINISHED'}
-
 
 class TIMEBIND_OT_entry_remove(bpy.types.Operator):
     bl_idname = "timebind.entry_remove"
@@ -471,7 +463,25 @@ def _update_texAnim(prefix, diff):
                 # 更新を通知
                 for fcurve in action.fcurves:
                     fcurve.update()
-    
+
+def _add_prefix(context):
+    def prefix_light_effect_names(prefix):
+        """
+        LightEffectCollection 内の全 name にプレフィックスを追加する
+        """
+        entries = bpy.context.scene.skybrush.light_effects.entries
+
+        for effect in entries:
+            # 既に prefix が付いている場合は重複しないようにする（任意）
+            if not effect.name.startswith(prefix):
+                effect.name = prefix + effect.name
+    props = context.scene.drone_key_props
+    prefix_light_effect_names(props.file_name + "_")
+    for tex in bpy.data.textures:
+        # すでにプレフィックスが付いていない場合のみ追加
+        if not tex.name.startswith(props.file_name + "_"):
+            tex.name = props.file_name + "_" + tex.name
+
 # -------------------------------
 # UIパネル
 # -------------------------------
@@ -489,6 +499,7 @@ class DRONE_PT_KeyTransfer(Panel):
         layout.prop(context.scene.drone_key_props, "file_name")
         layout.operator("drone.save_keys", text="Save")
         layout.operator("drone.load_keys", text="Load")
+        layout.operator("drone.add_prefix", text="Add Prefix")
 
                 # Refreshボタン
         layout.operator("timebind.refresh", text="Refresh", icon='FILE_REFRESH')
@@ -525,6 +536,7 @@ classes = (
     DRONE_OT_SaveKeys,
     DRONE_OT_LoadKeys,
     DRONE_PT_KeyTransfer,
+    LIGHTEFFECT_OT_add_prefix,
     TimeBindEntry,
     TimeBindCollection,
     TIMEBIND_UL_entries,
