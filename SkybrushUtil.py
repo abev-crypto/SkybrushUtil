@@ -1,7 +1,7 @@
 bl_info = {
     "name": "SkyBrushUtil",
     "author": "ABEYUYA",
-    "version": (1, 6),
+    "version": (1, 7),
     "blender": (4, 3, 0),
     "location": "3D View > Sidebar > SBUtil",
     "description": "SkybrushTransfarUtil",
@@ -138,18 +138,23 @@ class DRONE_OT_LoadKeys(Operator):
     bl_label = "Load Keys"
 
     def execute(self, context):
-        props = context.scene.drone_key_props
+        fn = context.scene.drone_key_props.file_name
         blend_dir = os.path.dirname(bpy.data.filepath) if bpy.data.filepath else os.getcwd()
         current_frame = bpy.context.scene.frame_current
         storyboard = context.scene.skybrush.storyboard
         duration = 0
+        tb_entries = context.scene.time_bind.entries
+        index = context.scene.time_bind.active_index
+        if 0 <= index < len(tb_entries) and tb_entries:
+            current_frame = tb_entries[index].StartFrame
+            fn = tb_entries[index].Prefix
         for entry in storyboard.entries:
-            if entry.name.startswith(props.file_name):
+            if entry.name.startswith(fn):
                 duration = entry.duration
-        apply_key(os.path.join(blend_dir, props.file_name + KeydataStr), current_frame, duration)
-        import_light_effects_from_json(os.path.join(blend_dir, props.file_name + LightdataStr), current_frame, context)
-        update_texture_key(props.file_name + "_", current_frame)
-        add_timebind_prop(context, props.file_name + "_", current_frame)
+        apply_key(os.path.join(blend_dir, fn + KeydataStr), current_frame, duration)
+        import_light_effects_from_json(os.path.join(blend_dir, fn + LightdataStr), current_frame, context)
+        update_texture_key(fn + "_", current_frame)
+        add_timebind_prop(context, fn + "_", current_frame)
         self.report({'INFO'}, f"Keys loaded: {blend_dir}")
         return {'FINISHED'}
     
@@ -241,6 +246,14 @@ class TIMEBIND_OT_entry_remove(bpy.types.Operator):
         if tb.entries and tb.active_index >= 0:
             tb.entries.remove(tb.active_index)
             tb.active_index = min(tb.active_index, len(tb.entries) - 1)
+        return {'FINISHED'}
+    
+class TIMEBIND_OT_deselect(bpy.types.Operator):
+    bl_idname = "timebind.deselect"
+    bl_label = "Deselect"
+
+    def execute(self, context):
+        context.scene.time_bind.active_index = -1
         return {'FINISHED'}
 
 class TIMEBIND_OT_entry_move(bpy.types.Operator):
@@ -574,7 +587,9 @@ def export_key(context, br_path, pref):
                         frame = kp.co.x
                         value = kp.co.y
                         # 指定範囲のみ保存
-                        if frame_start <= frame <= frame_start + duration or duration == 0:
+                        if frame_start <= frame <= frame_start + duration:
+                            keys[fc.array_index].append((frame - frame_start, value))
+                        elif duration == 0:
                             keys[fc.array_index].append((frame, value))
 
             data.append({
@@ -644,6 +659,8 @@ class DRONE_PT_KeyTransfer(Panel):
         col.operator("timebind.entry_add", icon='ADD', text="")
         col.operator("timebind.entry_remove", icon='REMOVE', text="")
         col.separator()
+        col.operator("timebind.deselect", icon='RESTRICT_SELECT_ON', text="")
+        col.separator()
         col.operator("timebind.entry_move", icon='TRIA_UP', text="").direction = 'UP'
         col.operator("timebind.entry_move", icon='TRIA_DOWN', text="").direction = 'DOWN'
 
@@ -673,6 +690,7 @@ classes = (
     TIMEBIND_OT_entry_add,
     TIMEBIND_OT_entry_remove,
     TIMEBIND_OT_entry_move,
+    TIMEBIND_OT_deselect,
     TIMEBIND_OT_refresh,
 )
 
