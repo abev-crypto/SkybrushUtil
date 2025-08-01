@@ -431,9 +431,12 @@ class TIMEBIND_OT_shift_prefixes(bpy.types.Operator):
         if not prefixes:
             return {'CANCELLED'}
 
+        reverse = diff > 0
         for prefix in prefixes:
             matching_sb_entries = [sb for sb in storyboard.entries if sb.name.startswith(prefix)]
-            for sb_entry in sorted(matching_sb_entries, key=lambda e: e.frame_start, reverse=True):
+            for sb_entry in sorted(
+                matching_sb_entries, key=lambda e: e.frame_start, reverse=reverse
+            ):
                 start_frame = sb_entry.frame_start
                 duration = sb_entry.duration
                 sb_entry.frame_start += diff
@@ -458,6 +461,37 @@ class TIMEBIND_OT_shift_prefixes(bpy.types.Operator):
                 if le_entry.name.startswith(prefix):
                     le_entry.frame_start += diff
                     le_entry.frame_end += diff
+
+        return {'FINISHED'}
+
+
+class TIMEBIND_OT_create_animated_collection(bpy.types.Operator):
+    bl_idname = "timebind.create_animated_collection"
+    bl_label = "Create Animated Collection"
+    bl_description = (
+        "Create a collection for the active TimeBind prefix and link selected objects"
+    )
+
+    def execute(self, context):
+        scene = context.scene
+        tb = scene.time_bind
+        index = tb.active_index
+        if index < 0 or index >= len(tb.entries):
+            return {'CANCELLED'}
+
+        prefix = tb.entries[index].Prefix.replace("_", "")
+        if not prefix:
+            return {'CANCELLED'}
+
+        coll_name = prefix + "_Animated"
+        coll = bpy.data.collections.get(coll_name)
+        if coll is None:
+            coll = bpy.data.collections.new(coll_name)
+            scene.collection.children.link(coll)
+
+        for obj in context.selected_objects:
+            if obj.name not in coll.objects:
+                coll.objects.link(obj)
 
         return {'FINISHED'}
 
@@ -865,6 +899,9 @@ class DRONE_PT_KeyTransfer(Panel):
 
         layout.prop(sp, "shift_amount")
         layout.operator("timebind.shift_prefixes", text="Shift")
+        layout.operator(
+            "timebind.create_animated_collection", text="Create Animated Collection"
+        )
 
 # -------------------------------
 # 登録
@@ -892,6 +929,7 @@ classes = (
     TIMEBIND_OT_refresh,
     TIMEBIND_OT_add_shift_prefix,
     TIMEBIND_OT_remove_shift_prefix,
+    TIMEBIND_OT_create_animated_collection,
     TIMEBIND_OT_shift_prefixes,
 )
 
