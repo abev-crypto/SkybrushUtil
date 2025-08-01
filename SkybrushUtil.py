@@ -207,15 +207,16 @@ class DRONE_OT_shift_collecion(bpy.types.Operator):
     bl_label = "ShiftCollectionFrame"
 
     def execute(self, context):
+        """Create an "_Animated" collection, link selected objects, shift keys, and finish."""
         # 新しいコレクションを作成
         shift_collection_name = context.scene.drone_key_props.file_name + "_Animated"
         shift_collection = bpy.data.collections.new(shift_collection_name)
         bpy.context.scene.collection.children.link(shift_collection)
         
-        # 選択中のオブジェクトを新コレクションにリンク
+        # Link selected objects to the new collection (do not move them)
         selected_objects = bpy.context.selected_objects
         for obj in selected_objects:
-            # リンク（移動ではない）
+            # Link instead of move
             if obj.name not in shift_collection.objects:
                 shift_collection.objects.link(obj)
         shift_collection_key(shift_collection)
