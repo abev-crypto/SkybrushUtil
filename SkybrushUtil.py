@@ -145,6 +145,16 @@ class DRONE_OT_LoadKeys(Operator):
     bl_label = "Load Keys"
 
     def execute(self, context):
+        """
+        Load previously saved animation and effect data.
+
+        Steps:
+        1. Determine the prefix and start frame from the active TimeBind entry.
+        2. Apply keyframe data with the calculated frame offset.
+        3. Import light effect definitions.
+        4. Update texture animations and record the binding.
+        5. Report completion.
+        """
         fn = context.scene.drone_key_props.file_name
         blend_dir = os.path.dirname(bpy.data.filepath) if bpy.data.filepath else os.getcwd()
         current_frame = bpy.context.scene.frame_current
@@ -158,10 +168,10 @@ class DRONE_OT_LoadKeys(Operator):
         for entry in storyboard.entries:
             if entry.name.startswith(fn):
                 duration = entry.duration
-        apply_key(os.path.join(blend_dir, fn + KeydataStr), current_frame, duration)
-        import_light_effects_from_json(os.path.join(blend_dir, fn + LightdataStr), current_frame, context)
+        apply_key(os.path.join(blend_dir, fn + KeydataStr), current_frame, duration)  # Apply stored keyframe data
+        import_light_effects_from_json(os.path.join(blend_dir, fn + LightdataStr), current_frame, context)  # Import light effects
         update_texture_key(fn + "_", current_frame)
-        add_timebind_prop(context, fn + "_", current_frame)
+        add_timebind_prop(context, fn + "_", current_frame)  # Save TimeBind entry for quick access later
         self.report({'INFO'}, f"Keys loaded: {blend_dir}")
         return {'FINISHED'}
     
@@ -183,10 +193,10 @@ class DRONE_OT_LoadAllKeys(Operator):
         for sb_entry in storyboard.entries:
             pref = sb_entry.name.split("_")[0]
             if check_file(blend_dir, pref):
-                apply_key(os.path.join(blend_dir, pref + KeydataStr), sb_entry.frame_start, sb_entry.duration)
-                import_light_effects_from_json(os.path.join(blend_dir, pref + LightdataStr), sb_entry.frame_start, context)
+                apply_key(os.path.join(blend_dir, pref + KeydataStr), sb_entry.frame_start, sb_entry.duration)  # Apply keyframes for this prefix
+                import_light_effects_from_json(os.path.join(blend_dir, pref + LightdataStr), sb_entry.frame_start, context)  # Import related light effects
                 update_texture_key(pref + "_", sb_entry.frame_start)
-                add_timebind_prop(context, pref + "_", sb_entry.frame_start)
+                add_timebind_prop(context, pref + "_", sb_entry.frame_start)  # Remember TimeBind information
                 flog.append(pref)
         if flog:
             self.report({'INFO'}, f"Keys loaded: {blend_dir} from {flog}")
