@@ -261,8 +261,10 @@ class DRONE_OT_shift_collecion(bpy.types.Operator):
         shift_collection = bpy.data.collections.new(shift_collection_name)
         bpy.context.scene.collection.children.link(shift_collection)
         
-        # Link selected objects to the new collection (do not move them)
-        selected_objects = bpy.context.selected_objects
+        # Link objects selected in the Outliner (even if hidden in the viewport)
+        selected_objects = [
+            obj for obj in context.view_layer.objects if obj.select_get()
+        ]
         for obj in selected_objects:
             # Link instead of move
             if obj.name not in shift_collection.objects:
@@ -489,7 +491,10 @@ class TIMEBIND_OT_create_animated_collection(bpy.types.Operator):
             coll = bpy.data.collections.new(coll_name)
             scene.collection.children.link(coll)
 
-        for obj in context.selected_objects:
+        selected_objects = [
+            obj for obj in context.view_layer.objects if obj.select_get()
+        ]
+        for obj in selected_objects:
             if obj.name not in coll.objects:
                 coll.objects.link(obj)
 
