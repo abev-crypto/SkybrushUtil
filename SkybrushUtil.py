@@ -131,6 +131,11 @@ class DRONE_OT_SaveSignleKeys(Operator):
     bl_label = "Save Single Keys"
 
     def execute(self, context):
+        """Save keyframes for the current selection using the configured file name.
+
+        The keyframes are written to the directory of the active blend file and the
+        resulting path is reported.
+        """
         props = context.scene.drone_key_props
         blend_dir = os.path.dirname(bpy.data.filepath) if bpy.data.filepath else os.getcwd()
         export_key(context, blend_dir, props.file_name)
