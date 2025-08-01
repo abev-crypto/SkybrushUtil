@@ -185,6 +185,17 @@ class DRONE_OT_LoadAllKeys(Operator):
     bl_label = "Load All Keys"
 
     def execute(self, context):
+        """
+        Iterate through the storyboard and load key and light effect
+        data for each entry that has exported files.
+
+        A nested ``check_file`` helper scans a directory for files that
+        start with a given prefix. The method uses this helper on each
+        storyboard entry to decide whether to apply the stored keyframes
+        and light effect definitions. It also updates textures and
+        time-bind properties and collects the prefixes of successfully
+        processed entries to include in the report.
+        """
         def check_file(dir, name):
             # ディレクトリ内の全ファイルを取得
             for file_name in os.listdir(dir):
