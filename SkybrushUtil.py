@@ -638,10 +638,19 @@ class DRONE_PT_KeyTransfer(Panel):
     bl_category = "SBUtil"
 
     def draw(self, context):
+        """Construct the key transfer panel layout.
+
+        Displays the file-name property, buttons for saving and loading
+        data, the time-bind entry list, and controls for editing the
+        selected entry.
+        """
         layout = self.layout
         tb = context.scene.time_bind
 
+        # File name property
         layout.prop(context.scene.drone_key_props, "file_name")
+
+        # Operators
         layout.operator("drone.save_keys", text="Save")
         layout.operator("drone.save_single_keys", text="Key Save")
         layout.operator("drone.load_keys", text="Load")
@@ -650,18 +659,18 @@ class DRONE_PT_KeyTransfer(Panel):
         layout.operator("drone.shift_coll_frame", text="Shift Collection")
         layout.operator("timebind.goto_startframe", text="Goto Start")
 
-                # Refreshボタン
+        # Refresh button
         layout.operator("timebind.refresh", text="Refresh", icon='FILE_REFRESH')
 
-        # UIList
+        # Entry list and controls
         row = layout.row()
         row.template_list(
-            "TIMEBIND_UL_entries", "", 
-            tb, "entries", 
+            "TIMEBIND_UL_entries", "",
+            tb, "entries",
             tb, "active_index"
         )
 
-        # 右側の操作ボタン
+        # Control buttons
         col = row.column(align=True)
         col.operator("timebind.entry_add", icon='ADD', text="")
         col.operator("timebind.entry_remove", icon='REMOVE', text="")
@@ -671,7 +680,7 @@ class DRONE_PT_KeyTransfer(Panel):
         col.operator("timebind.entry_move", icon='TRIA_UP', text="").direction = 'UP'
         col.operator("timebind.entry_move", icon='TRIA_DOWN', text="").direction = 'DOWN'
 
-        # 詳細編集
+        # Entry editing
         if tb.entries and tb.active_index >= 0:
             entry = tb.entries[tb.active_index]
             box = layout.box()
