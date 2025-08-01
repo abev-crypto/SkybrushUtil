@@ -51,6 +51,7 @@ class TIMEBIND_UL_entries(bpy.types.UIList):
 class DRONE_OT_SaveKeys(Operator):
     bl_idname = "drone.save_keys"
     bl_label = "Save Keys"
+    bl_description = "Export keyframe and light effect data to JSON files"
 
     def execute(self, context):
         """
@@ -129,6 +130,7 @@ class DRONE_OT_SaveKeys(Operator):
 class DRONE_OT_SaveSignleKeys(Operator):
     bl_idname = "drone.save_single_keys"
     bl_label = "Save Single Keys"
+    bl_description = "Export keyframe data for the current selection to a JSON file"
 
     def execute(self, context):
         """Save keyframes for the current selection using the configured file name.
@@ -148,6 +150,7 @@ class DRONE_OT_SaveSignleKeys(Operator):
 class DRONE_OT_LoadKeys(Operator):
     bl_idname = "drone.load_keys"
     bl_label = "Load Keys"
+    bl_description = "Import keyframe and light effect data using the active TimeBind entry"
 
     def execute(self, context):
         """
@@ -183,6 +186,7 @@ class DRONE_OT_LoadKeys(Operator):
 class DRONE_OT_LoadAllKeys(Operator):
     bl_idname = "drone.load_all_keys"
     bl_label = "Load All Keys"
+    bl_description = "Import keyframe and light effect data for all storyboard entries with exported files"
 
     def execute(self, context):
         """
@@ -223,6 +227,7 @@ class DRONE_OT_LoadAllKeys(Operator):
 class LIGHTEFFECT_OTadd_prefix_le_tex(bpy.types.Operator):
     bl_idname = "drone.add_prefix"
     bl_label = "Add Prefix"
+    bl_description = "Prefix texture and light-effect names with the configured file name"
 
     def execute(self, context):
         add_prefix_le_tex(context)
@@ -231,6 +236,7 @@ class LIGHTEFFECT_OTadd_prefix_le_tex(bpy.types.Operator):
 class DRONE_OT_shift_collecion(bpy.types.Operator):
     bl_idname = "drone.shift_coll_frame"
     bl_label = "ShiftCollectionFrame"
+    bl_description = "Create an '_Animated' collection from the selection and shift its keys to the current frame"
 
     def execute(self, context):
         """Create an "_Animated" collection, link selected objects, shift keys, and finish."""
@@ -251,6 +257,7 @@ class DRONE_OT_shift_collecion(bpy.types.Operator):
 class TIMEBIND_OT_entry_add(bpy.types.Operator):
     bl_idname = "timebind.entry_add"
     bl_label = "Add TimeBind Entry"
+    bl_description = "Add a new TimeBind entry with a default prefix and start frame"
 
     def execute(self, context):
         add_timebind_prop(context, "ANYPREFIX", 0)
@@ -259,6 +266,7 @@ class TIMEBIND_OT_entry_add(bpy.types.Operator):
 class TIMEBIND_OT_goto_startframe(bpy.types.Operator):
     bl_idname = "timebind.goto_startframe"
     bl_label = "Goto StartFrame"
+    bl_description = "Jump to the storyboard start frame of the active TimeBind entry"
 
     def execute(self, context):
         tb_entries = context.scene.time_bind.entries
@@ -274,6 +282,7 @@ class TIMEBIND_OT_goto_startframe(bpy.types.Operator):
 class TIMEBIND_OT_entry_remove(bpy.types.Operator):
     bl_idname = "timebind.entry_remove"
     bl_label = "Remove TimeBind Entry"
+    bl_description = "Remove the active TimeBind entry from the list"
 
     def execute(self, context):
         tb = context.scene.time_bind
@@ -285,6 +294,7 @@ class TIMEBIND_OT_entry_remove(bpy.types.Operator):
 class TIMEBIND_OT_deselect(bpy.types.Operator):
     bl_idname = "timebind.deselect"
     bl_label = "Deselect"
+    bl_description = "Clear the TimeBind entry selection"
 
     def execute(self, context):
         context.scene.time_bind.active_index = -1
@@ -294,6 +304,7 @@ class TIMEBIND_OT_entry_move(bpy.types.Operator):
     """Move entry up or down"""
     bl_idname = "timebind.entry_move"
     bl_label = "Move Entry"
+    bl_description = "Move the active TimeBind entry up or down in the list"
     direction : bpy.props.EnumProperty(items=(('UP', "Up", ""), ('DOWN', "Down", "")))
 
     def execute(self, context):
@@ -312,6 +323,7 @@ class TIMEBIND_OT_refresh(bpy.types.Operator):
     and update matching light-effect frame ranges."""
     bl_idname = "timebind.refresh"
     bl_label = "Refresh TimeBind"
+    bl_description = "Sync TimeBind entries with the storyboard and adjust related keys"
 
     def execute(self, context):
         scene = context.scene
