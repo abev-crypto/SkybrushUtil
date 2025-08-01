@@ -434,6 +434,25 @@ class TIMEBIND_OT_shift_prefixes(bpy.types.Operator):
             return {'CANCELLED'}
 
         reverse = diff > 0
+
+        sb_infos = []
+        ranges = []
+        for sb in storyboard.entries:
+            start = sb.frame_start
+            duration = sb.duration
+            selected = any(sb.name.startswith(p) for p in prefixes)
+            sb_infos.append({"start": start, "duration": duration, "selected": selected})
+            if selected:
+                ranges.append((start, duration))
+
+        sb_infos.sort(key=lambda info: info["start"])
+        for prev, curr in zip(sb_infos, sb_infos[1:]):
+            if prev["selected"] and curr["selected"]:
+                gap_start = prev["start"] + prev["duration"]
+                gap_end = curr["start"]
+                if gap_end > gap_start:
+                    ranges.append((gap_start, gap_end - gap_start))
+
         for prefix in prefixes:
             matching_sb_entries = [sb for sb in storyboard.entries if sb.name.startswith(prefix)]
             for sb_entry in sorted(
@@ -451,9 +470,6 @@ class TIMEBIND_OT_shift_prefixes(bpy.types.Operator):
                         start_frame,
                         duration,
                     )
-                if drones_collection:
-                    move_material_keys(drones_collection.objects, start_frame, duration, diff)
-                    move_constraint_keys(drones_collection.objects, start_frame, duration, diff)
 
             for bind_entry in scene.time_bind.entries:
                 if bind_entry.Prefix.replace("_", "") == prefix:
@@ -463,6 +479,11 @@ class TIMEBIND_OT_shift_prefixes(bpy.types.Operator):
                 if le_entry.name.startswith(prefix):
                     le_entry.frame_start += diff
                     le_entry.frame_end += diff
+
+        if drones_collection:
+            for start_frame, duration in sorted(ranges, key=lambda r: r[0], reverse=reverse):
+                move_material_keys(drones_collection.objects, start_frame, duration, diff)
+                move_constraint_keys(drones_collection.objects, start_frame, duration, diff)
 
         return {'FINISHED'}
 
