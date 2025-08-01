@@ -53,6 +53,10 @@ class DRONE_OT_SaveKeys(Operator):
     bl_label = "Save Keys"
 
     def execute(self, context):
+        """
+        Workflow: prepare paths, export key data, export light effects,
+        and report completion.
+        """
         def convert_value(value):
             """Blender固有型やPropertyGroupをJSON化可能な値に変換"""
             if hasattr(value, "__annotations__"):
@@ -113,8 +117,11 @@ class DRONE_OT_SaveKeys(Operator):
         
         blend_dir = os.path.dirname(bpy.data.filepath) if bpy.data.filepath else os.getcwd()
         props = context.scene.drone_key_props
+        # Ensure textures and materials have prefixed names for export
         add_prefix_le_tex(context)
+        # Export keyframe data
         export_key(context, blend_dir, props.file_name)
+        # Export light effect definitions
         export_light_effects_to_json(os.path.join(blend_dir, props.file_name + LightdataStr))
         self.report({'INFO'}, f"Keys saved: {blend_dir}")
         return {'FINISHED'}
