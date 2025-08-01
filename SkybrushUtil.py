@@ -427,37 +427,37 @@ class TIMEBIND_OT_shift_prefixes(bpy.types.Operator):
         light_effects = scene.skybrush.light_effects
         drones_collection = bpy.data.collections.get("Drones")
 
-        idx = sp_list.active_index
-        if not (0 <= idx < len(sp_list.entries)):
+        prefixes = [entry.Prefix.replace("_", "") for entry in sp_list.entries]
+        if not prefixes:
             return {'CANCELLED'}
-        prefix = sp_list.entries[idx].Prefix
 
-        matching_sb_entries = [sb for sb in storyboard.entries if sb.name.startswith(prefix)]
-        for sb_entry in sorted(matching_sb_entries, key=lambda e: e.frame_start, reverse=True):
-            start_frame = sb_entry.frame_start
-            duration = sb_entry.duration
-            sb_entry.frame_start += diff
+        for prefix in prefixes:
+            matching_sb_entries = [sb for sb in storyboard.entries if sb.name.startswith(prefix)]
+            for sb_entry in sorted(matching_sb_entries, key=lambda e: e.frame_start, reverse=True):
+                start_frame = sb_entry.frame_start
+                duration = sb_entry.duration
+                sb_entry.frame_start += diff
 
-            update_texture_key(prefix, diff, start_frame, duration)
-            if prefix + "_Animated" in bpy.data.collections:
-                shift_collection_key(
-                    bpy.data.collections.get(prefix + "_Animated"),
-                    diff,
-                    start_frame,
-                    duration,
-                )
-            if drones_collection:
-                move_material_keys(drones_collection.objects, start_frame, duration, diff)
-                move_constraint_keys(drones_collection.objects, start_frame, duration, diff)
+                update_texture_key(prefix, diff, start_frame, duration)
+                if prefix + "_Animated" in bpy.data.collections:
+                    shift_collection_key(
+                        bpy.data.collections.get(prefix + "_Animated"),
+                        diff,
+                        start_frame,
+                        duration,
+                    )
+                if drones_collection:
+                    move_material_keys(drones_collection.objects, start_frame, duration, diff)
+                    move_constraint_keys(drones_collection.objects, start_frame, duration, diff)
 
-        for bind_entry in scene.time_bind.entries:
-            if bind_entry.Prefix == prefix:
-                bind_entry.StartFrame += diff
+            for bind_entry in scene.time_bind.entries:
+                if bind_entry.Prefix.replace("_", "") == prefix:
+                    bind_entry.StartFrame += diff
 
-        for le_entry in light_effects.entries:
-            if le_entry.name.startswith(prefix):
-                le_entry.frame_start += diff
-                le_entry.frame_end += diff
+            for le_entry in light_effects.entries:
+                if le_entry.name.startswith(prefix):
+                    le_entry.frame_start += diff
+                    le_entry.frame_end += diff
 
         return {'FINISHED'}
 
