@@ -33,16 +33,32 @@ class TimeBindEntry(bpy.types.PropertyGroup):
     Prefix : StringProperty(name="Prefix")
     StartFrame : bpy.props.IntProperty(name="Start Frame")
 
+class ShiftPrefixEntry(bpy.types.PropertyGroup):
+    Prefix : StringProperty(name="Prefix")
+
 # コレクション全体の管理用
 class TimeBindCollection(bpy.types.PropertyGroup):
     entries : bpy.props.CollectionProperty(type=TimeBindEntry)
     active_index : bpy.props.IntProperty()
+
+
+class ShiftPrefixList(bpy.types.PropertyGroup):
+    entries : bpy.props.CollectionProperty(type=ShiftPrefixEntry)
+    active_index : bpy.props.IntProperty()
+    shift_amount : bpy.props.IntProperty(name="Shift Frames", default=0)
 
 class TIMEBIND_UL_entries(bpy.types.UIList):
     """TimeBind entriesを表示するUIList"""
     def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
         # item: TimeBindEntry
         split = layout.split(factor=0.5)
+        split.label(text=item.Prefix if item.Prefix else "-")
+
+
+class TIMEBIND_UL_shift_prefixes(bpy.types.UIList):
+    """Shift prefix entriesを表示するUIList"""
+    def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
+        split = layout.split(factor=1.0)
         split.label(text=item.Prefix if item.Prefix else "-")
 
 # -------------------------------
@@ -345,76 +361,181 @@ class TIMEBIND_OT_refresh(bpy.types.Operator):
                         if le_entry.name.startswith(bind_entry.Prefix):
                             le_entry.frame_start += diff  # shift start frame
                             le_entry.frame_end += diff    # shift end frame
-                    
+
                     update_texture_key(bind_entry.Prefix, diff)
                     if bind_entry.Prefix + "_Animated" in bpy.data.collections:
-                        shift_collection_key(bpy.data.collections.get(bind_entry.Prefix + "_Animated"))
+                        shift_collection_key(
+                            bpy.data.collections.get(bind_entry.Prefix + "_Animated"),
+                            diff,
+                            bind_entry.StartFrame,
+                            sb_entry.duration,
+                        )
                     # Drones内のオブジェクトキーを移動
                     if drones_collection:
-                        self.move_material_keys(drones_collection.objects,
-                                                bind_entry.StartFrame,
-                                                sb_entry.duration,  # Duration使う
-                                                diff)
+                        move_material_keys(
+                            drones_collection.objects,
+                            bind_entry.StartFrame,
+                            sb_entry.duration,  # Duration使う
+                            diff,
+                        )
                     # TimeBindをStoryboardに同期
                     bind_entry.StartFrame = sb_entry.frame_start
         return {'FINISHED'}
 
-    def move_material_keys(self, objects, start_frame, duration, diff):
-        end_frame = start_frame + duration
 
-        for obj in objects:
-            # オブジェクトにマテリアルがなければスキップ
-            if not obj.material_slots:
-                continue
+class TIMEBIND_OT_add_shift_prefix(bpy.types.Operator):
+    bl_idname = "timebind.add_shift_prefix"
+    bl_label = "Add Shift Prefix"
+    bl_description = "Add active TimeBind prefix to the shift list"
 
-            for slot in obj.material_slots:
-                mat = slot.material
-                if not mat or not mat.node_tree:
-                    continue
+    def execute(self, context):
+        tb = context.scene.time_bind
+        sp_list = context.scene.shift_prefix_list
+        if tb.entries and 0 <= tb.active_index < len(tb.entries):
+            pref = tb.entries[tb.active_index].Prefix
+            if pref and all(p.Prefix != pref for p in sp_list.entries):
+                new = sp_list.entries.add()
+                new.Prefix = pref
+                sp_list.active_index = len(sp_list.entries) - 1
+        return {'FINISHED'}
 
-                # マテリアル内のノード探索（RGBA入力を持つノード）
-                for node in mat.node_tree.nodes:
-                    if not node.inputs or node.inputs[0].type != 'RGBA':
-                        continue
 
-                    # アクション(F-Curve)があるかチェック
-                    anim = mat.node_tree.animation_data
-                    if not anim or not anim.action:
-                        continue
+class TIMEBIND_OT_remove_shift_prefix(bpy.types.Operator):
+    bl_idname = "timebind.remove_shift_prefix"
+    bl_label = "Remove Shift Prefix"
+    bl_description = "Remove selected prefix from the shift list"
 
-                    for fcurve in anim.action.fcurves:
-                        # default_value だけ対象（R,G,B,Aそれぞれindex別）
-                        if "default_value" not in fcurve.data_path:
-                            continue
+    def execute(self, context):
+        sp_list = context.scene.shift_prefix_list
+        idx = sp_list.active_index
+        if 0 <= idx < len(sp_list.entries):
+            sp_list.entries.remove(idx)
+            sp_list.active_index = min(max(0, idx - 1), len(sp_list.entries) - 1)
+        return {'FINISHED'}
 
-                        for keyframe in fcurve.keyframe_points:
-                            frame = keyframe.co.x
-                            if start_frame <= frame <= end_frame:
-                                keyframe.co.x += diff
-                                keyframe.handle_left.x += diff
-                                keyframe.handle_right.x += diff
 
-def shift_collection_key(shift_collection):
+class TIMEBIND_OT_shift_prefixes(bpy.types.Operator):
+    bl_idname = "timebind.shift_prefixes"
+    bl_label = "Shift Prefixes"
+    bl_description = "Shift storyboard and related keys for prefixes in the shift list"
+
+    def execute(self, context):
+        scene = context.scene
+        sp_list = scene.shift_prefix_list
+        diff = sp_list.shift_amount
+        storyboard = scene.skybrush.storyboard
+        light_effects = scene.skybrush.light_effects
+        drones_collection = bpy.data.collections.get("Drones")
+
+        idx = sp_list.active_index
+        if not (0 <= idx < len(sp_list.entries)):
+            return {'CANCELLED'}
+        prefix = sp_list.entries[idx].Prefix
+
+        matching_sb_entries = [sb for sb in storyboard.entries if sb.name.startswith(prefix)]
+        for sb_entry in sorted(matching_sb_entries, key=lambda e: e.frame_start, reverse=True):
+            start_frame = sb_entry.frame_start
+            duration = sb_entry.duration
+            sb_entry.frame_start += diff
+
+            update_texture_key(prefix, diff, start_frame, duration)
+            if prefix + "_Animated" in bpy.data.collections:
+                shift_collection_key(
+                    bpy.data.collections.get(prefix + "_Animated"),
+                    diff,
+                    start_frame,
+                    duration,
+                )
+            if drones_collection:
+                move_material_keys(drones_collection.objects, start_frame, duration, diff)
+                move_constraint_keys(drones_collection.objects, start_frame, duration, diff)
+
+        for bind_entry in scene.time_bind.entries:
+            if bind_entry.Prefix == prefix:
+                bind_entry.StartFrame += diff
+
+        for le_entry in light_effects.entries:
+            if le_entry.name.startswith(prefix):
+                le_entry.frame_start += diff
+                le_entry.frame_end += diff
+
+        return {'FINISHED'}
+
+
+def shift_collection_key(shift_collection, diff=None, start_frame=None, duration=None):
     # === 設定 ===
-    shift_amount = bpy.context.scene.frame_current  # 現在フレーム分シフト
+    shift_amount = bpy.context.scene.frame_current if diff is None else diff
 
-        # --- 汎用キーシフト関数 ---
-    def shift_keyframes(anim_data, amount):
+    end_frame = start_frame + duration if start_frame is not None and duration is not None else None
+
+    def shift_keyframes(anim_data, amount, start, end):
         if anim_data and anim_data.action:
             for fcurve in anim_data.action.fcurves:
                 for keyframe in fcurve.keyframe_points:
-                    keyframe.co.x += amount
-                    keyframe.handle_left.x += amount
-                    keyframe.handle_right.x += amount
+                    frame = keyframe.co.x
+                    if start is None or (start <= frame <= end):
+                        keyframe.co.x += amount
+                        keyframe.handle_left.x += amount
+                        keyframe.handle_right.x += amount
 
     # --- コレクション内すべてのオブジェクト処理 ---
     for obj in shift_collection.all_objects:
         # オブジェクト本体
-        shift_keyframes(obj.animation_data, shift_amount)
+        shift_keyframes(obj.animation_data, shift_amount, start_frame, end_frame)
 
         # シェイプキー
         if obj.data and hasattr(obj.data, "shape_keys") and obj.data.shape_keys:
-            shift_keyframes(obj.data.shape_keys.animation_data, shift_amount)
+            shift_keyframes(obj.data.shape_keys.animation_data, shift_amount, start_frame, end_frame)
+
+def move_material_keys(objects, start_frame, duration, diff):
+    end_frame = start_frame + duration
+
+    for obj in objects:
+        if not obj.material_slots:
+            continue
+
+        for slot in obj.material_slots:
+            mat = slot.material
+            if not mat or not mat.node_tree:
+                continue
+
+            for node in mat.node_tree.nodes:
+                if not node.inputs or node.inputs[0].type != 'RGBA':
+                    continue
+
+                anim = mat.node_tree.animation_data
+                if not anim or not anim.action:
+                    continue
+
+                for fcurve in anim.action.fcurves:
+                    if "default_value" not in fcurve.data_path:
+                        continue
+
+                    for keyframe in fcurve.keyframe_points:
+                        frame = keyframe.co.x
+                        if start_frame <= frame <= end_frame:
+                            keyframe.co.x += diff
+                            keyframe.handle_left.x += diff
+                            keyframe.handle_right.x += diff
+
+def move_constraint_keys(objects, start_frame, duration, diff):
+    end_frame = start_frame + duration
+
+    for obj in objects:
+        anim = obj.animation_data
+        if not anim or not anim.action:
+            continue
+
+        for fcurve in anim.action.fcurves:
+            if "constraints[" not in fcurve.data_path:
+                continue
+
+            for keyframe in fcurve.keyframe_points:
+                frame = keyframe.co.x
+                if start_frame <= frame <= end_frame:
+                    keyframe.co.x += diff
+                    keyframe.handle_left.x += diff
+                    keyframe.handle_right.x += diff
 
 def add_timebind_prop(context, prefix, frame):
     tb = context.scene.time_bind
@@ -427,8 +548,9 @@ def add_timebind_prop(context, prefix, frame):
     new_entry.StartFrame = frame
     tb.active_index = len(tb.entries) - 1
 
-def update_texture_key(prefix, diff):
+def update_texture_key(prefix, diff, start_frame=None, duration=None):
     # 全テクスチャをチェック
+    end_frame = start_frame + duration if start_frame is not None and duration is not None else None
     for tex in bpy.data.textures:
         # 名前が prefix で始まる場合のみ処理
         if tex.name.startswith(prefix):
@@ -436,10 +558,11 @@ def update_texture_key(prefix, diff):
                 action = tex.animation_data.action
                 for fcurve in action.fcurves:
                     for keyframe in fcurve.keyframe_points:
-                        # フレーム位置を +CurrentFrame
-                        keyframe.co.x += diff
-                        keyframe.handle_left.x += diff
-                        keyframe.handle_right.x += diff
+                        frame = keyframe.co.x
+                        if start_frame is None or (start_frame <= frame <= end_frame):
+                            keyframe.co.x += diff
+                            keyframe.handle_left.x += diff
+                            keyframe.handle_right.x += diff
 
                 # 更新を通知
                 for fcurve in action.fcurves:
@@ -728,6 +851,21 @@ class DRONE_PT_KeyTransfer(Panel):
             box.prop(entry, "Prefix")
             box.prop(entry, "StartFrame")
 
+        # Shift prefix list and controls
+        sp = context.scene.shift_prefix_list
+        row = layout.row()
+        row.template_list(
+            "TIMEBIND_UL_shift_prefixes", "",
+            sp, "entries",
+            sp, "active_index",
+        )
+        col = row.column(align=True)
+        col.operator("timebind.add_shift_prefix", icon='ADD', text="")
+        col.operator("timebind.remove_shift_prefix", icon='REMOVE', text="")
+
+        layout.prop(sp, "shift_amount")
+        layout.operator("timebind.shift_prefixes", text="Shift")
+
 # -------------------------------
 # 登録
 # -------------------------------
@@ -742,13 +880,19 @@ classes = (
     LIGHTEFFECT_OTadd_prefix_le_tex,
     TIMEBIND_OT_goto_startframe,
     TimeBindEntry,
+    ShiftPrefixEntry,
+    ShiftPrefixList,
     TimeBindCollection,
     TIMEBIND_UL_entries,
+    TIMEBIND_UL_shift_prefixes,
     TIMEBIND_OT_entry_add,
     TIMEBIND_OT_entry_remove,
     TIMEBIND_OT_entry_move,
     TIMEBIND_OT_deselect,
     TIMEBIND_OT_refresh,
+    TIMEBIND_OT_add_shift_prefix,
+    TIMEBIND_OT_remove_shift_prefix,
+    TIMEBIND_OT_shift_prefixes,
 )
 
 def register():
@@ -756,12 +900,14 @@ def register():
         bpy.utils.register_class(cls)
     bpy.types.Scene.drone_key_props = bpy.props.PointerProperty(type=DroneKeyTransferProperties)
     bpy.types.Scene.time_bind = bpy.props.PointerProperty(type=TimeBindCollection)
+    bpy.types.Scene.shift_prefix_list = bpy.props.PointerProperty(type=ShiftPrefixList)
 
 def unregister():
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
     del bpy.types.Scene.drone_key_props
     del bpy.types.Scene.time_bind
+    del bpy.types.Scene.shift_prefix_list
 
 if __name__ == "__main__":
     register()
