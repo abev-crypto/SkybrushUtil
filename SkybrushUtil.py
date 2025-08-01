@@ -281,6 +281,8 @@ class TIMEBIND_OT_entry_move(bpy.types.Operator):
         return {'FINISHED'}
     
 class TIMEBIND_OT_refresh(bpy.types.Operator):
+    """Recalculate frame offsets between storyboard and TimeBind entries
+    and update matching light-effect frame ranges."""
     bl_idname = "timebind.refresh"
     bl_label = "Refresh TimeBind"
 
@@ -296,14 +298,14 @@ class TIMEBIND_OT_refresh(bpy.types.Operator):
             # Storyboardエントリ検索
             for sb_entry in storyboard.entries:
                 if sb_entry.name.startswith(bind_entry.Prefix):
-                    # 差分計算
+                    # Calculate frame offset between storyboard and TimeBind entry
                     diff = sb_entry.frame_start - bind_entry.StartFrame
 
-                    # light_effectsのPrefix一致（startswith）
+                    # Apply the offset to light effect frame ranges with matching prefixes
                     for le_entry in light_effects.entries:
                         if le_entry.name.startswith(bind_entry.Prefix):
-                            le_entry.frame_start += diff
-                            le_entry.frame_end += diff
+                            le_entry.frame_start += diff  # shift start frame
+                            le_entry.frame_end += diff    # shift end frame
                     
                     update_texture_key(bind_entry.Prefix, diff)
                     if bind_entry.Prefix + "_Animated" in bpy.data.collections:
