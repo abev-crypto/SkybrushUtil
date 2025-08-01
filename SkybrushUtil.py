@@ -19,6 +19,67 @@ KeydataStr = "_KeyData.json"
 LightdataStr = "_LightData.json"
 
 # -------------------------------
+# LightEffect Export Helpers
+# -------------------------------
+def convert_value(value):
+    """Blender固有型やPropertyGroupをJSON化可能な値に変換"""
+    if hasattr(value, "__annotations__"):
+        return propertygroup_to_dict(value)
+
+    if isinstance(value, bpy.types.bpy_prop_collection):
+        return [convert_value(item) for item in value]
+
+    if isinstance(value, bpy.types.ID):
+        if isinstance(value, bpy.types.Image):
+            return value.filepath_raw or value.name
+        return value.name
+
+    return value
+
+
+def convert_color_ramp(texture):
+    """ColorRamp情報を辞書化"""
+    data = []
+    if texture and hasattr(texture, "color_ramp"):
+        color_ramp = texture.color_ramp
+        for elem in color_ramp.elements:
+            data.append({
+                "position": elem.position,
+                "color": [round(c, 3) for c in elem.color],
+            })
+    return data
+
+
+def propertygroup_to_dict(pg):
+    """PropertyGroupを辞書化（name含める）"""
+    data = {"name": pg.name}
+    for prop in pg.__annotations__.keys():
+        val = getattr(pg, prop)
+        data[prop] = convert_value(val)
+    if getattr(pg, "type", None) == "COLOR_RAMP":
+        texture = getattr(pg, "texture", None)
+        data["color_ramp"] = convert_color_ramp(texture)
+    return data
+
+
+def export_light_effects_to_json(filepath, context):
+    scene = context.scene
+    light_effects = scene.skybrush.light_effects.entries
+    effects_data = [propertygroup_to_dict(effect) for effect in light_effects]
+    with open(filepath, "w", encoding="utf-8") as f:
+        json.dump(effects_data, f, ensure_ascii=False, indent=4)
+
+
+def active_timebind_prefix(context, default_name):
+    """Return the active TimeBind prefix or a sanitized default."""
+    tb = context.scene.time_bind
+    entries = tb.entries
+    index = tb.active_index
+    if 0 <= index < len(entries):
+        return entries[index].Prefix.rstrip("_")
+    return default_name.rstrip("_")
+
+# -------------------------------
 # プロパティ
 # -------------------------------
 class DroneKeyTransferProperties(PropertyGroup):
@@ -70,76 +131,18 @@ class DRONE_OT_SaveKeys(Operator):
     bl_description = "Export keyframe and light effect data to JSON files"
 
     def execute(self, context):
-        """
-        Workflow: prepare paths, export key data, export light effects,
-        and report completion.
-        """
-        def convert_value(value):
-            """Blender固有型やPropertyGroupをJSON化可能な値に変換"""
-            if hasattr(value, "__annotations__"):
-                return propertygroup_to_dict(value)
-
-            if isinstance(value, bpy.types.bpy_prop_collection):
-                return [convert_value(item) for item in value]
-
-            if isinstance(value, bpy.types.ID):
-                # Imageならパス優先、なければ名前
-                if isinstance(value, bpy.types.Image):
-                    return value.filepath_raw or value.name
-                # 他のBlenderデータは名前のみ
-                return value.name
-
-            return value
-
-        def convert_color_ramp(texture):
-            """ColorRamp情報を辞書化"""
-            data = []
-            if texture and hasattr(texture, "color_ramp"):
-                color_ramp = texture.color_ramp
-                for elem in color_ramp.elements:
-                    data.append({
-                        "position": elem.position,
-                        "color": [round(c, 3) for c in elem.color]  # RGBAを0〜1で小数3桁
-                    })
-            return data
-
-        def propertygroup_to_dict(pg):
-            """PropertyGroupを辞書化（name含める）"""
-            data = {}
-
-            # まず name を追加（UIリストでの表示名）
-            data["name"] = pg.name
-
-            # 登録されているプロパティを辞書化
-            for prop in pg.__annotations__.keys():
-                val = getattr(pg, prop)
-                data[prop] = convert_value(val)
-
-            # type == COLOR_RAMP の場合、color_ramp情報を追加
-            if getattr(pg, "type", None) == "COLOR_RAMP":
-                texture = getattr(pg, "texture", None)
-                data["color_ramp"] = convert_color_ramp(texture)
-
-            return data
-
-        def export_light_effects_to_json(filepath):
-            scene = bpy.context.scene
-            light_effects = scene.skybrush.light_effects.entries
-            
-            effects_data = [propertygroup_to_dict(effect) for effect in light_effects]
-
-            with open(filepath, 'w', encoding='utf-8') as f:
-                json.dump(effects_data, f, ensure_ascii=False, indent=4)
-                props = context.scene.drone_key_props
-        
+        """Prepare paths, export key data and light effects, and report."""
         blend_dir = os.path.dirname(bpy.data.filepath) if bpy.data.filepath else os.getcwd()
         props = context.scene.drone_key_props
+        prefix = active_timebind_prefix(context, props.file_name)
         # Ensure textures and materials have prefixed names for export
         add_prefix_le_tex(context)
         # Export keyframe data
-        export_key(context, blend_dir, props.file_name)
+        export_key(context, blend_dir, prefix)
         # Export light effect definitions
-        export_light_effects_to_json(os.path.join(blend_dir, props.file_name + LightdataStr))
+        export_light_effects_to_json(
+            os.path.join(blend_dir, prefix + LightdataStr), context
+        )
         self.report({'INFO'}, f"Keys saved: {blend_dir}")
         return {'FINISHED'}
     
@@ -156,8 +159,25 @@ class DRONE_OT_SaveSignleKeys(Operator):
         """
         props = context.scene.drone_key_props
         blend_dir = os.path.dirname(bpy.data.filepath) if bpy.data.filepath else os.getcwd()
-        export_key(context, blend_dir, props.file_name)
+        prefix = active_timebind_prefix(context, props.file_name)
+        export_key(context, blend_dir, prefix)
         self.report({'INFO'}, f"Keys saved: {blend_dir}")
+        return {'FINISHED'}
+
+
+class DRONE_OT_SaveLightEffects(Operator):
+    bl_idname = "drone.save_light_effects"
+    bl_label = "Save Light Effects"
+    bl_description = "Export light effect data to a JSON file"
+
+    def execute(self, context):
+        props = context.scene.drone_key_props
+        blend_dir = os.path.dirname(bpy.data.filepath) if bpy.data.filepath else os.getcwd()
+        prefix = active_timebind_prefix(context, props.file_name)
+        export_light_effects_to_json(
+            os.path.join(blend_dir, prefix + LightdataStr), context
+        )
+        self.report({'INFO'}, f"Light effects saved: {blend_dir}")
         return {'FINISHED'}
 
 # -------------------------------
@@ -797,6 +817,8 @@ def apply_key(filepath, frame_offset, duration=0):
         available_objects.remove(nearest_obj)
 
 def export_key(context, br_path, pref):
+    pref = active_timebind_prefix(context, pref)
+
     def extract():
         for obj in drones_collection.objects:
             mat = obj.active_material
@@ -837,10 +859,6 @@ def export_key(context, br_path, pref):
     frame_start = 0
     duration = 0
     storyboard = context.scene.skybrush.storyboard
-    tb_entries = context.scene.time_bind.entries
-    index = context.scene.time_bind.active_index
-    if 0 <= index < len(tb_entries) and tb_entries:
-        pref = tb_entries[index].Prefix
     for sb_entry in storyboard.entries:
         if pref == sb_entry.name.split("_")[0]:
             frame_start = sb_entry.frame_start
@@ -877,6 +895,7 @@ class DRONE_PT_KeyTransfer(Panel):
         # Operators
         layout.operator("drone.save_keys", text="Save")
         layout.operator("drone.save_single_keys", text="Key Save")
+        layout.operator("drone.save_light_effects", text="Light Save")
         layout.operator("drone.load_keys", text="Load")
         layout.operator("drone.load_all_keys", text="All Load")
         layout.operator("drone.add_prefix", text="Add Prefix")
@@ -937,6 +956,7 @@ classes = (
     DRONE_OT_shift_collecion,
     DRONE_OT_SaveKeys,
     DRONE_OT_SaveSignleKeys,
+    DRONE_OT_SaveLightEffects,
     DRONE_OT_LoadKeys,
     DRONE_PT_KeyTransfer,
     DRONE_OT_LoadAllKeys,
