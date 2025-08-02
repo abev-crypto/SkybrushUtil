@@ -259,6 +259,52 @@ class DRONE_OT_LoadAllKeys(Operator):
         else:
             self.report({'INFO'}, "Not loaded")
         return {'FINISHED'}
+
+
+class DRONE_OT_RecalcTransitionsWithKeys(Operator):
+    """Recalculate transitions and reapply stored material keys"""
+
+    bl_idname = "drone.recalc_transitions_with_keys"
+    bl_label = "Recalc Transitions With Keys"
+    bl_description = (
+        "Save material keys for each storyboard entry, recalculate transitions, and"
+        " reapply the keys to the recalculated positions"
+    )
+
+    scope: bpy.props.EnumProperty(
+        items=[
+            ("FROM_SELECTED", "From selected formation", ""),
+            ("TO_SELECTED", "To selected formation", ""),
+            ("ALL", "Entire storyboard", ""),
+        ],
+        name="Scope",
+        description="Scope of the transition recalculation",
+        default="ALL",
+    )
+
+    def execute(self, context):
+        blend_dir = os.path.dirname(bpy.data.filepath) if bpy.data.filepath else os.getcwd()
+        storyboard = context.scene.skybrush.storyboard
+
+        prefixes = []
+        for sb_entry in storyboard.entries:
+            pref = sb_entry.name.split("_")[0]
+            prefixes.append(pref)
+            export_key(context, blend_dir, pref)
+
+        bpy.ops.skybrush.recalculate_transitions(scope=self.scope)
+
+        for sb_entry in storyboard.entries:
+            pref = sb_entry.name.split("_")[0]
+            if pref in prefixes:
+                apply_key(
+                    os.path.join(blend_dir, pref + KeydataStr),
+                    sb_entry.frame_start,
+                    sb_entry.duration,
+                )
+
+        self.report({'INFO'}, f"Transitions recalculated ({self.scope}) and keys reloaded")
+        return {'FINISHED'}
   
 class LIGHTEFFECT_OTadd_prefix_le_tex(bpy.types.Operator):
     bl_idname = "drone.add_prefix"
@@ -900,6 +946,11 @@ class DRONE_PT_KeyTransfer(Panel):
         layout.operator("drone.load_all_keys", text="All Load")
         layout.operator("drone.add_prefix", text="Add Prefix")
         layout.operator("drone.shift_coll_frame", text="Shift Collection")
+        layout.operator_menu_enum(
+            "drone.recalc_transitions_with_keys",
+            "scope",
+            text="Recalc Reload",
+        )
         layout.operator("timebind.goto_startframe", text="Goto Start")
 
         # Refresh button
@@ -960,6 +1011,7 @@ classes = (
     DRONE_OT_LoadKeys,
     DRONE_PT_KeyTransfer,
     DRONE_OT_LoadAllKeys,
+    DRONE_OT_RecalcTransitionsWithKeys,
     LIGHTEFFECT_OTadd_prefix_le_tex,
     TIMEBIND_OT_goto_startframe,
     TimeBindEntry,
