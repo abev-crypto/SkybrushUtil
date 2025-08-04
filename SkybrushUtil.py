@@ -14,6 +14,7 @@ from bpy.types import Panel, Operator, PropertyGroup
 from mathutils import Vector
 import json, os
 from sbstudio.plugin.operators import RecalculateTransitionsOperator
+from sbstudio.plugin.operators.base import StoryboardOperator
 
 
 KeydataStr = "_KeyData.json"
@@ -937,52 +938,51 @@ def _entries_for_scope(storyboard, scene, scope):
         return entries[active:]
     return entries
 
+class Patched_RTOP(StoryboardOperator):
+    def execute(self, context):
+        blend_dir = os.path.dirname(bpy.data.filepath) if bpy.data.filepath else os.getcwd()
+        storyboard = context.scene.skybrush.storyboard
+        
+        tb = context.scene.time_bind
+        original_index = tb.active_index
+        tb.active_index = -1
 
-def patched_execute(self, storyboard, entries, context):
-    blend_dir = os.path.dirname(bpy.data.filepath) if bpy.data.filepath else os.getcwd()
+        targets = _entries_for_scope(storyboard, context.scene, self.scope)
+        prefixes = [sb.name.split("_")[0] for sb in targets]
+        for pref in prefixes:
+            print(pref)
+            export_key(context, blend_dir, pref)
 
-    tb = context.scene.time_bind
-    original_index = tb.active_index
-    tb.active_index = -1
+        tb.active_index = original_index
+        result = self._original_execute(context)
 
-    targets = _entries_for_scope(storyboard, context.scene, self.scope)
-    prefixes = [sb.name.split("_")[0] for sb in targets]
-    for pref in prefixes:
-        print(pref)
-        export_key(context, blend_dir, pref)
+        for pref in prefixes:
+            sb_entry = next(
+                (sb for sb in storyboard.entries if sb.name.startswith(pref)),
+                None,
+            )
+            if not sb_entry:
+                continue
+            apply_key(
+                os.path.join(blend_dir, pref + KeydataStr),
+                sb_entry.frame_start,
+                sb_entry.duration,
+            )
 
-    tb.active_index = original_index
-    result = _original_execute(self, storyboard, entries, context)
-
-    for pref in prefixes:
-        sb_entry = next(
-            (sb for sb in storyboard.entries if sb.name.startswith(pref)),
-            None,
-        )
-        if not sb_entry:
-            continue
-        apply_key(
-            os.path.join(blend_dir, pref + KeydataStr),
-            sb_entry.frame_start,
-            sb_entry.duration,
-        )
-
-    return result
+        return result
 
 
 def patch_recalculate_operator():
-    global _original_execute
     if _original_execute is None:
-        _original_execute = RecalculateTransitionsOperator.execute_on_storyboard
-        RecalculateTransitionsOperator.execute_on_storyboard = patched_execute
+        RecalculateTransitionsOperator._original_execute = RecalculateTransitionsOperator.execute
+        RecalculateTransitionsOperator.execute = Patched_RTOP.execute
         print("patch success!")
 
 
 def unpatch_recalculate_operator():
-    global _original_execute
     if _original_execute:
-        RecalculateTransitionsOperator.execute_on_storyboard = _original_execute
-        _original_execute = None
+        RecalculateTransitionsOperator.execute = _original_execute
+        RecalculateTransitionsOperator._original_execute = None
 
 
 def try_patch():
