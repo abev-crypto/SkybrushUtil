@@ -1,7 +1,7 @@
 bl_info = {
     "name": "SkyBrushUtil",
     "author": "ABEYUYA",
-    "version": (1, 8),
+    "version": (1, 9),
     "blender": (4, 3, 0),
     "location": "3D View > Sidebar > SBUtil",
     "description": "SkybrushTransfarUtil",
@@ -13,6 +13,7 @@ from bpy.props import StringProperty
 from bpy.types import Panel, Operator, PropertyGroup
 from mathutils import Vector
 import json, os
+from sbstudio.plugin.operators import RecalculateTransitionsOperator
 
 
 KeydataStr = "_KeyData.json"
@@ -827,7 +828,7 @@ def apply_key(filepath, frame_offset, duration=0):
     
     drones_collection = bpy.data.collections.get("Drones")
     available_objects = list(drones_collection.objects)
-    if duration is not 0:
+    if duration != 0:
         for obj in available_objects:
             mat = obj.active_material
             anim = mat.node_tree.animation_data
@@ -948,6 +949,7 @@ def patched_execute(self, context):
     targets = _entries_for_scope(storyboard, context.scene, self.scope)
     prefixes = [sb.name.split("_")[0] for sb in targets]
     for pref in prefixes:
+        print(pref)
         export_key(context, blend_dir, pref)
 
     tb.active_index = original_index
@@ -972,9 +974,12 @@ def patched_execute(self, context):
 def patch_recalculate_operator():
     global _original_execute
     op_cls = getattr(bpy.types, "RecalculateTransitionsOperator", None)
-    if op_cls and _original_execute is None:
-        _original_execute = op_cls.execute
-        op_cls.execute = patched_execute
+    if _original_execute is None:
+        _original_execute = RecalculateTransitionsOperator.execute_on_storyboard
+        RecalculateTransitionsOperator.execute_on_storyboard = patched_execute
+        print("patch success!")
+    else:
+        print(op_cls)
 
 
 def unpatch_recalculate_operator():
