@@ -938,9 +938,8 @@ def _entries_for_scope(storyboard, scene, scope):
     return entries
 
 
-def patched_execute(self, context):
+def patched_execute(self, storyboard, entries, context):
     blend_dir = os.path.dirname(bpy.data.filepath) if bpy.data.filepath else os.getcwd()
-    storyboard = context.scene.skybrush.storyboard
 
     tb = context.scene.time_bind
     original_index = tb.active_index
@@ -953,7 +952,7 @@ def patched_execute(self, context):
         export_key(context, blend_dir, pref)
 
     tb.active_index = original_index
-    result = _original_execute(self, context)
+    result = _original_execute(self, storyboard, entries, context)
 
     for pref in prefixes:
         sb_entry = next(
@@ -973,26 +972,25 @@ def patched_execute(self, context):
 
 def patch_recalculate_operator():
     global _original_execute
-    op_cls = getattr(bpy.types, "RecalculateTransitionsOperator", None)
     if _original_execute is None:
         _original_execute = RecalculateTransitionsOperator.execute_on_storyboard
         RecalculateTransitionsOperator.execute_on_storyboard = patched_execute
         print("patch success!")
-    else:
-        print(op_cls)
 
 
 def unpatch_recalculate_operator():
     global _original_execute
     if _original_execute:
-        bpy.types.RecalculateTransitionsOperator.execute = _original_execute
+        RecalculateTransitionsOperator.execute_on_storyboard = _original_execute
         _original_execute = None
 
 
 def try_patch():
-    patch_recalculate_operator()
-    if not getattr(bpy.types, "RecalculateTransitionsOperator", None):
+    try:
+        patch_recalculate_operator()
+    except Exception:
         return 0.5
+    bpy.app.timers.unregister(try_patch)
     return None
 
 
