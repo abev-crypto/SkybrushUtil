@@ -918,8 +918,6 @@ def export_key(context, br_path, pref):
 
 
 # ======= Recalculate Operator Patch =======
-_original_execute = None
-
 
 def _entries_for_scope(storyboard, scene, scope):
     entries = list(storyboard.entries)
@@ -942,7 +940,7 @@ class Patched_RTOP(StoryboardOperator):
     def execute(self, context):
         blend_dir = os.path.dirname(bpy.data.filepath) if bpy.data.filepath else os.getcwd()
         storyboard = context.scene.skybrush.storyboard
-        
+
         tb = context.scene.time_bind
         original_index = tb.active_index
         tb.active_index = -1
@@ -973,15 +971,14 @@ class Patched_RTOP(StoryboardOperator):
 
 
 def patch_recalculate_operator():
-    if _original_execute is None:
-        RecalculateTransitionsOperator._original_execute = RecalculateTransitionsOperator.execute
-        RecalculateTransitionsOperator.execute = Patched_RTOP.execute
-        print("patch success!")
+    RecalculateTransitionsOperator._original_execute = RecalculateTransitionsOperator.execute
+    RecalculateTransitionsOperator.execute = Patched_RTOP.execute
+    print("patch success!")
 
 
 def unpatch_recalculate_operator():
-    if _original_execute:
-        RecalculateTransitionsOperator.execute = _original_execute
+    if RecalculateTransitionsOperator._original_execute:
+        RecalculateTransitionsOperator.execute = RecalculateTransitionsOperator._original_execute
         RecalculateTransitionsOperator._original_execute = None
 
 
