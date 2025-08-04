@@ -9,7 +9,7 @@ bl_info = {
 }
 
 import bpy
-from bpy.props import StringProperty
+from bpy.props import BoolProperty, StringProperty
 from bpy.types import Panel, Operator, PropertyGroup
 from mathutils import Vector
 import json, os
@@ -261,6 +261,54 @@ class DRONE_OT_LoadAllKeys(Operator):
         else:
             self.report({'INFO'}, "Not loaded")
         return {'FINISHED'}
+
+
+class DRONE_OT_append_assets(Operator):
+    """Append collections and textures from a .blend file"""
+
+    bl_idname = "drone.append_assets"
+    bl_label = "Append Assets"
+    bl_description = "Append collections and textures from another Blender file"
+
+    filepath: StringProperty(subtype="FILE_PATH")
+    exclude_drone_collections: BoolProperty(
+        name="Exclude Drone Collections",
+        default=True,
+        description="Skip collections whose name contains 'drone'",
+    )
+
+    def execute(self, context):
+        path = bpy.path.abspath(self.filepath)
+        if not path or not os.path.exists(path):
+            self.report({'ERROR'}, "Invalid filepath")
+            return {'CANCELLED'}
+
+        with bpy.data.libraries.load(path, link=False) as (data_from, data_to):
+            colls = [
+                name
+                for name in data_from.collections
+                if not (
+                    self.exclude_drone_collections and "drone" in name.lower()
+                )
+            ]
+            texs = list(data_from.textures)
+            data_to.collections = colls
+            data_to.textures = texs
+
+        for coll in data_to.collections:
+            if coll.name not in context.scene.collection.children:
+                context.scene.collection.children.link(coll)
+
+        add_prefix_le_tex(context)
+        self.report(
+            {"INFO"},
+            f"Appended {len(data_to.collections)} collections and {len(data_to.textures)} textures",
+        )
+        return {'FINISHED'}
+
+    def invoke(self, context, event):
+        context.window_manager.fileselect_add(self)
+        return {"RUNNING_MODAL"}
 
 
 class DRONE_OT_RecalcTransitionsWithKeys(Operator):
@@ -1023,6 +1071,7 @@ class DRONE_PT_KeyTransfer(Panel):
         layout.operator("drone.save_light_effects", text="Light Save")
         layout.operator("drone.load_keys", text="Load")
         layout.operator("drone.load_all_keys", text="All Load")
+        layout.operator("drone.append_assets", text="Append Assets")
         layout.operator("drone.add_prefix", text="Add Prefix")
         layout.operator("drone.shift_coll_frame", text="Shift Collection")
         layout.operator_menu_enum(
@@ -1090,6 +1139,7 @@ classes = (
     DRONE_OT_LoadKeys,
     DRONE_PT_KeyTransfer,
     DRONE_OT_LoadAllKeys,
+    DRONE_OT_append_assets,
     DRONE_OT_RecalcTransitionsWithKeys,
     LIGHTEFFECT_OTadd_prefix_le_tex,
     TIMEBIND_OT_goto_startframe,
