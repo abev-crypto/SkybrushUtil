@@ -915,6 +915,82 @@ def export_key(context, br_path, pref):
 
 
 
+# ======= Recalculate Operator Patch =======
+_original_execute = None
+
+
+def _entries_for_scope(storyboard, scene, scope):
+    entries = list(storyboard.entries)
+    active = getattr(storyboard, "active_index", 0)
+    if scope == "CURRENT_FRAME":
+        frame = scene.frame_current
+        for sb in entries:
+            if sb.frame_start <= frame < sb.frame_start + sb.duration:
+                return [sb]
+        return []
+    if scope == "TO_SELECTED" and 0 <= active < len(entries):
+        return entries[: active + 1]
+    if scope == "FROM_SELECTED" and 0 <= active < len(entries):
+        return entries[active : active + 2]
+    if scope == "FROM_SELECTED_TO_END" and 0 <= active < len(entries):
+        return entries[active:]
+    return entries
+
+
+def patched_execute(self, context):
+    blend_dir = os.path.dirname(bpy.data.filepath) if bpy.data.filepath else os.getcwd()
+    storyboard = context.scene.skybrush.storyboard
+
+    tb = context.scene.time_bind
+    original_index = tb.active_index
+    tb.active_index = -1
+
+    targets = _entries_for_scope(storyboard, context.scene, self.scope)
+    prefixes = [sb.name.split("_")[0] for sb in targets]
+    for pref in prefixes:
+        export_key(context, blend_dir, pref)
+
+    tb.active_index = original_index
+    result = _original_execute(self, context)
+
+    for pref in prefixes:
+        sb_entry = next(
+            (sb for sb in storyboard.entries if sb.name.startswith(pref)),
+            None,
+        )
+        if not sb_entry:
+            continue
+        apply_key(
+            os.path.join(blend_dir, pref + KeydataStr),
+            sb_entry.frame_start,
+            sb_entry.duration,
+        )
+
+    return result
+
+
+def patch_recalculate_operator():
+    global _original_execute
+    op_cls = getattr(bpy.types, "RecalculateTransitionsOperator", None)
+    if op_cls and _original_execute is None:
+        _original_execute = op_cls.execute
+        op_cls.execute = patched_execute
+
+
+def unpatch_recalculate_operator():
+    global _original_execute
+    if _original_execute:
+        bpy.types.RecalculateTransitionsOperator.execute = _original_execute
+        _original_execute = None
+
+
+def try_patch():
+    patch_recalculate_operator()
+    if not getattr(bpy.types, "RecalculateTransitionsOperator", None):
+        return 0.5
+    return None
+
+
 # -------------------------------
 # UIパネル
 # -------------------------------
@@ -1037,6 +1113,7 @@ def register():
     bpy.types.Scene.drone_key_props = bpy.props.PointerProperty(type=DroneKeyTransferProperties)
     bpy.types.Scene.time_bind = bpy.props.PointerProperty(type=TimeBindCollection)
     bpy.types.Scene.shift_prefix_list = bpy.props.PointerProperty(type=ShiftPrefixList)
+    bpy.app.timers.register(try_patch)
 
 def unregister():
     for cls in reversed(classes):
@@ -1044,6 +1121,9 @@ def unregister():
     del bpy.types.Scene.drone_key_props
     del bpy.types.Scene.time_bind
     del bpy.types.Scene.shift_prefix_list
+    if bpy.app.timers.is_registered(try_patch):
+        bpy.app.timers.unregister(try_patch)
+    unpatch_recalculate_operator()
 
 if __name__ == "__main__":
     register()
