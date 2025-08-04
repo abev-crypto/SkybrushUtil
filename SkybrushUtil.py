@@ -12,13 +12,51 @@ import bpy
 from bpy.props import StringProperty
 from bpy.types import Panel, Operator, PropertyGroup
 from mathutils import Vector
-import json, os
+import json, os, shutil
 from sbstudio.plugin.operators import RecalculateTransitionsOperator
 from sbstudio.plugin.operators.base import StoryboardOperator
 
 
 KeydataStr = "_KeyData.json"
 LightdataStr = "_LightData.json"
+
+
+def ensure_json_files(blend_dir, prefix):
+    """Ensure key and light JSON files exist in ``blend_dir`` for ``prefix``.
+
+    If either file is missing, the user is prompted to select a source
+    directory and the files are copied from there.  Returns ``True`` when
+    both files are present after the optional copy attempt.
+    """
+    key_path = os.path.join(blend_dir, prefix + KeydataStr)
+    light_path = os.path.join(blend_dir, prefix + LightdataStr)
+    if os.path.exists(key_path) and os.path.exists(light_path):
+        return True
+
+    class DRONE_OT_SelectJsonDir(bpy.types.Operator):
+        bl_idname = "drone.select_json_dir"
+        bl_label = "Select JSON Source Directory"
+
+        directory: StringProperty(subtype="DIR_PATH")
+
+        def execute(self, context):
+            src_key = os.path.join(self.directory, prefix + KeydataStr)
+            src_light = os.path.join(self.directory, prefix + LightdataStr)
+            if os.path.exists(src_key):
+                shutil.copy(src_key, key_path)
+            if os.path.exists(src_light):
+                shutil.copy(src_light, light_path)
+            return {'FINISHED'}
+
+        def invoke(self, context, event):
+            context.window_manager.fileselect_add(self)
+            return {'RUNNING_MODAL'}
+
+    bpy.utils.register_class(DRONE_OT_SelectJsonDir)
+    bpy.ops.drone.select_json_dir('INVOKE_DEFAULT')
+    bpy.utils.unregister_class(DRONE_OT_SelectJsonDir)
+
+    return os.path.exists(key_path) and os.path.exists(light_path)
 
 # -------------------------------
 # LightEffect Export Helpers
@@ -214,6 +252,9 @@ class DRONE_OT_LoadKeys(Operator):
         for entry in storyboard.entries:
             if entry.name.startswith(fn):
                 duration = entry.duration
+        if not ensure_json_files(blend_dir, fn):
+            self.report({'WARNING'}, f"JSON files for prefix '{fn}' not found")
+            return {'CANCELLED'}
         apply_key(os.path.join(blend_dir, fn + KeydataStr), current_frame, duration)  # Apply stored keyframe data
         import_light_effects_from_json(os.path.join(blend_dir, fn + LightdataStr), current_frame, context)  # Import light effects
         update_texture_key(fn + "_", current_frame)
@@ -231,31 +272,26 @@ class DRONE_OT_LoadAllKeys(Operator):
         Iterate through the storyboard and load key and light effect
         data for each entry that has exported files.
 
-        A nested ``check_file`` helper scans a directory for files that
-        start with a given prefix. The method uses this helper on each
-        storyboard entry to decide whether to apply the stored keyframes
-        and light effect definitions. It also updates textures and
-        time-bind properties and collects the prefixes of successfully
-        processed entries to include in the report.
+        The method ensures that the required JSON files exist for each
+        prefix, optionally asking the user for a directory to copy them
+        from. For prefixes where the files cannot be found, a warning is
+        issued and processing continues with the next entry. Successfully
+        processed prefixes are collected and included in the report.
         """
-        def check_file(dir, name):
-            # ディレクトリ内の全ファイルを取得
-            for file_name in os.listdir(dir):
-                if file_name.startswith(name):
-                    return True  # そのPrefixのファイルが存在
-            return False  # 存在しない場合
         scene = context.scene
         storyboard = scene.skybrush.storyboard
         blend_dir = os.path.dirname(bpy.data.filepath) if bpy.data.filepath else os.getcwd()
         flog = []
         for sb_entry in storyboard.entries:
             pref = sb_entry.name.split("_")[0]
-            if check_file(blend_dir, pref):
-                apply_key(os.path.join(blend_dir, pref + KeydataStr), sb_entry.frame_start, sb_entry.duration)  # Apply keyframes for this prefix
-                import_light_effects_from_json(os.path.join(blend_dir, pref + LightdataStr), sb_entry.frame_start, context)  # Import related light effects
-                update_texture_key(pref + "_", sb_entry.frame_start)
-                add_timebind_prop(context, pref + "_", sb_entry.frame_start)  # Remember TimeBind information
-                flog.append(pref)
+            if not ensure_json_files(blend_dir, pref):
+                self.report({'WARNING'}, f"JSON files for prefix '{pref}' not found")
+                continue
+            apply_key(os.path.join(blend_dir, pref + KeydataStr), sb_entry.frame_start, sb_entry.duration)  # Apply keyframes for this prefix
+            import_light_effects_from_json(os.path.join(blend_dir, pref + LightdataStr), sb_entry.frame_start, context)  # Import related light effects
+            update_texture_key(pref + "_", sb_entry.frame_start)
+            add_timebind_prop(context, pref + "_", sb_entry.frame_start)  # Remember TimeBind information
+            flog.append(pref)
         if flog:
             self.report({'INFO'}, f"Keys loaded: {blend_dir} from {flog}")
         else:
