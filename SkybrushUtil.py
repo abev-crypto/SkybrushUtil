@@ -94,12 +94,21 @@ def convert_color_ramp(texture):
 def propertygroup_to_dict(pg):
     """PropertyGroupを辞書化（name含める）"""
     data = {"name": pg.name}
-    for prop in pg.__annotations__.keys():
+
+    # 新しいプロパティ(loop_count, loop_method)を含めた全プロパティ名を収集
+    props = set(getattr(pg, "__annotations__", {}).keys())
+    for extra in ("loop_count", "loop_method"):
+        if hasattr(pg, extra):
+            props.add(extra)
+
+    for prop in props:
         val = getattr(pg, prop)
         data[prop] = convert_value(val)
+
     if getattr(pg, "type", None) == "COLOR_RAMP":
         texture = getattr(pg, "texture", None)
         data["color_ramp"] = convert_color_ramp(texture)
+
     return data
 
 
@@ -802,7 +811,7 @@ def add_prefix_le_tex(context):
 def set_propertygroup_from_dict(pg, data):
     """辞書データをPropertyGroupにセット（texture/meshのみ特殊処理）"""
     for key, value in data.items():
-        if key not in pg.__annotations__:
+        if key not in getattr(pg, "__annotations__", {}) and not hasattr(pg, key):
             continue  # JSONに余分なキーがあっても無視
 
         # 空文字や None はスキップ
