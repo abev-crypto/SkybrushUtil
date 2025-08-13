@@ -15,6 +15,7 @@ from mathutils import Vector
 import json, os, shutil
 from sbstudio.plugin.operators import RecalculateTransitionsOperator
 from sbstudio.plugin.operators.base import StoryboardOperator
+from skybrush import light_effects as light_effects_patch
 
 
 KeydataStr = "_KeyData.json"
@@ -1200,6 +1201,7 @@ def register():
     bpy.types.Scene.time_bind = bpy.props.PointerProperty(type=TimeBindCollection)
     bpy.types.Scene.shift_prefix_list = bpy.props.PointerProperty(type=ShiftPrefixList)
     bpy.app.timers.register(try_patch)
+    light_effects_patch.register()
 
 def unregister():
     for cls in reversed(classes):
@@ -1210,6 +1212,7 @@ def unregister():
     if bpy.app.timers.is_registered(try_patch):
         bpy.app.timers.unregister(try_patch)
     unpatch_recalculate_operator()
+    light_effects_patch.unregister()
 
 if __name__ == "__main__":
     register()
