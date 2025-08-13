@@ -7,9 +7,15 @@ plug‑in is not available, the module simply does nothing.
 """
 
 import bpy
-from bpy.props import EnumProperty, IntProperty
+from bpy.props import (
+    EnumProperty,
+    FloatVectorProperty,
+    IntProperty,
+    PointerProperty,
+    StringProperty,
+)
 import importlib
-from os.path import abspath
+from os.path import abspath, basename
 
 try:  # pragma: no cover - module is optional at compile time
     from sbstudio.plugin.light_effects import LightEffect, LightEffectsPanel
@@ -24,6 +30,62 @@ except Exception:  # pragma: no cover - runtime guard
 
 _ORIGINAL_TYPE = None
 _ORIGINAL_APPLY_ON_COLORS = None
+
+
+class PosGradientProperties(bpy.types.PropertyGroup):  # pragma: no cover - Blender only
+    first_color: FloatVectorProperty(
+        name="First Color", size=4, subtype="COLOR", min=0.0, max=1.0, default=(1.0, 1.0, 1.0, 1.0)
+    )
+    end_color: FloatVectorProperty(
+        name="End Color", size=4, subtype="COLOR", min=0.0, max=1.0, default=(1.0, 1.0, 1.0, 1.0)
+    )
+    start_pos: FloatVectorProperty(name="Start Pos", size=3, default=(0.0, 0.0, 0.0))
+    end_pos: FloatVectorProperty(name="End Pos", size=3, default=(0.0, 0.0, 0.0))
+    start_offset: FloatVectorProperty(name="Start Offset", size=3, default=(0.0, 0.0, 0.0))
+    end_offset: FloatVectorProperty(name="End Offset", size=3, default=(0.0, 0.0, 0.0))
+
+
+class SavePosGradientOperator(bpy.types.Operator):  # pragma: no cover - Blender UI
+    bl_idname = "skybrush.save_pos_gradient"
+    bl_label = "Embed Properties"
+    bl_description = "Write PosGradient properties into the function file"
+
+    filepath: StringProperty(options={"HIDDEN"})
+
+    def execute(self, context):
+        entry = context.scene.skybrush.light_effects.active_entry
+        props = entry.pos_gradient
+        path = abspath(self.filepath)
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                lines = fh.readlines()
+        except OSError as exc:  # pragma: no cover - file I/O
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+
+        def set_line(name, value):
+            line = f"{name} = {tuple(value)}\n"
+            for idx, existing in enumerate(lines):
+                if existing.startswith(name + " ="):
+                    lines[idx] = line
+                    return
+            lines.insert(0, line)
+
+        set_line("FIRST_COLOR", props.first_color)
+        set_line("END_COLOR", props.end_color)
+        set_line("START_POS", props.start_pos)
+        set_line("END_POS", props.end_pos)
+        set_line("START_OFFSET", props.start_offset)
+        set_line("END_OFFSET", props.end_offset)
+
+        try:
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.writelines(lines)
+        except OSError as exc:  # pragma: no cover - file I/O
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+
+        return {"FINISHED"}
 
 
 def _patch_light_effect_class():
@@ -79,6 +141,9 @@ def _patch_light_effect_class():
         default="FORWARD",
     )
     LightEffect.__annotations__["loop_method"] = LightEffect.loop_method
+
+    LightEffect.pos_gradient = PointerProperty(type=PosGradientProperties)
+    LightEffect.__annotations__["pos_gradient"] = LightEffect.pos_gradient
 
     def patched_apply_on_colors(self, colors, positions, mapping, *, frame, random_seq):
         def get_output_based_on_output_type(output_type, mapping_mode, output_function):
@@ -238,6 +303,16 @@ def _patch_light_effect_class():
             )
 
             if color_function_ref is not None:
+                if basename(abspath(self.color_function.path)) == "pos_gradient.py":
+                    pg = self.pos_gradient
+                    env = color_function_ref.__globals__
+                    env["FIRST_COLOR"] = tuple(pg.first_color)
+                    env["END_COLOR"] = tuple(pg.end_color)
+                    env["START_POS"] = tuple(pg.start_pos)
+                    env["END_POS"] = tuple(pg.end_pos)
+                    env["START_OFFSET"] = tuple(pg.start_offset)
+                    env["END_OFFSET"] = tuple(pg.end_offset)
+
                 try:
                     new_color[:] = color_function_ref(
                         frame=frame,
@@ -284,7 +359,7 @@ def _unpatch_light_effect_class():
     LightEffect.type = _ORIGINAL_TYPE
     LightEffect.__annotations__["type"] = _ORIGINAL_TYPE
 
-    for attr in ("loop_count", "loop_method"):
+    for attr in ("loop_count", "loop_method", "pos_gradient"):
         if hasattr(LightEffect, attr):
             delattr(LightEffect, attr)
             LightEffect.__annotations__.pop(attr, None)
@@ -393,9 +468,19 @@ def _patched_draw(self, context):  # pragma: no cover - Blender UI code
                 col = row.column(align=True)
                 col.operator("image.open", icon="FILE_FOLDER", text="")
             elif entry.type == "FUNCTION":
-                row = self.layout.box()
-                row.prop(entry.color_function, "path", text="")
-                row.prop(entry.color_function, "name", text="")
+                box = self.layout.box()
+                box.prop(entry.color_function, "path", text="")
+                box.prop(entry.color_function, "name", text="")
+                if basename(abspath(entry.color_function.path)) == "pos_gradient.py":
+                    pg = entry.pos_gradient
+                    box.prop(pg, "first_color")
+                    box.prop(pg, "end_color")
+                    box.prop(pg, "start_pos")
+                    box.prop(pg, "end_pos")
+                    box.prop(pg, "start_offset")
+                    box.prop(pg, "end_offset")
+                    op = box.operator(SavePosGradientOperator.bl_idname, text="Embed Properties")
+                    op.filepath = entry.color_function.path
             else:
                 row = layout.box()
                 row.alert = True
@@ -461,6 +546,8 @@ def _unpatch_light_effects_panel():
 
 def register():  # pragma: no cover - executed in Blender
     bpy.utils.register_class(BakeColorRampOperator)
+    bpy.utils.register_class(PosGradientProperties)
+    bpy.utils.register_class(SavePosGradientOperator)
     _patch_light_effect_class()
     _patch_light_effects_panel()
 
@@ -468,5 +555,7 @@ def register():  # pragma: no cover - executed in Blender
 def unregister():  # pragma: no cover - executed in Blender
     _unpatch_light_effects_panel()
     _unpatch_light_effect_class()
+    bpy.utils.unregister_class(SavePosGradientOperator)
+    bpy.utils.unregister_class(PosGradientProperties)
     bpy.utils.unregister_class(BakeColorRampOperator)
 
