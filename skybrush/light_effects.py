@@ -14,6 +14,7 @@ from bpy.props import (
     PointerProperty,
     StringProperty,
 )
+from bpy.types import Operator, Panel, PropertyGroup
 import importlib
 from os.path import abspath, basename
 
@@ -85,7 +86,7 @@ class SavePosGradientOperator(bpy.types.Operator):  # pragma: no cover - Blender
         return {"FINISHED"}
 
 
-def _patch_light_effect_class():
+def patch_light_effect_class():
     """Inject loop properties into ``LightEffect`` using monkey patching."""
     if LightEffect is None:  # pragma: no cover - only runs inside Blender
         return
@@ -98,7 +99,7 @@ def _patch_light_effect_class():
     load_module = mod.load_module
     convert_from_srgb_to_linear = mod.convert_from_srgb_to_linear
     blend_in_place = mod.blend_in_place
-    class PatchedLightEffect(LightEffect):
+    class PatchedLightEffect(PropertyGroup):
         type = EnumProperty(
             name="Effect Type",
             description=(
@@ -286,122 +287,115 @@ class BakeColorRampOperator(bpy.types.Operator):  # pragma: no cover - Blender U
         entry.loop_method = "FORWARD"
         return {'FINISHED'}
 
+class PatchedLightEffectsPanel(Panel):  # pragma: no cover - Blender UI code
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
 
-def _patched_draw(self, context):  # pragma: no cover - Blender UI code
-    layout = self.layout
-    layout.use_property_split = True
-    layout.use_property_decorate = False
+        scene = context.scene
+        light_effects = scene.skybrush.light_effects
+        if not light_effects:
+            return
 
-    scene = context.scene
-    light_effects = scene.skybrush.light_effects
-    if not light_effects:
-        return
+        row = layout.row()
 
-    row = layout.row()
+        col = row.column()
+        col.template_list(
+            "SKYBRUSH_UL_lightfxlist",
+            "OBJECT_PT_skybrush_light_effects_panel",
+            light_effects,
+            "entries",
+            light_effects,
+            "active_entry_index",
+        )
 
-    col = row.column()
-    col.template_list(
-        "SKYBRUSH_UL_lightfxlist",
-        "OBJECT_PT_skybrush_light_effects_panel",
-        light_effects,
-        "entries",
-        light_effects,
-        "active_entry_index",
-    )
+        col = row.column(align=True)
+        col.operator(CreateLightEffectOperator.bl_idname, icon="ADD", text="")
+        col.operator(RemoveLightEffectOperator.bl_idname, icon="REMOVE", text="")
+        col.separator()
+        col.operator(
+            DuplicateLightEffectOperator.bl_idname, icon="DUPLICATE", text=""
+        )
+        col.separator()
+        col.operator(MoveLightEffectUpOperator.bl_idname, icon="TRIA_UP", text="")
+        col.operator(
+            MoveLightEffectDownOperator.bl_idname, icon="TRIA_DOWN", text=""
+        )
 
-    col = row.column(align=True)
-    col.operator(CreateLightEffectOperator.bl_idname, icon="ADD", text="")
-    col.operator(RemoveLightEffectOperator.bl_idname, icon="REMOVE", text="")
-    col.separator()
-    col.operator(
-        DuplicateLightEffectOperator.bl_idname, icon="DUPLICATE", text=""
-    )
-    col.separator()
-    col.operator(MoveLightEffectUpOperator.bl_idname, icon="TRIA_UP", text="")
-    col.operator(
-        MoveLightEffectDownOperator.bl_idname, icon="TRIA_DOWN", text=""
-    )
+        entry = light_effects.active_entry
+        if entry is not None:
+            layout.prop(entry, "type")
 
-    entry = light_effects.active_entry
-    if entry is not None:
-        layout.prop(entry, "type")
+            if entry.texture:
+                if entry.type == "COLOR_RAMP":
+                    row = layout.box()
+                    row.template_color_ramp(entry.texture, "color_ramp")
+                elif entry.type == "IMAGE":
+                    row = layout.row()
 
-        if entry.texture:
+                    col = row.column()
+                    col.prop_search(entry.texture, "image", bpy.data, "images", text="")
+
+                    col = row.column(align=True)
+                    col.operator("image.open", icon="FILE_FOLDER", text="")
+                elif entry.type == "FUNCTION":
+                    box = self.layout.box()
+                    box.prop(entry.color_function, "path", text="")
+                    box.prop(entry.color_function, "name", text="")
+                    if basename(abspath(entry.color_function.path)) == "pos_gradient.py":
+                        pg = entry.pos_gradient
+                        box.prop(pg, "first_color")
+                        box.prop(pg, "end_color")
+                        box.prop(pg, "start_pos")
+                        box.prop(pg, "end_pos")
+                        box.prop(pg, "start_offset")
+                        box.prop(pg, "end_offset")
+                        op = box.operator(SavePosGradientOperator.bl_idname, text="Embed Properties")
+                        op.filepath = entry.color_function.path
+                else:
+                    row = layout.box()
+                    row.alert = True
+                    row.label(text="Invalid light effect type", icon="ERROR")
+                    layout.separator()
+
+            col = layout.column()
+            col.prop(entry, "frame_start")
+            col.prop(entry, "duration")
+            col.prop(entry, "frame_end")
+            col.separator()
+            col.prop(entry, "fade_in_duration")
+            col.prop(entry, "fade_out_duration")
+            col.separator()
+            col.prop(entry, "mesh")
+            col.separator()
             if entry.type == "COLOR_RAMP":
-                row = layout.box()
-                row.template_color_ramp(entry.texture, "color_ramp")
-            elif entry.type == "IMAGE":
-                row = layout.row()
+                col.prop(entry, "loop_count")
+                col.prop(entry, "loop_method")
+                col.operator(BakeColorRampOperator.bl_idname, text="Bake Ramp")
+            if entry.type == "COLOR_RAMP" or entry.type == "IMAGE":
+                col.prop(entry, "output")
+                if entry.output == "CUSTOM":
+                    col.prop(entry.output_function, "path", text="Fn file")
+                    col.prop(entry.output_function, "name", text="Fn name")
+            if output_type_supports_mapping_mode(entry.output):
+                col.prop(entry, "output_mapping_mode")
+            if entry.type == "IMAGE":
+                col.prop(entry, "output_y")
+                if entry.output_y == "CUSTOM":
+                    col.prop(entry.output_function_y, "path", text="Fn file")
+                    col.prop(entry.output_function_y, "name", text="Fn name")
+                if output_type_supports_mapping_mode(entry.output_y):
+                    col.prop(entry, "output_mapping_mode_y")
+            col.prop(entry, "target")
+            col.prop(entry, "invert_target")
+            col.prop(entry, "blend_mode")
+            col.prop(entry, "influence", slider=True)
 
-                col = row.column()
-                col.prop_search(entry.texture, "image", bpy.data, "images", text="")
+            if effect_type_supports_randomization(entry.type):
+                col.prop(entry, "randomness", slider=True)
 
-                col = row.column(align=True)
-                col.operator("image.open", icon="FILE_FOLDER", text="")
-            elif entry.type == "FUNCTION":
-                box = self.layout.box()
-                box.prop(entry.color_function, "path", text="")
-                box.prop(entry.color_function, "name", text="")
-                if basename(abspath(entry.color_function.path)) == "pos_gradient.py":
-                    pg = entry.pos_gradient
-                    box.prop(pg, "first_color")
-                    box.prop(pg, "end_color")
-                    box.prop(pg, "start_pos")
-                    box.prop(pg, "end_pos")
-                    box.prop(pg, "start_offset")
-                    box.prop(pg, "end_offset")
-                    op = box.operator(SavePosGradientOperator.bl_idname, text="Embed Properties")
-                    op.filepath = entry.color_function.path
-            else:
-                row = layout.box()
-                row.alert = True
-                row.label(text="Invalid light effect type", icon="ERROR")
-                layout.separator()
-
-        col = layout.column()
-        col.prop(entry, "frame_start")
-        col.prop(entry, "duration")
-        col.prop(entry, "frame_end")
-        col.separator()
-        col.prop(entry, "fade_in_duration")
-        col.prop(entry, "fade_out_duration")
-        col.separator()
-        col.prop(entry, "mesh")
-        col.separator()
-        if entry.type == "COLOR_RAMP":
-            col.prop(entry, "loop_count")
-            col.prop(entry, "loop_method")
-            col.operator(BakeColorRampOperator.bl_idname, text="Bake Ramp")
-        if entry.type == "COLOR_RAMP" or entry.type == "IMAGE":
-            col.prop(entry, "output")
-            if entry.output == "CUSTOM":
-                col.prop(entry.output_function, "path", text="Fn file")
-                col.prop(entry.output_function, "name", text="Fn name")
-        if output_type_supports_mapping_mode(entry.output):
-            col.prop(entry, "output_mapping_mode")
-        if entry.type == "IMAGE":
-            col.prop(entry, "output_y")
-            if entry.output_y == "CUSTOM":
-                col.prop(entry.output_function_y, "path", text="Fn file")
-                col.prop(entry.output_function_y, "name", text="Fn name")
-            if output_type_supports_mapping_mode(entry.output_y):
-                col.prop(entry, "output_mapping_mode_y")
-        col.prop(entry, "target")
-        col.prop(entry, "invert_target")
-        col.prop(entry, "blend_mode")
-        col.prop(entry, "influence", slider=True)
-
-        if effect_type_supports_randomization(entry.type):
-            col.prop(entry, "randomness", slider=True)
-
-
-if LightEffectsPanel is not None:
-    class PatchedLightEffectsPanel(LightEffectsPanel):  # pragma: no cover - Blender UI code
-        def draw(self, context):
-            _patched_draw(self, context)
-
-
-def _patch_light_effects_panel():
+def patch_light_effects_panel():
     if LightEffectsPanel is None:  # pragma: no cover
         return
 
