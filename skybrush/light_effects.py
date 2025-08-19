@@ -548,8 +548,6 @@ def register():  # pragma: no cover - executed in Blender
     bpy.utils.register_class(BakeColorRampOperator)
     bpy.utils.register_class(PosGradientProperties)
     bpy.utils.register_class(SavePosGradientOperator)
-    _patch_light_effect_class()
-    _patch_light_effects_panel()
 
 
 def unregister():  # pragma: no cover - executed in Blender
