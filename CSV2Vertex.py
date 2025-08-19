@@ -417,11 +417,11 @@ class CSVVA_OT_TransferColorKeys(Operator):
             self.report({"ERROR"}, "Please select an object with CSV setup")
             return {"CANCELLED"}
 
-        # Ensure formations and vertex positions are up to date
-        try:
-            bpy.ops.skybrush.recalculate_transitions(scope="ALL")
-        except Exception:
-            pass
+        from color_key_utils import apply_color_keys_to_nearest
+
+        payload = json.loads(obj["csv_tracks_json"])
+        start_frame = int(payload.get("start_frame", context.scene.frame_current))
+        context.scene.frame_set(start_frame)
 
         drones_col = bpy.data.collections.get("Drones")
         if not drones_col:
@@ -451,37 +451,19 @@ class CSVVA_OT_TransferColorKeys(Operator):
 
         mesh = obj.data
 
-        def find_nearest(location):
-            nearest = None
-            min_dist = float('inf')
-            for ob in available_objects:
-                dist = (location - ob.matrix_world.translation).length
-                if dist < min_dist:
-                    min_dist = dist
-                    nearest = ob
-            return nearest
-
         for vid, channels in key_map.items():
             if vid >= len(mesh.vertices):
                 continue
             v_world = obj.matrix_world @ mesh.vertices[vid].co
-            target = find_nearest(v_world)
-            if not target or not target.active_material or not target.active_material.node_tree:
-                continue
-            base_socket = None
-            for node in target.active_material.node_tree.nodes:
-                if node.inputs and node.inputs[0].type == 'RGBA':
-                    base_socket = node.inputs[0]
-                    break
-            if not base_socket:
-                continue
-            for ch, frames in channels.items():
-                idx = {"R": 0, "G": 1, "B": 2}[ch]
-                for frame, value in frames:
-                    val = value / 255.0 if value > 1.0 else value
-                    base_socket.default_value[idx] = val
-                    base_socket.keyframe_insert("default_value", frame=frame, index=idx)
-            available_objects.remove(target)
+            channel_map = {"R": 0, "G": 1, "B": 2}
+            data = {channel_map[ch]: frames for ch, frames in channels.items()}
+            apply_color_keys_to_nearest(
+                v_world,
+                data,
+                available_objects,
+                frame_offset=0,
+                normalize_255=True,
+            )
 
         # Remove vc[] custom property keyframes and properties
         if obj.animation_data and obj.animation_data.action:
