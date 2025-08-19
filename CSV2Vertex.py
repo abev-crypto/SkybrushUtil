@@ -274,7 +274,10 @@ class CSVVA_OT_Import(Operator):
             except Exception:
                 pass
             for key_entries, sf in key_data_collection:
+                current_frame = context.scene.frame_current
+                context.scene.frame_set(sf)
                 apply_color_keys_from_key_data(key_entries, sf)
+                context.scene.frame_set(current_frame)
             self.report({"INFO"}, f"Setup complete for {len(created)} folders")
             return {"FINISHED"}
 
@@ -305,7 +308,10 @@ class CSVVA_OT_Import(Operator):
             bpy.ops.skybrush.recalculate_transitions(scope="ALL")
         except Exception:
             pass
+        current_frame = context.scene.frame_current
+        context.scene.frame_set(start_frame)
         apply_color_keys_from_key_data(key_entries, start_frame)
+        context.scene.frame_set(current_frame)
         bpy.ops.object.select_all(action='DESELECT')
         obj.select_set(True)
         context.view_layer.objects.active = obj
