@@ -912,16 +912,8 @@ def import_light_effects_from_json(filepath, frame_offset, context):
         set_propertygroup_from_dict(effect, effect_data)
 
 def apply_key(filepath, frame_offset, duration=0):
-    def find_nearest_object(location):
-        nearest_obj = None
-        min_dist = float('inf')
-        for obj in available_objects:
-            dist = (Vector(location) - obj.matrix_world.translation).length
-            if dist < min_dist:
-                min_dist = dist
-                nearest_obj = obj
-        return nearest_obj
-    
+    from color_key_utils import apply_color_keys_to_nearest
+
     drones_collection = bpy.data.collections.get("Drones")
     available_objects = list(drones_collection.objects)
     if duration != 0:
@@ -942,22 +934,12 @@ def apply_key(filepath, frame_offset, duration=0):
         d["keys"] = {int(k): v for k, v in d["keys"].items()}
 
     for data in color_key_data:
-        nearest_obj = find_nearest_object(Vector(data["location"]))
-        mat = nearest_obj.active_material
-        for node in mat.node_tree.nodes:
-            if not node.inputs or node.inputs[0].type != 'RGBA':
-                continue
-            # キー移植
-            for channel, keyframes in data["keys"].items():
-                for frame, value in keyframes:
-                    node.inputs[0].default_value[channel] = value
-                    node.inputs[0].keyframe_insert(
-                        "default_value",
-                        frame=frame_offset + frame,
-                        index=channel
-                    )
-            break
-        available_objects.remove(nearest_obj)
+        apply_color_keys_to_nearest(
+            Vector(data["location"]),
+            data["keys"],
+            available_objects,
+            frame_offset=frame_offset,
+        )
 
 def export_key(context, br_path, pref):
     pref = active_timebind_prefix(context, pref)
