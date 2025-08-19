@@ -1,0 +1,294 @@
+import bpy
+from bpy.props import StringProperty, IntProperty, EnumProperty, BoolProperty
+from bpy.types import Operator, Panel, PropertyGroup
+import csv, json, os, re
+from mathutils import Vector
+from bisect import bisect_left
+
+HANDLER_TAG = "_csv_vertex_anim_handler"
+
+# ---------- Utilities ----------
+
+def detect_delimiter(sample_path):
+    # Try to sniff; fall back to tab if header matches the sample
+    try:
+        with open(sample_path, "r", newline="") as f:
+            head = f.read(2048)
+        dialect = csv.Sniffer().sniff(head, delimiters=",\t; ")
+        return dialect.delimiter
+    except Exception:
+        # Heuristic: if header contains tabs or 'Time [msec]\tx [m]' pattern, use '\t'
+        if "\t" in head or re.search(r"Time\s*\[msec\]\s*\tx\s*\[m\]", head):
+            return "\t"
+        return ","  # default
+
+def load_csv(path, delimiter="auto"):
+    if delimiter == "auto":
+        delimiter = detect_delimiter(path)
+    rows = []
+    with open(path, "r", newline="") as f:
+        reader = csv.DictReader(f, delimiter=delimiter)
+        # Normalize expected headers
+        colmap = {k.strip(): k for k in reader.fieldnames}
+        req = ["Time [msec]", "x [m]", "y [m]", "z [m]", "Red", "Green", "Blue"]
+        for r in reader:
+            row = {
+                "t_ms": float(r[colmap["Time [msec]"]]),
+                "x": float(r[colmap["x [m]"]]),
+                "y": float(r[colmap["y [m]"]]),
+                "z": float(r[colmap["z [m]"]]),
+                "r": float(r[colmap["Red"]]),
+                "g": float(r[colmap["Green"]]),
+                "b": float(r[colmap["Blue"]]),
+            }
+            rows.append(row)
+    # Ensure sorted by time
+    rows.sort(key=lambda d: d["t_ms"])
+    return rows
+
+def ms_to_frame(ms, fps):
+    return (ms / 1000.0) * fps
+
+def build_tracks_from_folder(folder, delimiter="auto"):
+    files = []
+    for name in os.listdir(folder):
+        low = name.lower()
+        if low.endswith(".csv") or low.endswith(".tsv"):
+            files.append(os.path.join(folder, name))
+    files.sort()
+    tracks = []
+    for p in files:
+        data = load_csv(p, delimiter=delimiter)
+        if not data:
+            continue
+        tracks.append({"name": os.path.splitext(os.path.basename(p))[0], "data": data})
+    return tracks
+
+def ensure_single_mesh(name="CSV_Tracks", count=1, first_positions=None):
+    # Create a mesh object with 'count' vertices (no edges/faces)
+    mesh = bpy.data.meshes.new(name + "_mesh")
+    obj = bpy.data.objects.new(name, mesh)
+    bpy.context.scene.collection.objects.link(obj)
+    # Build vertex list
+    if first_positions and len(first_positions) == count:
+        verts = [tuple(first_positions[i]) for i in range(count)]
+    else:
+        verts = [(0.0, 0.0, 0.0) for _ in range(count)]
+    mesh.from_pydata(verts, [], [])
+    mesh.update()
+    return obj
+
+def unregister_handler():
+    sc = bpy.context.scene
+    # Remove existing handler if exists
+    if getattr(sc, HANDLER_TAG, None):
+        tag = sc.get(HANDLER_TAG)
+        # Clear all matching handlers
+        for h in list(bpy.app.handlers.frame_change_post):
+            if getattr(h, "__name__", "") == tag:
+                bpy.app.handlers.frame_change_post.remove(h)
+        del sc[HANDLER_TAG]
+
+def register_handler(fn):
+    unregister_handler()
+    bpy.app.handlers.frame_change_post.append(fn)
+    bpy.context.scene[HANDLER_TAG] = fn.__name__
+
+# ---------- Core: Frame Update ----------
+
+def make_frame_handler(obj):
+    """
+    Returns a frame_change_post handler function that:
+      - Reads JSON tracks from obj['csv_tracks_json']
+      - Moves each vertex to interpolated position at current frame
+    """
+    # Capture name to resolve object each call (avoid stale refs on file reload)
+    obj_name = obj.name
+
+    def handler(scene):
+        ob = scene.objects.get(obj_name)
+        if not ob or "csv_tracks_json" not in ob:
+            return
+        if not ob.data or ob.data.name not in bpy.data.meshes:
+            return
+
+        mesh = ob.data
+        try:
+            payload = json.loads(ob["csv_tracks_json"])
+        except Exception:
+            return
+
+        fps = float(payload.get("fps", 24.0))
+        tracks = payload.get("tracks", [])
+        if not tracks:
+            return
+
+        # Build per-track time list cache (optional)
+        frame = scene.frame_current
+        t_ms = (frame / fps) * 1000.0
+
+        mesh_vertices = mesh.vertices
+        # Safety
+        n = min(len(tracks), len(mesh_vertices))
+
+        for i in range(n):
+            seq = tracks[i]["data"]  # list of dicts
+            # binary search on time
+            times = payload["time_index"][i]
+            idx = bisect_left(times, t_ms)
+            if idx <= 0:
+                p = seq[0]
+                ob_co = (p["x"], p["y"], p["z"])
+            elif idx >= len(seq):
+                p = seq[-1]
+                ob_co = (p["x"], p["y"], p["z"])
+            else:
+                a = seq[idx - 1]
+                b = seq[idx]
+                # Linear interpolation
+                t0, t1 = a["t_ms"], b["t_ms"]
+                k = 0.0 if t1 == t0 else (t_ms - t0) / (t1 - t0)
+                ob_co = (
+                    a["x"] + (b["x"] - a["x"]) * k,
+                    a["y"] + (b["y"] - a["y"]) * k,
+                    a["z"] + (b["z"] - a["z"]) * k,
+                )
+            mesh_vertices[i].co = Vector(ob_co)
+
+        mesh.update()
+
+    # Give a stable name for clean unregistration
+    handler.__name__ = "csv_vertex_anim_handler_runtime"
+    return handler
+
+# ---------- Properties / UI ----------
+
+class CSVVA_Props(PropertyGroup):
+    folder: StringProperty(
+        name="CSVフォルダ",
+        description="Time[msec], x[m], y[m], z[m], Red, Green, Blue を含むCSV/TSVのフォルダ",
+        subtype="DIR_PATH",
+    )
+    fps: IntProperty(
+        name="FPS",
+        default=24,
+        min=1,
+        max=480,
+    )
+    delimiter: EnumProperty(
+        name="区切り",
+        items=[
+            ("auto", "自動", "自動判別"),
+            ("\t", "タブ", "タブ区切り"),
+            (",", "カンマ", "カンマ区切り"),
+            (";", "セミコロン", "セミコロン"),
+        ],
+        default="auto",
+    )
+    normalize_rgb: BoolProperty(
+        name="RGBを0-1正規化",
+        default=False,
+        description="キーに打つ色値を0-255のままではなく0-1へ正規化して保存",
+    )
+
+class CSVVA_OT_Import(Operator):
+    bl_idname = "csvva.import_setup"
+    bl_label = "インポート＆セットアップ"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        prefs = context.scene.csvva_props
+        folder = bpy.path.abspath(prefs.folder)
+        if not os.path.isdir(folder):
+            self.report({"ERROR"}, "CSVフォルダが不正です")
+            return {"CANCELLED"}
+
+        tracks = build_tracks_from_folder(folder, delimiter=prefs.delimiter)
+        if not tracks:
+            self.report({"ERROR"}, "フォルダ内にCSV/TSVが見つかりません")
+            return {"CANCELLED"}
+
+        # Build initial positions array
+        first_positions = []
+        for tr in tracks:
+            d0 = tr["data"][0]
+            first_positions.append((d0["x"], d0["y"], d0["z"]))
+
+        # Create single mesh with N vertices
+        obj = ensure_single_mesh(name="CSV_Tracks", count=len(tracks), first_positions=first_positions)
+
+        # Build payload for handler: store compact JSON on the object
+        payload = {
+            "fps": prefs.fps,
+            "tracks": tracks,  # this is large; OK for moderate sizes
+            "time_index": [[row["t_ms"] for row in tr["data"]] for tr in tracks],
+        }
+        obj["csv_tracks_json"] = json.dumps(payload)
+
+        # Color keyframes as custom properties on the OBJECT (not mesh), per-vertex:
+        # vc[0]_R, vc[0]_G, vc[0]_B, vc[1]_R, ...
+        normalize = prefs.normalize_rgb
+        fps = float(prefs.fps)
+
+        # Ensure action to hold FCurves (so keys are visible in DopeSheet)
+        if not obj.animation_data:
+            obj.animation_data_create()
+        if not obj.animation_data.action:
+            obj.animation_data.action = bpy.data.actions.new(name="CSV_ColorKeys")
+
+        for i, tr in enumerate(tracks):
+            # Make sure props exist before keying
+            for ch in ("R", "G", "B"):
+                key = f'vc[{i}]_{ch}'
+                if key not in obj:
+                    obj[key] = 0.0
+
+            for row in tr["data"]:
+                frame = ms_to_frame(row["t_ms"], fps)
+                r = row["r"]; g = row["g"]; b = row["b"]
+                if normalize:
+                    r, g, b = r/255.0, g/255.0, b/255.0
+
+                obj[f'vc[{i}]_R'] = float(r)
+                obj[f'vc[{i}]_G'] = float(g)
+                obj[f'vc[{i}]_B'] = float(b)
+                obj.keyframe_insert(f'["vc[{i}]_R"]', frame=frame)
+                obj.keyframe_insert(f'["vc[{i}]_G"]', frame=frame)
+                obj.keyframe_insert(f'["vc[{i}]_B"]', frame=frame)
+
+        # Register/update frame handler
+        handler = make_frame_handler(obj)
+        register_handler(handler)
+
+        self.report({"INFO"}, f"セットアップ完了: {len(tracks)} CSV -> {obj.name}（頂点）")
+        return {"FINISHED"}
+
+class CSVVA_OT_RemoveHandler(Operator):
+    bl_idname = "csvva.remove_handler"
+    bl_label = "位置更新ハンドラ解除"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        unregister_handler()
+        self.report({"INFO"}, "フレーム変更ハンドラを解除しました")
+        return {"FINISHED"}
+
+class CSVVA_PT_UI(Panel):
+    bl_label = "CSV Vertex Anim"
+    bl_idname = "CSVVA_PT_UI"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "CSV Vertex Anim"
+
+    def draw(self, context):
+        lay = self.layout
+        prefs = context.scene.csvva_props
+        col = lay.column(align=True)
+        col.prop(prefs, "folder")
+        row = col.row(align=True)
+        row.prop(prefs, "fps")
+        row.prop(prefs, "delimiter")
+        col.prop(prefs, "normalize_rgb")
+        col.operator(CSVVA_OT_Import.bl_idname, icon="IMPORT")
+        col.separator()
+        col.operator(CSVVA_OT_RemoveHandler.bl_idname, icon="X")
