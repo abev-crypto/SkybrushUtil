@@ -162,6 +162,118 @@ def make_frame_handler(obj):
     handler.__name__ = "csv_vertex_anim_handler_runtime"
     return handler
 
+# ---------- Import Helper ----------
+
+def import_csv_folder(context, folder, start_frame, prefs):
+    """Import CSV tracks from ``folder`` and create a mesh with animation.
+
+    Returns the created object or ``None`` if no tracks were found."""
+    folder_name = os.path.basename(os.path.normpath(folder))
+    tracks = build_tracks_from_folder(folder, delimiter=prefs.delimiter)
+    if not tracks:
+        return None
+
+    # Determine total duration in frames
+    max_t_ms = max(tr["data"][-1]["t_ms"] for tr in tracks if tr["data"])
+    duration = int(ms_to_frame(max_t_ms, prefs.fps))
+
+    # Build initial positions array
+    first_positions = []
+    for tr in tracks:
+        d0 = tr["data"][0]
+        first_positions.append((d0["x"], d0["y"], d0["z"]))
+
+    # Create single mesh with N vertices, named after the folder
+    obj = ensure_single_mesh(name=folder_name, count=len(tracks), first_positions=first_positions)
+
+    # Create a vertex group containing all vertices for formations
+    vg = obj.vertex_groups.new(name="Drones")
+    vg.add(range(len(obj.data.vertices)), 1.0, 'REPLACE')
+
+    if hasattr(obj, "skybrush"):
+        obj.skybrush.formation_vertex_group = "Drones"
+
+    # Create a formation and add a storyboard entry
+    bpy.ops.object.select_all(action='DESELECT')
+    obj.select_set(True)
+    context.view_layer.objects.active = obj
+    bpy.ops.skybrush.create_formation(name=obj.name, contents='SELECTED_OBJECTS')
+    try:
+        bpy.ops.skybrush.append_formation_to_storyboard()
+        storyboard = context.scene.skybrush.storyboard
+        entry = storyboard.entries[-1]
+        entry.name = folder_name
+        entry.frame_start = start_frame
+        entry.duration = duration
+    except Exception:
+        pass
+
+    # Build payload for handler: store compact JSON on the object
+    payload = {
+        "fps": prefs.fps,
+        "start_frame": start_frame,
+        "tracks": tracks,
+        "time_index": [[row["t_ms"] for row in tr["data"]] for tr in tracks],
+    }
+    obj["csv_tracks_json"] = json.dumps(payload)
+
+    # Color keyframes: either store on object properties or directly on drone materials
+    normalize = prefs.normalize_rgb
+    fps = float(prefs.fps)
+
+    for i, tr in enumerate(tracks):
+        # Find corresponding drone material input (Base Color)
+        base_socket = None
+        drones_col = bpy.data.collections.get("Drones")
+        if drones_col:
+            drone = drones_col.objects.get(tr["name"])
+            if drone and drone.active_material and drone.active_material.node_tree:
+                for node in drone.active_material.node_tree.nodes:
+                    if node.inputs and node.inputs[0].type == 'RGBA':
+                        base_socket = node.inputs[0]
+                        break
+
+        # If no material socket is found, fall back to custom properties
+        if not base_socket:
+            if not obj.animation_data:
+                obj.animation_data_create()
+            if not obj.animation_data.action:
+                obj.animation_data.action = bpy.data.actions.new(name="CSV_ColorKeys")
+            for ch in ("R", "G", "B"):
+                key = f'vc[{i}]_{ch}'
+                if key not in obj:
+                    obj[key] = 0.0
+
+        for row in tr["data"]:
+            frame = start_frame + ms_to_frame(row["t_ms"], fps)
+            raw_r, raw_g, raw_b = row["r"], row["g"], row["b"]
+
+            if base_socket:
+                base_socket.default_value[0] = raw_r / 255.0
+                base_socket.default_value[1] = raw_g / 255.0
+                base_socket.default_value[2] = raw_b / 255.0
+                base_socket.keyframe_insert("default_value", frame=frame, index=0)
+                base_socket.keyframe_insert("default_value", frame=frame, index=1)
+                base_socket.keyframe_insert("default_value", frame=frame, index=2)
+            else:
+                prop_r, prop_g, prop_b = (
+                    (raw_r/255.0, raw_g/255.0, raw_b/255.0)
+                    if normalize
+                    else (raw_r, raw_g, raw_b)
+                )
+                obj[f'vc[{i}]_R'] = float(prop_r)
+                obj[f'vc[{i}]_G'] = float(prop_g)
+                obj[f'vc[{i}]_B'] = float(prop_b)
+                obj.keyframe_insert(f'["vc[{i}]_R"]', frame=frame)
+                obj.keyframe_insert(f'["vc[{i}]_G"]', frame=frame)
+                obj.keyframe_insert(f'["vc[{i}]_B"]', frame=frame)
+
+    # Register/update frame handler
+    handler = make_frame_handler(obj)
+    register_handler(handler)
+
+    return obj
+
 # ---------- Properties / UI ----------
 
 class CSVVA_Props(PropertyGroup):
@@ -203,119 +315,45 @@ class CSVVA_OT_Import(Operator):
 
     def execute(self, context):
         prefs = context.scene.csvva_props
-        start_frame = int(prefs.start_frame)
+        base_start = int(prefs.start_frame)
         folder = bpy.path.abspath(prefs.folder)
         if not os.path.isdir(folder):
             self.report({"ERROR"}, "Invalid CSV folder")
             return {"CANCELLED"}
 
-        folder_name = os.path.basename(os.path.normpath(folder))
-        tracks = build_tracks_from_folder(folder, delimiter=prefs.delimiter)
-        if not tracks:
+        subdirs = [d for d in sorted(os.listdir(folder)) if os.path.isdir(os.path.join(folder, d))]
+        if subdirs:
+            created = []
+            for d in subdirs:
+                sub_path = os.path.join(folder, d)
+                m = re.search(r'_StartFrame(\d+)$', d)
+                sf = int(m.group(1)) if m else base_start
+                obj = import_csv_folder(context, sub_path, sf, prefs)
+                if obj:
+                    created.append(obj)
+            if not created:
+                self.report({"ERROR"}, "No CSV/TSV files found in subfolders")
+                return {"CANCELLED"}
+            try:
+                bpy.ops.skybrush.recalculate_transitions(scope="ALL")
+            except Exception:
+                pass
+            for obj in created:
+                bpy.ops.object.select_all(action='DESELECT')
+                obj.select_set(True)
+                context.view_layer.objects.active = obj
+                try:
+                    bpy.ops.csvva.transfer_color_keys()
+                except Exception:
+                    pass
+            self.report({"INFO"}, f"Setup complete for {len(created)} folders")
+            return {"FINISHED"}
+
+        obj = import_csv_folder(context, folder, base_start, prefs)
+        if not obj:
             self.report({"ERROR"}, "No CSV/TSV files found in folder")
             return {"CANCELLED"}
-
-        # Determine total duration in frames
-        max_t_ms = max(tr["data"][-1]["t_ms"] for tr in tracks if tr["data"])
-        duration = int(ms_to_frame(max_t_ms, prefs.fps))
-
-        # Build initial positions array
-        first_positions = []
-        for tr in tracks:
-            d0 = tr["data"][0]
-            first_positions.append((d0["x"], d0["y"], d0["z"]))
-
-        # Create single mesh with N vertices, named after the folder
-        obj = ensure_single_mesh(name=folder_name, count=len(tracks), first_positions=first_positions)
-
-        # Create a vertex group containing all vertices for formations
-        vg = obj.vertex_groups.new(name="Drones")
-        vg.add(range(len(obj.data.vertices)), 1.0, 'REPLACE')
-
-        if hasattr(obj, "skybrush"):
-            obj.skybrush.formation_vertex_group = "Drones"
-
-        # Create a formation and add a storyboard entry
-        bpy.ops.object.select_all(action='DESELECT')
-        obj.select_set(True)
-        context.view_layer.objects.active = obj
-        bpy.ops.skybrush.create_formation(name=obj.name, contents='SELECTED_OBJECTS')
-        try:
-            bpy.ops.skybrush.append_formation_to_storyboard()
-            storyboard = context.scene.skybrush.storyboard
-            entry = storyboard.entries[-1]
-            entry.name = folder_name
-            entry.frame_start = start_frame
-            entry.duration = duration
-        except Exception:
-            pass
-
-        # Build payload for handler: store compact JSON on the object
-        payload = {
-            "fps": prefs.fps,
-            "start_frame": start_frame,
-            "tracks": tracks,  # this is large; OK for moderate sizes
-            "time_index": [[row["t_ms"] for row in tr["data"]] for tr in tracks],
-        }
-        obj["csv_tracks_json"] = json.dumps(payload)
-
-        # Color keyframes: either store on object properties or directly on drone materials
-        normalize = prefs.normalize_rgb
-        fps = float(prefs.fps)
-
-        for i, tr in enumerate(tracks):
-            # Find corresponding drone material input (Base Color)
-            base_socket = None
-            drones_col = bpy.data.collections.get("Drones")
-            if drones_col:
-                drone = drones_col.objects.get(tr["name"])
-                if drone and drone.active_material and drone.active_material.node_tree:
-                    for node in drone.active_material.node_tree.nodes:
-                        if node.inputs and node.inputs[0].type == 'RGBA':
-                            base_socket = node.inputs[0]
-                            break
-
-            # If no material socket is found, fall back to custom properties
-            if not base_socket:
-                # Ensure action to hold FCurves (so keys are visible in DopeSheet)
-                if not obj.animation_data:
-                    obj.animation_data_create()
-                if not obj.animation_data.action:
-                    obj.animation_data.action = bpy.data.actions.new(name="CSV_ColorKeys")
-                for ch in ("R", "G", "B"):
-                    key = f'vc[{i}]_{ch}'
-                    if key not in obj:
-                        obj[key] = 0.0
-
-            for row in tr["data"]:
-                frame = start_frame + ms_to_frame(row["t_ms"], fps)
-                raw_r, raw_g, raw_b = row["r"], row["g"], row["b"]
-
-                if base_socket:
-                    base_socket.default_value[0] = raw_r / 255.0
-                    base_socket.default_value[1] = raw_g / 255.0
-                    base_socket.default_value[2] = raw_b / 255.0
-                    base_socket.keyframe_insert("default_value", frame=frame, index=0)
-                    base_socket.keyframe_insert("default_value", frame=frame, index=1)
-                    base_socket.keyframe_insert("default_value", frame=frame, index=2)
-                else:
-                    prop_r, prop_g, prop_b = (
-                        (raw_r/255.0, raw_g/255.0, raw_b/255.0)
-                        if normalize
-                        else (raw_r, raw_g, raw_b)
-                    )
-                    obj[f'vc[{i}]_R'] = float(prop_r)
-                    obj[f'vc[{i}]_G'] = float(prop_g)
-                    obj[f'vc[{i}]_B'] = float(prop_b)
-                    obj.keyframe_insert(f'["vc[{i}]_R"]', frame=frame)
-                    obj.keyframe_insert(f'["vc[{i}]_G"]', frame=frame)
-                    obj.keyframe_insert(f'["vc[{i}]_B"]', frame=frame)
-
-        # Register/update frame handler
-        handler = make_frame_handler(obj)
-        register_handler(handler)
-
-        self.report({"INFO"}, f"Setup complete: {len(tracks)} CSV -> {obj.name} (vertices)")
+        self.report({"INFO"}, f"Setup complete: {obj.name}")
         return {"FINISHED"}
 
 class CSVVA_OT_RemoveHandler(Operator):
