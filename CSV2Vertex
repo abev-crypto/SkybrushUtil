@@ -259,36 +259,57 @@ class CSVVA_OT_Import(Operator):
         }
         obj["csv_tracks_json"] = json.dumps(payload)
 
-        # Color keyframes as custom properties on the OBJECT (not mesh), per-vertex:
-        # vc[0]_R, vc[0]_G, vc[0]_B, vc[1]_R, ...
+        # Color keyframes: either store on object properties or directly on drone materials
         normalize = prefs.normalize_rgb
         fps = float(prefs.fps)
 
-        # Ensure action to hold FCurves (so keys are visible in DopeSheet)
-        if not obj.animation_data:
-            obj.animation_data_create()
-        if not obj.animation_data.action:
-            obj.animation_data.action = bpy.data.actions.new(name="CSV_ColorKeys")
-
         for i, tr in enumerate(tracks):
-            # Make sure props exist before keying
-            for ch in ("R", "G", "B"):
-                key = f'vc[{i}]_{ch}'
-                if key not in obj:
-                    obj[key] = 0.0
+            # Find corresponding drone material input (Base Color)
+            base_socket = None
+            drones_col = bpy.data.collections.get("Drones")
+            if drones_col:
+                drone = drones_col.objects.get(tr["name"])
+                if drone and drone.active_material and drone.active_material.node_tree:
+                    for node in drone.active_material.node_tree.nodes:
+                        if node.inputs and node.inputs[0].type == 'RGBA':
+                            base_socket = node.inputs[0]
+                            break
+
+            # If no material socket is found, fall back to custom properties
+            if not base_socket:
+                # Ensure action to hold FCurves (so keys are visible in DopeSheet)
+                if not obj.animation_data:
+                    obj.animation_data_create()
+                if not obj.animation_data.action:
+                    obj.animation_data.action = bpy.data.actions.new(name="CSV_ColorKeys")
+                for ch in ("R", "G", "B"):
+                    key = f'vc[{i}]_{ch}'
+                    if key not in obj:
+                        obj[key] = 0.0
 
             for row in tr["data"]:
                 frame = start_frame + ms_to_frame(row["t_ms"], fps)
-                r = row["r"]; g = row["g"]; b = row["b"]
-                if normalize:
-                    r, g, b = r/255.0, g/255.0, b/255.0
+                raw_r, raw_g, raw_b = row["r"], row["g"], row["b"]
 
-                obj[f'vc[{i}]_R'] = float(r)
-                obj[f'vc[{i}]_G'] = float(g)
-                obj[f'vc[{i}]_B'] = float(b)
-                obj.keyframe_insert(f'["vc[{i}]_R"]', frame=frame)
-                obj.keyframe_insert(f'["vc[{i}]_G"]', frame=frame)
-                obj.keyframe_insert(f'["vc[{i}]_B"]', frame=frame)
+                if base_socket:
+                    base_socket.default_value[0] = raw_r / 255.0
+                    base_socket.default_value[1] = raw_g / 255.0
+                    base_socket.default_value[2] = raw_b / 255.0
+                    base_socket.keyframe_insert("default_value", frame=frame, index=0)
+                    base_socket.keyframe_insert("default_value", frame=frame, index=1)
+                    base_socket.keyframe_insert("default_value", frame=frame, index=2)
+                else:
+                    prop_r, prop_g, prop_b = (
+                        (raw_r/255.0, raw_g/255.0, raw_b/255.0)
+                        if normalize
+                        else (raw_r, raw_g, raw_b)
+                    )
+                    obj[f'vc[{i}]_R'] = float(prop_r)
+                    obj[f'vc[{i}]_G'] = float(prop_g)
+                    obj[f'vc[{i}]_B'] = float(prop_b)
+                    obj.keyframe_insert(f'["vc[{i}]_R"]', frame=frame)
+                    obj.keyframe_insert(f'["vc[{i}]_G"]', frame=frame)
+                    obj.keyframe_insert(f'["vc[{i}]_B"]', frame=frame)
 
         # Register/update frame handler
         handler = make_frame_handler(obj)
@@ -305,6 +326,67 @@ class CSVVA_OT_RemoveHandler(Operator):
     def execute(self, context):
         unregister_handler()
         self.report({"INFO"}, "フレーム変更ハンドラを解除しました")
+        return {"FINISHED"}
+
+
+class CSVVA_OT_TransferColorKeys(Operator):
+    bl_idname = "csvva.transfer_color_keys"
+    bl_label = "カラーキーを移植"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        obj = context.active_object
+        if not obj or "csv_tracks_json" not in obj:
+            self.report({"ERROR"}, "CSVがセットアップされたオブジェクトを選択してください")
+            return {"CANCELLED"}
+
+        try:
+            payload = json.loads(obj["csv_tracks_json"])
+        except Exception:
+            self.report({"ERROR"}, "CSV情報を解析できません")
+            return {"CANCELLED"}
+
+        tracks = payload.get("tracks", [])
+        fps = float(payload.get("fps", 24.0))
+        start_frame = int(payload.get("start_frame", 0))
+
+        for tr in tracks:
+            base_socket = None
+            drones_col = bpy.data.collections.get("Drones")
+            if drones_col:
+                drone = drones_col.objects.get(tr["name"])
+                if drone and drone.active_material and drone.active_material.node_tree:
+                    for node in drone.active_material.node_tree.nodes:
+                        if node.inputs and node.inputs[0].type == 'RGBA':
+                            base_socket = node.inputs[0]
+                            break
+            if not base_socket:
+                continue
+
+            for row in tr["data"]:
+                frame = start_frame + ms_to_frame(row["t_ms"], fps)
+                base_socket.default_value[0] = row["r"] / 255.0
+                base_socket.default_value[1] = row["g"] / 255.0
+                base_socket.default_value[2] = row["b"] / 255.0
+                base_socket.keyframe_insert("default_value", frame=frame, index=0)
+                base_socket.keyframe_insert("default_value", frame=frame, index=1)
+                base_socket.keyframe_insert("default_value", frame=frame, index=2)
+
+        # Remove vc[] custom property keyframes and properties
+        if obj.animation_data and obj.animation_data.action:
+            action = obj.animation_data.action
+            for fc in list(action.fcurves):
+                if fc.data_path.startswith('["vc['):
+                    action.fcurves.remove(fc)
+            if not action.fcurves:
+                obj.animation_data.action = None
+                bpy.data.actions.remove(action)
+
+        for key in list(obj.keys()):
+            if key.startswith("vc["):
+                del obj[key]
+
+        self.report({"INFO"}, "マテリアルにカラーキーを移植し、vcキーを削除しました")
         return {"FINISHED"}
 
 class CSVVA_PT_UI(Panel):
@@ -325,5 +407,6 @@ class CSVVA_PT_UI(Panel):
         row.prop(prefs, "delimiter")
         col.prop(prefs, "normalize_rgb")
         col.operator(CSVVA_OT_Import.bl_idname, icon="IMPORT")
+        col.operator(CSVVA_OT_TransferColorKeys.bl_idname, icon="NODETREE")
         col.separator()
         col.operator(CSVVA_OT_RemoveHandler.bl_idname, icon="X")
