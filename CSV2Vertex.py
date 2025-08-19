@@ -340,37 +340,71 @@ class CSVVA_OT_TransferColorKeys(Operator):
             self.report({"ERROR"}, "Please select an object with CSV setup")
             return {"CANCELLED"}
 
+        # Ensure formations and vertex positions are up to date
         try:
-            payload = json.loads(obj["csv_tracks_json"])
+            bpy.ops.skybrush.recalculate_transitions(scope="ALL")
         except Exception:
-            self.report({"ERROR"}, "Unable to parse CSV information")
+            pass
+
+        drones_col = bpy.data.collections.get("Drones")
+        if not drones_col:
+            self.report({"ERROR"}, "Drones collection not found")
+            return {"CANCELLED"}
+        available_objects = list(drones_col.objects)
+        if not available_objects:
+            self.report({"ERROR"}, "No drones in Drones collection")
             return {"CANCELLED"}
 
-        tracks = payload.get("tracks", [])
-        fps = float(payload.get("fps", 24.0))
-        start_frame = int(payload.get("start_frame", 0))
+        if not obj.animation_data or not obj.animation_data.action:
+            self.report({"ERROR"}, "No vc keyframes found")
+            return {"CANCELLED"}
+        action = obj.animation_data.action
 
-        for tr in tracks:
+        # Gather keyframes for each vc[index]_{R,G,B}
+        key_map = {}
+        for fc in action.fcurves:
+            m = re.match(r'\["vc\[(\d+)\]_([RGB])"\]', fc.data_path)
+            if not m:
+                continue
+            vid = int(m.group(1))
+            ch = m.group(2)
+            pts = [(kp.co.x, kp.co.y) for kp in fc.keyframe_points]
+            if pts:
+                key_map.setdefault(vid, {})[ch] = pts
+
+        mesh = obj.data
+
+        def find_nearest(location):
+            nearest = None
+            min_dist = float('inf')
+            for ob in available_objects:
+                dist = (location - ob.matrix_world.translation).length
+                if dist < min_dist:
+                    min_dist = dist
+                    nearest = ob
+            return nearest
+
+        for vid, channels in key_map.items():
+            if vid >= len(mesh.vertices):
+                continue
+            v_world = obj.matrix_world @ mesh.vertices[vid].co
+            target = find_nearest(v_world)
+            if not target or not target.active_material or not target.active_material.node_tree:
+                continue
             base_socket = None
-            drones_col = bpy.data.collections.get("Drones")
-            if drones_col:
-                drone = drones_col.objects.get(tr["name"])
-                if drone and drone.active_material and drone.active_material.node_tree:
-                    for node in drone.active_material.node_tree.nodes:
-                        if node.inputs and node.inputs[0].type == 'RGBA':
-                            base_socket = node.inputs[0]
-                            break
+            for node in target.active_material.node_tree.nodes:
+                if node.inputs and node.inputs[0].type == 'RGBA':
+                    base_socket = node.inputs[0]
+                    break
             if not base_socket:
                 continue
-
-            for row in tr["data"]:
-                frame = start_frame + ms_to_frame(row["t_ms"], fps)
-                base_socket.default_value[0] = row["r"] / 255.0
-                base_socket.default_value[1] = row["g"] / 255.0
-                base_socket.default_value[2] = row["b"] / 255.0
-                base_socket.keyframe_insert("default_value", frame=frame, index=0)
-                base_socket.keyframe_insert("default_value", frame=frame, index=1)
-                base_socket.keyframe_insert("default_value", frame=frame, index=2)
+            for ch, frames in channels.items():
+                idx = {"R": 0, "G": 1, "B": 2}[ch]
+                for frame, value in frames:
+                    val = value / 255.0 if value > 1.0 else value
+                    base_socket.default_value[idx] = val
+                    base_socket.keyframe_insert("default_value", frame=frame, index=idx)
+            available_objects.remove(target)
 
         # Remove vc[] custom property keyframes and properties
         if obj.animation_data and obj.animation_data.action:
@@ -386,7 +420,7 @@ class CSVVA_OT_TransferColorKeys(Operator):
             if key.startswith("vc["):
                 del obj[key]
 
-        self.report({"INFO"}, "Transferred color keys to materials and removed vc keys")
+        self.report({"INFO"}, "Transferred color keys to nearest drones and removed vc keys")
         return {"FINISHED"}
 
 class CSVVA_PT_UI(Panel):
