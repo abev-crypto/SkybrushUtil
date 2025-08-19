@@ -235,16 +235,18 @@ class CSVVA_OT_Import(Operator):
         if hasattr(obj, "skybrush"):
             obj.skybrush.formation_vertex_group = "Drones"
 
-        # Create a formation and append it to the storyboard
+        # Create a formation and add a storyboard entry
         bpy.ops.object.select_all(action='DESELECT')
         obj.select_set(True)
         context.view_layer.objects.active = obj
         bpy.ops.skybrush.create_formation(name=obj.name, contents='SELECTED_OBJECTS')
-        bpy.ops.skybrush.append_formation_to_storyboard()
         try:
-            sb_entry = context.scene.skybrush.storyboard.entries[-1]
-            sb_entry.frame_start = start_frame
-            sb_entry.duration = duration
+            bpy.ops.skybrush.append_formation_to_storyboard()
+            storyboard = context.scene.skybrush.storyboard
+            entry = storyboard.entries[-1]
+            entry.name = folder_name
+            entry.frame_start = start_frame
+            entry.duration = duration
         except Exception:
             pass
 
