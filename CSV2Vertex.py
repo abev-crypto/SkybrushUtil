@@ -166,8 +166,8 @@ def make_frame_handler(obj):
 
 class CSVVA_Props(PropertyGroup):
     folder: StringProperty(
-        name="CSVフォルダ",
-        description="Time[msec], x[m], y[m], z[m], Red, Green, Blue を含むCSV/TSVのフォルダ",
+        name="CSV Folder",
+        description="Folder containing CSV/TSV files with columns: Time[msec], x[m], y[m], z[m], Red, Green, Blue",
         subtype="DIR_PATH",
     )
     fps: IntProperty(
@@ -181,24 +181,24 @@ class CSVVA_Props(PropertyGroup):
         default=0,
     )
     delimiter: EnumProperty(
-        name="区切り",
+        name="Delimiter",
         items=[
-            ("auto", "自動", "自動判別"),
-            ("\t", "タブ", "タブ区切り"),
-            (",", "カンマ", "カンマ区切り"),
-            (";", "セミコロン", "セミコロン"),
+            ("auto", "Auto", "Auto-detect"),
+            ("\t", "Tab", "Tab-delimited"),
+            (",", "Comma", "Comma-delimited"),
+            (";", "Semicolon", "Semicolon"),
         ],
         default="auto",
     )
     normalize_rgb: BoolProperty(
-        name="RGBを0-1正規化",
+        name="Normalize RGB to 0-1",
         default=False,
-        description="キーに打つ色値を0-255のままではなく0-1へ正規化して保存",
+        description="Save color keyframes normalized to 0-1 instead of 0-255",
     )
 
 class CSVVA_OT_Import(Operator):
     bl_idname = "csvva.import_setup"
-    bl_label = "インポート＆セットアップ"
+    bl_label = "Import & Setup"
     bl_options = {"REGISTER", "UNDO"}
 
     def execute(self, context):
@@ -206,13 +206,13 @@ class CSVVA_OT_Import(Operator):
         start_frame = int(prefs.start_frame)
         folder = bpy.path.abspath(prefs.folder)
         if not os.path.isdir(folder):
-            self.report({"ERROR"}, "CSVフォルダが不正です")
+            self.report({"ERROR"}, "Invalid CSV folder")
             return {"CANCELLED"}
 
         folder_name = os.path.basename(os.path.normpath(folder))
         tracks = build_tracks_from_folder(folder, delimiter=prefs.delimiter)
         if not tracks:
-            self.report({"ERROR"}, "フォルダ内にCSV/TSVが見つかりません")
+            self.report({"ERROR"}, "No CSV/TSV files found in folder")
             return {"CANCELLED"}
 
         # Determine total duration in frames
@@ -315,35 +315,35 @@ class CSVVA_OT_Import(Operator):
         handler = make_frame_handler(obj)
         register_handler(handler)
 
-        self.report({"INFO"}, f"セットアップ完了: {len(tracks)} CSV -> {obj.name}（頂点）")
+        self.report({"INFO"}, f"Setup complete: {len(tracks)} CSV -> {obj.name} (vertices)")
         return {"FINISHED"}
 
 class CSVVA_OT_RemoveHandler(Operator):
     bl_idname = "csvva.remove_handler"
-    bl_label = "位置更新ハンドラ解除"
+    bl_label = "Remove Position Update Handler"
     bl_options = {"REGISTER", "UNDO"}
 
     def execute(self, context):
         unregister_handler()
-        self.report({"INFO"}, "フレーム変更ハンドラを解除しました")
+        self.report({"INFO"}, "Removed frame change handler")
         return {"FINISHED"}
 
 
 class CSVVA_OT_TransferColorKeys(Operator):
     bl_idname = "csvva.transfer_color_keys"
-    bl_label = "カラーキーを移植"
+    bl_label = "Transfer Color Keys"
     bl_options = {"REGISTER", "UNDO"}
 
     def execute(self, context):
         obj = context.active_object
         if not obj or "csv_tracks_json" not in obj:
-            self.report({"ERROR"}, "CSVがセットアップされたオブジェクトを選択してください")
+            self.report({"ERROR"}, "Please select an object with CSV setup")
             return {"CANCELLED"}
 
         try:
             payload = json.loads(obj["csv_tracks_json"])
         except Exception:
-            self.report({"ERROR"}, "CSV情報を解析できません")
+            self.report({"ERROR"}, "Unable to parse CSV information")
             return {"CANCELLED"}
 
         tracks = payload.get("tracks", [])
@@ -386,7 +386,7 @@ class CSVVA_OT_TransferColorKeys(Operator):
             if key.startswith("vc["):
                 del obj[key]
 
-        self.report({"INFO"}, "マテリアルにカラーキーを移植し、vcキーを削除しました")
+        self.report({"INFO"}, "Transferred color keys to materials and removed vc keys")
         return {"FINISHED"}
 
 class CSVVA_PT_UI(Panel):
