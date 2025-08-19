@@ -410,3 +410,27 @@ class CSVVA_PT_UI(Panel):
         col.operator(CSVVA_OT_TransferColorKeys.bl_idname, icon="NODETREE")
         col.separator()
         col.operator(CSVVA_OT_RemoveHandler.bl_idname, icon="X")
+
+
+# ---------- Registration ----------
+
+classes = (
+    CSVVA_Props,
+    CSVVA_OT_Import,
+    CSVVA_OT_RemoveHandler,
+    CSVVA_OT_TransferColorKeys,
+    CSVVA_PT_UI,
+)
+
+
+def register():
+    for cls in classes:
+        bpy.utils.register_class(cls)
+    bpy.types.Scene.csvva_props = bpy.props.PointerProperty(type=CSVVA_Props)
+
+
+def unregister():
+    unregister_handler()
+    del bpy.types.Scene.csvva_props
+    for cls in reversed(classes):
+        bpy.utils.unregister_class(cls)
