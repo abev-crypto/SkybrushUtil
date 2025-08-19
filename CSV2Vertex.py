@@ -1,5 +1,5 @@
 import bpy
-from bpy.props import StringProperty, IntProperty, EnumProperty, BoolProperty
+from bpy.props import StringProperty
 from bpy.types import Operator, Panel, PropertyGroup
 import csv, json, os, re
 from mathutils import Vector
@@ -64,18 +64,45 @@ def build_tracks_from_folder(folder, delimiter="auto"):
         tracks.append({"name": os.path.splitext(os.path.basename(p))[0], "data": data})
     return tracks
 
-def ensure_single_mesh(name="CSV_Tracks", count=1, first_positions=None):
-    # Create a mesh object with 'count' vertices (no edges/faces)
+def ensure_mesh_with_armature(name="CSV_Tracks", count=1, first_positions=None):
+    # Create an armature with one bone per vertex
+    arm = bpy.data.armatures.new(name + "_arm")
+    arm_obj = bpy.data.objects.new(name + "_Arm", arm)
+    bpy.context.scene.collection.objects.link(arm_obj)
+
+    bpy.context.view_layer.objects.active = arm_obj
+    bpy.ops.object.mode_set(mode="EDIT")
+    for i in range(count):
+        bone = arm.edit_bones.new(f"Bone_{i}")
+        bone.head = (0.0, 0.0, 0.0)
+        bone.tail = (0.0, 0.0, 0.1)
+    bpy.ops.object.mode_set(mode="POSE")
+    for i in range(count):
+        pb = arm_obj.pose.bones[f"Bone_{i}"]
+        if first_positions and len(first_positions) == count:
+            pb.location = first_positions[i]
+        else:
+            pb.location = (0.0, 0.0, 0.0)
+    bpy.ops.object.mode_set(mode="OBJECT")
+
+    # Create mesh with vertices at origin
     mesh = bpy.data.meshes.new(name + "_mesh")
     obj = bpy.data.objects.new(name, mesh)
     bpy.context.scene.collection.objects.link(obj)
-    # Build vertex list
-    if first_positions and len(first_positions) == count:
-        verts = [tuple(first_positions[i]) for i in range(count)]
-    else:
-        verts = [(0.0, 0.0, 0.0) for _ in range(count)]
+    verts = [(0.0, 0.0, 0.0) for _ in range(count)]
     mesh.from_pydata(verts, [], [])
     mesh.update()
+
+    # Parent mesh to armature with modifier
+    obj.parent = arm_obj
+    mod = obj.modifiers.new(name="Armature", type="ARMATURE")
+    mod.object = arm_obj
+
+    # Vertex groups per bone
+    for i in range(count):
+        vg = obj.vertex_groups.new(name=f"Bone_{i}")
+        vg.add([i], 1.0, "REPLACE")
+
     return obj
 
 def unregister_handler():
@@ -112,7 +139,10 @@ def make_frame_handler(obj):
         if not ob.data or ob.data.name not in bpy.data.meshes:
             return
 
-        mesh = ob.data
+        arm = ob.find_armature()
+        if not arm:
+            return
+
         try:
             payload = json.loads(ob["csv_tracks_json"])
         except Exception:
@@ -128,9 +158,8 @@ def make_frame_handler(obj):
         frame = scene.frame_current
         t_ms = ((frame - start_frame) / fps) * 1000.0
 
-        mesh_vertices = mesh.vertices
-        # Safety
-        n = min(len(tracks), len(mesh_vertices))
+        bones = arm.pose.bones
+        n = min(len(tracks), len(bones))
 
         for i in range(n):
             seq = tracks[i]["data"]  # list of dicts
@@ -154,9 +183,11 @@ def make_frame_handler(obj):
                     a["y"] + (b["y"] - a["y"]) * k,
                     a["z"] + (b["z"] - a["z"]) * k,
                 )
-            mesh_vertices[i].co = Vector(ob_co)
+            pb = bones.get(f"Bone_{i}")
+            if pb:
+                pb.location = Vector(ob_co)
 
-        mesh.update()
+        arm.update_tag(refresh={"DATA"})
 
     # Give a stable name for clean unregistration
     handler.__name__ = "csv_vertex_anim_handler_runtime"
@@ -184,18 +215,22 @@ def clear_drone_keys(start_frame, duration):
 
 # ---------- Import Helper ----------
 
-def import_csv_folder(context, folder, start_frame, prefs):
+def import_csv_folder(context, folder, start_frame):
     """Import CSV tracks from ``folder`` and create a mesh with animation.
 
-    Returns the created object or ``None`` if no tracks were found."""
+    Returns a tuple ``(object, duration)`` where ``object`` is the created
+    mesh or ``None`` if no tracks were found, and ``duration`` is the animation
+    length in frames."""
     folder_name = os.path.basename(os.path.normpath(folder))
-    tracks = build_tracks_from_folder(folder, delimiter=prefs.delimiter)
+    tracks = build_tracks_from_folder(folder)
     if not tracks:
-        return None
+        return None, 0
+
+    fps = context.scene.render.fps
 
     # Determine total duration in frames
     max_t_ms = max(tr["data"][-1]["t_ms"] for tr in tracks if tr["data"])
-    duration = int(ms_to_frame(max_t_ms, prefs.fps))
+    duration = int(ms_to_frame(max_t_ms, fps))
 
     # Build initial positions array
     first_positions = []
@@ -203,8 +238,8 @@ def import_csv_folder(context, folder, start_frame, prefs):
         d0 = tr["data"][0]
         first_positions.append((d0["x"], d0["y"], d0["z"]))
 
-    # Create single mesh with N vertices, named after the folder
-    obj = ensure_single_mesh(name=folder_name, count=len(tracks), first_positions=first_positions)
+    # Create mesh and armature with N bones/vertices
+    obj = ensure_mesh_with_armature(name=folder_name, count=len(tracks), first_positions=first_positions)
 
     # Create a vertex group containing all vertices for formations
     vg = obj.vertex_groups.new(name="Drones")
@@ -230,16 +265,17 @@ def import_csv_folder(context, folder, start_frame, prefs):
 
     # Build payload for handler: store compact JSON on the object
     payload = {
-        "fps": prefs.fps,
+        "fps": fps,
         "start_frame": start_frame,
+        "duration": duration,
         "tracks": tracks,
         "time_index": [[row["t_ms"] for row in tr["data"]] for tr in tracks],
     }
     obj["csv_tracks_json"] = json.dumps(payload)
 
     # Color keyframes: store on object custom properties
-    normalize = prefs.normalize_rgb
-    fps = float(prefs.fps)
+    normalize = False
+    fps = float(fps)
 
     if not obj.animation_data:
         obj.animation_data_create()
@@ -271,7 +307,80 @@ def import_csv_folder(context, folder, start_frame, prefs):
     handler = make_frame_handler(obj)
     register_handler(handler)
 
-    return obj
+    return obj, duration
+
+# ---------- Color Key Transfer ----------
+
+def transfer_color_keys(obj):
+    """Transfer vertex color keyframes to nearest drones and clean up.
+
+    ``obj`` should be the mesh object created by ``import_csv_folder`` that
+    stores color keyframes in custom properties of the form ``vc[index]``.
+    The function finds the nearest object from the ``Drones`` collection for
+    each vertex and applies the stored color keyframes to that object's
+    material, then removes the temporary keyframes and properties from
+    ``obj``.
+    """
+
+    if not obj or "csv_tracks_json" not in obj:
+        return
+
+    from color_key_utils import apply_color_keys_to_nearest
+
+    payload = json.loads(obj["csv_tracks_json"])
+    start_frame = int(payload.get("start_frame", bpy.context.scene.frame_current))
+    bpy.context.scene.frame_set(start_frame)
+
+    drones_col = bpy.data.collections.get("Drones")
+    if not drones_col:
+        return
+    available_objects = list(drones_col.objects)
+    if not available_objects:
+        return
+
+    if not obj.animation_data or not obj.animation_data.action:
+        return
+    action = obj.animation_data.action
+
+    key_map = {}
+    for fc in action.fcurves:
+        m = re.match(r'\["vc\[(\d+)\]_([RGB])"\]', fc.data_path)
+        if not m:
+            continue
+        vid = int(m.group(1))
+        ch = m.group(2)
+        pts = [(kp.co.x, kp.co.y) for kp in fc.keyframe_points]
+        if pts:
+            key_map.setdefault(vid, {})[ch] = pts
+
+    mesh = obj.data
+
+    for vid, channels in key_map.items():
+        if vid >= len(mesh.vertices):
+            continue
+        v_world = obj.matrix_world @ mesh.vertices[vid].co
+        channel_map = {"R": 0, "G": 1, "B": 2}
+        data = {channel_map[ch]: frames for ch, frames in channels.items()}
+        apply_color_keys_to_nearest(
+            v_world,
+            data,
+            available_objects,
+            frame_offset=0,
+            normalize_255=True,
+        )
+
+    # Remove vc custom property keyframes and properties
+    action = obj.animation_data.action
+    for fc in list(action.fcurves):
+        if fc.data_path.startswith('["vc['):
+            action.fcurves.remove(fc)
+    if not action.fcurves:
+        obj.animation_data.action = None
+        bpy.data.actions.remove(action)
+
+    for key in list(obj.keys()):
+        if key.startswith("vc["):
+            del obj[key]
 
 # ---------- Properties / UI ----------
 
@@ -281,31 +390,6 @@ class CSVVA_Props(PropertyGroup):
         description="Folder containing CSV/TSV files with columns: Time[msec], x[m], y[m], z[m], Red, Green, Blue",
         subtype="DIR_PATH",
     )
-    fps: IntProperty(
-        name="FPS",
-        default=24,
-        min=1,
-        max=480,
-    )
-    start_frame: IntProperty(
-        name="Start Frame",
-        default=0,
-    )
-    delimiter: EnumProperty(
-        name="Delimiter",
-        items=[
-            ("auto", "Auto", "Auto-detect"),
-            ("\t", "Tab", "Tab-delimited"),
-            (",", "Comma", "Comma-delimited"),
-            (";", "Semicolon", "Semicolon"),
-        ],
-        default="auto",
-    )
-    normalize_rgb: BoolProperty(
-        name="Normalize RGB to 0-1",
-        default=False,
-        description="Save color keyframes normalized to 0-1 instead of 0-255",
-    )
 
 class CSVVA_OT_Import(Operator):
     bl_idname = "csvva.import_setup"
@@ -314,8 +398,12 @@ class CSVVA_OT_Import(Operator):
 
     def execute(self, context):
         prefs = context.scene.csvva_props
-        base_start = int(prefs.start_frame)
         folder = bpy.path.abspath(prefs.folder)
+        storyboard = context.scene.skybrush.storyboard
+        base_start = 0
+        if storyboard.entries:
+            last = storyboard.entries[-1]
+            base_start = last.frame_start + last.duration
         if not os.path.isdir(folder):
             self.report({"ERROR"}, "Invalid CSV folder")
             return {"CANCELLED"}
@@ -323,13 +411,13 @@ class CSVVA_OT_Import(Operator):
         subdirs = [d for d in sorted(os.listdir(folder)) if os.path.isdir(os.path.join(folder, d))]
         if subdirs:
             created = []
+            start_frame = base_start
             for d in subdirs:
                 sub_path = os.path.join(folder, d)
-                m = re.search(r'_(\d+)$', d)
-                sf = int(m.group(1)) if m else base_start
-                obj = import_csv_folder(context, sub_path, sf, prefs)
+                obj, dur = import_csv_folder(context, sub_path, start_frame)
                 if obj:
                     created.append(obj)
+                    start_frame += dur
             if not created:
                 self.report({"ERROR"}, "No CSV/TSV files found in subfolders")
                 return {"CANCELLED"}
@@ -338,11 +426,8 @@ class CSVVA_OT_Import(Operator):
             except Exception:
                 pass
             for obj in created:
-                bpy.ops.object.select_all(action='DESELECT')
-                obj.select_set(True)
-                context.view_layer.objects.active = obj
                 try:
-                    bpy.ops.csvva.transfer_color_keys()
+                    transfer_color_keys(obj)
                 except Exception:
                     pass
             self.report({"INFO"}, f"Setup complete for {len(created)} folders")
@@ -367,7 +452,7 @@ class CSVVA_OT_Import(Operator):
                     storyboard.entries.remove(idx)
                     break
 
-        obj = import_csv_folder(context, folder, start_frame, prefs)
+        obj, _ = import_csv_folder(context, folder, start_frame)
         if not obj:
             self.report({"ERROR"}, "No CSV/TSV files found in folder")
             return {"CANCELLED"}
@@ -379,7 +464,7 @@ class CSVVA_OT_Import(Operator):
         obj.select_set(True)
         context.view_layer.objects.active = obj
         try:
-            bpy.ops.csvva.transfer_color_keys()
+            transfer_color_keys(obj)
         except Exception:
             pass
         self.report({"INFO"}, f"Setup complete: {obj.name}")
@@ -395,83 +480,6 @@ class CSVVA_OT_RemoveHandler(Operator):
         self.report({"INFO"}, "Removed frame change handler")
         return {"FINISHED"}
 
-
-class CSVVA_OT_TransferColorKeys(Operator):
-    bl_idname = "csvva.transfer_color_keys"
-    bl_label = "Transfer Color Keys"
-    bl_options = {"REGISTER", "UNDO"}
-
-    def execute(self, context):
-        obj = context.active_object
-        if not obj or "csv_tracks_json" not in obj:
-            self.report({"ERROR"}, "Please select an object with CSV setup")
-            return {"CANCELLED"}
-
-        from color_key_utils import apply_color_keys_to_nearest
-
-        payload = json.loads(obj["csv_tracks_json"])
-        start_frame = int(payload.get("start_frame", context.scene.frame_current))
-        context.scene.frame_set(start_frame)
-
-        drones_col = bpy.data.collections.get("Drones")
-        if not drones_col:
-            self.report({"ERROR"}, "Drones collection not found")
-            return {"CANCELLED"}
-        available_objects = list(drones_col.objects)
-        if not available_objects:
-            self.report({"ERROR"}, "No drones in Drones collection")
-            return {"CANCELLED"}
-
-        if not obj.animation_data or not obj.animation_data.action:
-            self.report({"ERROR"}, "No vc keyframes found")
-            return {"CANCELLED"}
-        action = obj.animation_data.action
-
-        # Gather keyframes for each vc[index]_{R,G,B}
-        key_map = {}
-        for fc in action.fcurves:
-            m = re.match(r'\["vc\[(\d+)\]_([RGB])"\]', fc.data_path)
-            if not m:
-                continue
-            vid = int(m.group(1))
-            ch = m.group(2)
-            pts = [(kp.co.x, kp.co.y) for kp in fc.keyframe_points]
-            if pts:
-                key_map.setdefault(vid, {})[ch] = pts
-
-        mesh = obj.data
-
-        for vid, channels in key_map.items():
-            if vid >= len(mesh.vertices):
-                continue
-            v_world = obj.matrix_world @ mesh.vertices[vid].co
-            channel_map = {"R": 0, "G": 1, "B": 2}
-            data = {channel_map[ch]: frames for ch, frames in channels.items()}
-            apply_color_keys_to_nearest(
-                v_world,
-                data,
-                available_objects,
-                frame_offset=0,
-                normalize_255=True,
-            )
-
-        # Remove vc[] custom property keyframes and properties
-        if obj.animation_data and obj.animation_data.action:
-            action = obj.animation_data.action
-            for fc in list(action.fcurves):
-                if fc.data_path.startswith('["vc['):
-                    action.fcurves.remove(fc)
-            if not action.fcurves:
-                obj.animation_data.action = None
-                bpy.data.actions.remove(action)
-
-        for key in list(obj.keys()):
-            if key.startswith("vc["):
-                del obj[key]
-
-        self.report({"INFO"}, "Transferred color keys to nearest drones and removed vc keys")
-        return {"FINISHED"}
-
 class CSVVA_PT_UI(Panel):
     bl_label = "CSV Vertex Anim"
     bl_idname = "CSVVA_PT_UI"
@@ -484,13 +492,7 @@ class CSVVA_PT_UI(Panel):
         prefs = context.scene.csvva_props
         col = lay.column(align=True)
         col.prop(prefs, "folder")
-        row = col.row(align=True)
-        row.prop(prefs, "fps")
-        row.prop(prefs, "start_frame")
-        row.prop(prefs, "delimiter")
-        col.prop(prefs, "normalize_rgb")
         col.operator(CSVVA_OT_Import.bl_idname, icon="IMPORT")
-        col.operator(CSVVA_OT_TransferColorKeys.bl_idname, icon="NODETREE")
         col.separator()
         col.operator(CSVVA_OT_RemoveHandler.bl_idname, icon="X")
 
@@ -501,7 +503,6 @@ classes = (
     CSVVA_Props,
     CSVVA_OT_Import,
     CSVVA_OT_RemoveHandler,
-    CSVVA_OT_TransferColorKeys,
     CSVVA_PT_UI,
 )
 
