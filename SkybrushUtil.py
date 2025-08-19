@@ -16,6 +16,7 @@ import json, os, shutil
 from sbstudio.plugin.operators import RecalculateTransitionsOperator
 from sbstudio.plugin.operators.base import StoryboardOperator
 from skybrush import light_effects as light_effects_patch
+import CSV2Vertex
 
 
 KeydataStr = "_KeyData.json"
@@ -1211,6 +1212,7 @@ def register():
     bpy.types.Scene.shift_prefix_list = bpy.props.PointerProperty(type=ShiftPrefixList)
     bpy.app.timers.register(try_patch)
     light_effects_patch.register()
+    CSV2Vertex.register()
 
 def unregister():
     for cls in reversed(classes):
@@ -1222,6 +1224,7 @@ def unregister():
         bpy.app.timers.unregister(try_patch)
     unpatch_recalculate_operator()
     light_effects_patch.unregister()
+    CSV2Vertex.unregister()
 
 if __name__ == "__main__":
     register()
