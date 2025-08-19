@@ -41,3 +41,28 @@ def apply_color_keys_to_nearest(location, keyframes_by_channel, available_object
                 "default_value", frame=frame + frame_offset, index=channel
             )
     available_objects.remove(nearest_obj)
+
+
+def apply_color_keys_from_key_data(key_entries, start_frame=0, collection_name="Drones"):
+    """Apply color keyframes for each entry using nearest drones.
+
+    ``key_entries`` should be a list of dictionaries as produced by
+    ``tracks_to_keydata`` in :mod:`CSV2Vertex`, containing the initial location
+    of a track and its color keyframes. Keyframes are applied relative to
+    ``start_frame`` and matched to the nearest objects found in the Blender
+    collection named by ``collection_name``.
+    """
+    if not key_entries:
+        return
+    drones_col = bpy.data.collections.get(collection_name)
+    if not drones_col:
+        return
+    available = list(drones_col.objects)
+    for entry in key_entries:
+        apply_color_keys_to_nearest(
+            entry["location"],
+            entry["keys"],
+            available,
+            frame_offset=start_frame,
+            normalize_255=True,
+        )
