@@ -162,6 +162,26 @@ def make_frame_handler(obj):
     handler.__name__ = "csv_vertex_anim_handler_runtime"
     return handler
 
+# ---------- Utilities for Replacement ----------
+
+def clear_drone_keys(start_frame, duration):
+    """Remove color keyframes on drones within the given frame range."""
+    drones_col = bpy.data.collections.get("Drones")
+    if not drones_col:
+        return
+    end_frame = start_frame + duration
+    for obj in drones_col.objects:
+        mat = obj.active_material
+        if not mat or not mat.node_tree:
+            continue
+        anim = mat.node_tree.animation_data
+        if not anim or not anim.action:
+            continue
+        for fcurve in anim.action.fcurves:
+            for key in reversed(fcurve.keyframe_points):
+                if start_frame <= key.co.x <= end_frame:
+                    fcurve.keyframe_points.remove(key)
+
 # ---------- Import Helper ----------
 
 def import_csv_folder(context, folder, start_frame, prefs):
@@ -349,7 +369,26 @@ class CSVVA_OT_Import(Operator):
             self.report({"INFO"}, f"Setup complete for {len(created)} folders")
             return {"FINISHED"}
 
-        obj = import_csv_folder(context, folder, base_start, prefs)
+        folder_name = os.path.basename(os.path.normpath(folder))
+        start_frame = base_start
+        m = re.search(r"(.+)_\d+$", folder_name)
+        if m:
+            base_name = m.group(1)
+            storyboard = context.scene.skybrush.storyboard
+            for idx, sb in enumerate(storyboard.entries):
+                if sb.name == base_name:
+                    start_frame = sb.frame_start
+                    old_obj = bpy.data.objects.get(sb.name)
+                    if old_obj:
+                        mesh = old_obj.data
+                        bpy.data.objects.remove(old_obj, do_unlink=True)
+                        if mesh and mesh.users == 0:
+                            bpy.data.meshes.remove(mesh)
+                    clear_drone_keys(sb.frame_start, sb.duration)
+                    storyboard.entries.remove(idx)
+                    break
+
+        obj = import_csv_folder(context, folder, start_frame, prefs)
         if not obj:
             self.report({"ERROR"}, "No CSV/TSV files found in folder")
             return {"CANCELLED"}
