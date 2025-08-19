@@ -1080,6 +1080,8 @@ def unpatch_recalculate_operator():
 def try_patch():
     try:
         patch_recalculate_operator()
+        light_effects_patch._patch_light_effect_class()
+        light_effects_patch._patch_light_effects_panel()
     except Exception:
         return 0.5
     bpy.app.timers.unregister(try_patch)
