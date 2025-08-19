@@ -1,13 +1,9 @@
 import bpy
 from bpy.props import StringProperty
 from bpy.types import Operator, Panel, PropertyGroup
-import csv, json, os, re, math
-from mathutils import Vector
-from bisect import bisect_left
+import csv, os, re, math
 
 from color_key_utils import apply_color_keys_from_key_data
-
-HANDLER_TAG = "_csv_vertex_anim_handler"
 
 # ---------- Utilities ----------
 
@@ -131,94 +127,6 @@ def ensure_mesh_with_armature(name="CSV_Tracks", count=1, first_positions=None):
 
     return obj
 
-def unregister_handler():
-    sc = bpy.context.scene
-    # Remove existing handler if exists
-    if getattr(sc, HANDLER_TAG, None):
-        tag = sc.get(HANDLER_TAG)
-        # Clear all matching handlers
-        for h in list(bpy.app.handlers.frame_change_post):
-            if getattr(h, "__name__", "") == tag:
-                bpy.app.handlers.frame_change_post.remove(h)
-        del sc[HANDLER_TAG]
-
-def register_handler(fn):
-    unregister_handler()
-    bpy.app.handlers.frame_change_post.append(fn)
-    bpy.context.scene[HANDLER_TAG] = fn.__name__
-
-# ---------- Core: Frame Update ----------
-
-def make_frame_handler(obj):
-    """
-    Returns a frame_change_post handler function that:
-      - Reads JSON tracks from obj['csv_tracks_json']
-      - Moves each vertex to interpolated position at current frame
-    """
-    # Capture name to resolve object each call (avoid stale refs on file reload)
-    obj_name = obj.name
-
-    def handler(scene):
-        ob = scene.objects.get(obj_name)
-        if not ob or "csv_tracks_json" not in ob:
-            return
-        if not ob.data or ob.data.name not in bpy.data.meshes:
-            return
-
-        arm = ob.find_armature()
-        if not arm:
-            return
-
-        try:
-            payload = json.loads(ob["csv_tracks_json"])
-        except Exception:
-            return
-
-        fps = float(payload.get("fps", 24.0))
-        start_frame = int(payload.get("start_frame", 0))
-        tracks = payload.get("tracks", [])
-        if not tracks:
-            return
-
-        # Build per-track time list cache (optional)
-        frame = scene.frame_current
-        t_ms = ((frame - start_frame) / fps) * 1000.0
-
-        bones = arm.pose.bones
-        n = min(len(tracks), len(bones))
-
-        for i in range(n):
-            seq = tracks[i]["data"]  # list of dicts
-            # binary search on time
-            times = payload["time_index"][i]
-            idx = bisect_left(times, t_ms)
-            if idx <= 0:
-                p = seq[0]
-                ob_co = (p["x"], p["y"], p["z"])
-            elif idx >= len(seq):
-                p = seq[-1]
-                ob_co = (p["x"], p["y"], p["z"])
-            else:
-                a = seq[idx - 1]
-                b = seq[idx]
-                # Linear interpolation
-                t0, t1 = a["t_ms"], b["t_ms"]
-                k = 0.0 if t1 == t0 else (t_ms - t0) / (t1 - t0)
-                ob_co = (
-                    a["x"] + (b["x"] - a["x"]) * k,
-                    a["y"] + (b["y"] - a["y"]) * k,
-                    a["z"] + (b["z"] - a["z"]) * k,
-                )
-            pb = bones.get(f"Bone_{i}")
-            if pb:
-                pb.location = Vector(ob_co)
-
-        arm.update_tag(refresh={"DATA"})
-
-    # Give a stable name for clean unregistration
-    handler.__name__ = "csv_vertex_anim_handler_runtime"
-    return handler
-
 # ---------- Utilities for Replacement ----------
 
 def clear_drone_keys(start_frame, duration):
@@ -293,22 +201,24 @@ def import_csv_folder(context, folder, start_frame):
     except Exception:
         pass
 
-    # Build payload for handler: store compact JSON on the object
-    payload = {
-        "fps": fps,
-        "start_frame": start_frame,
-        "duration": duration,
-        "tracks": tracks,
-        "time_index": [[row["t_ms"] for row in tr["data"]] for tr in tracks],
-    }
-    obj["csv_tracks_json"] = json.dumps(payload)
+    # Animate bones directly with keyframes
+    arm_obj = obj.parent
+    for i, tr in enumerate(tracks):
+        pb = arm_obj.pose.bones.get(f"Bone_{i}")
+        if not pb:
+            continue
+        for row in tr["data"]:
+            frame = start_frame + ms_to_frame(row["t_ms"], fps)
+            pb.location = (row["x"], row["y"], row["z"])
+            pb.keyframe_insert(data_path="location", frame=frame)
+
+    if arm_obj.animation_data and arm_obj.animation_data.action:
+        for fcurve in arm_obj.animation_data.action.fcurves:
+            for key in fcurve.keyframe_points:
+                key.interpolation = 'LINEAR'
 
     # Prepare color keyframe data for later application
     key_entries = tracks_to_keydata(tracks, fps)
-
-    # Register/update frame handler
-    handler = make_frame_handler(obj)
-    register_handler(handler)
 
     return obj, duration, key_entries
 
@@ -402,16 +312,6 @@ class CSVVA_OT_Import(Operator):
         self.report({"INFO"}, f"Setup complete: {obj.name}")
         return {"FINISHED"}
 
-class CSVVA_OT_RemoveHandler(Operator):
-    bl_idname = "csvva.remove_handler"
-    bl_label = "Remove Position Update Handler"
-    bl_options = {"REGISTER", "UNDO"}
-
-    def execute(self, context):
-        unregister_handler()
-        self.report({"INFO"}, "Removed frame change handler")
-        return {"FINISHED"}
-
 class CSVVA_PT_UI(Panel):
     bl_label = "CSV Vertex Anim"
     bl_idname = "CSVVA_PT_UI"
@@ -425,8 +325,6 @@ class CSVVA_PT_UI(Panel):
         col = lay.column(align=True)
         col.prop(prefs, "folder")
         col.operator(CSVVA_OT_Import.bl_idname, icon="IMPORT")
-        col.separator()
-        col.operator(CSVVA_OT_RemoveHandler.bl_idname, icon="X")
 
 
 # ---------- Registration ----------
@@ -434,7 +332,6 @@ class CSVVA_PT_UI(Panel):
 classes = (
     CSVVA_Props,
     CSVVA_OT_Import,
-    CSVVA_OT_RemoveHandler,
     CSVVA_PT_UI,
 )
 
@@ -446,7 +343,6 @@ def register():
 
 
 def unregister():
-    unregister_handler()
     del bpy.types.Scene.csvva_props
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
