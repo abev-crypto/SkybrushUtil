@@ -64,6 +64,27 @@ def build_tracks_from_folder(folder, delimiter="auto"):
         tracks.append({"name": os.path.splitext(os.path.basename(p))[0], "data": data})
     return tracks
 
+
+def tracks_to_keydata(tracks, fps):
+    """Convert loaded ``tracks`` to Skybrush key data format."""
+    key_data = []
+    for tr in tracks:
+        if not tr["data"]:
+            continue
+        first = tr["data"][0]
+        keys = {0: [], 1: [], 2: []}
+        for row in tr["data"]:
+            frame = ms_to_frame(row["t_ms"], fps)
+            keys[0].append((frame, row["r"]))
+            keys[1].append((frame, row["g"]))
+            keys[2].append((frame, row["b"]))
+        key_data.append({
+            "name": tr["name"],
+            "location": [first["x"], first["y"], first["z"]],
+            "keys": keys,
+        })
+    return key_data
+
 def ensure_mesh_with_armature(name="CSV_Tracks", count=1, first_positions=None):
     # Create an armature with one bone per vertex
     arm = bpy.data.armatures.new(name + "_arm")
@@ -279,35 +300,21 @@ def import_csv_folder(context, folder, start_frame):
     }
     obj["csv_tracks_json"] = json.dumps(payload)
 
-    # Color keyframes: store on object custom properties
-    normalize = False
-    fps = float(fps)
+    # Apply color keyframes directly to drones
+    from color_key_utils import apply_color_keys_to_nearest
 
-    if not obj.animation_data:
-        obj.animation_data_create()
-    if not obj.animation_data.action:
-        obj.animation_data.action = bpy.data.actions.new(name="CSV_ColorKeys")
-
-    for i, tr in enumerate(tracks):
-        for ch in ("R", "G", "B"):
-            key = f'vc[{i}]_{ch}'
-            if key not in obj:
-                obj[key] = 0.0
-
-        for row in tr["data"]:
-            frame = start_frame + ms_to_frame(row["t_ms"], fps)
-            raw_r, raw_g, raw_b = row["r"], row["g"], row["b"]
-            prop_r, prop_g, prop_b = (
-                (raw_r / 255.0, raw_g / 255.0, raw_b / 255.0)
-                if normalize
-                else (raw_r, raw_g, raw_b)
+    drones_col = bpy.data.collections.get("Drones")
+    if drones_col:
+        available = list(drones_col.objects)
+        key_entries = tracks_to_keydata(tracks, fps)
+        for entry in key_entries:
+            apply_color_keys_to_nearest(
+                entry["location"],
+                entry["keys"],
+                available,
+                frame_offset=start_frame,
+                normalize_255=True,
             )
-            obj[f'vc[{i}]_R'] = float(prop_r)
-            obj[f'vc[{i}]_G'] = float(prop_g)
-            obj[f'vc[{i}]_B'] = float(prop_b)
-            obj.keyframe_insert(f'["vc[{i}]_R"]', frame=frame)
-            obj.keyframe_insert(f'["vc[{i}]_G"]', frame=frame)
-            obj.keyframe_insert(f'["vc[{i}]_B"]', frame=frame)
 
     # Register/update frame handler
     handler = make_frame_handler(obj)
@@ -315,78 +322,6 @@ def import_csv_folder(context, folder, start_frame):
 
     return obj, duration
 
-# ---------- Color Key Transfer ----------
-
-def transfer_color_keys(obj):
-    """Transfer vertex color keyframes to nearest drones and clean up.
-
-    ``obj`` should be the mesh object created by ``import_csv_folder`` that
-    stores color keyframes in custom properties of the form ``vc[index]``.
-    The function finds the nearest object from the ``Drones`` collection for
-    each vertex and applies the stored color keyframes to that object's
-    material, then removes the temporary keyframes and properties from
-    ``obj``.
-    """
-
-    if not obj or "csv_tracks_json" not in obj:
-        return
-
-    from color_key_utils import apply_color_keys_to_nearest
-
-    payload = json.loads(obj["csv_tracks_json"])
-    start_frame = int(payload.get("start_frame", bpy.context.scene.frame_current))
-    bpy.context.scene.frame_set(start_frame)
-
-    drones_col = bpy.data.collections.get("Drones")
-    if not drones_col:
-        return
-    available_objects = list(drones_col.objects)
-    if not available_objects:
-        return
-
-    if not obj.animation_data or not obj.animation_data.action:
-        return
-    action = obj.animation_data.action
-
-    key_map = {}
-    for fc in action.fcurves:
-        m = re.match(r'\["vc\[(\d+)\]_([RGB])"\]', fc.data_path)
-        if not m:
-            continue
-        vid = int(m.group(1))
-        ch = m.group(2)
-        pts = [(kp.co.x, kp.co.y) for kp in fc.keyframe_points]
-        if pts:
-            key_map.setdefault(vid, {})[ch] = pts
-
-    mesh = obj.data
-
-    for vid, channels in key_map.items():
-        if vid >= len(mesh.vertices):
-            continue
-        v_world = obj.matrix_world @ mesh.vertices[vid].co
-        channel_map = {"R": 0, "G": 1, "B": 2}
-        data = {channel_map[ch]: frames for ch, frames in channels.items()}
-        apply_color_keys_to_nearest(
-            v_world,
-            data,
-            available_objects,
-            frame_offset=0,
-            normalize_255=True,
-        )
-
-    # Remove vc custom property keyframes and properties
-    action = obj.animation_data.action
-    for fc in list(action.fcurves):
-        if fc.data_path.startswith('["vc['):
-            action.fcurves.remove(fc)
-    if not action.fcurves:
-        obj.animation_data.action = None
-        bpy.data.actions.remove(action)
-
-    for key in list(obj.keys()):
-        if key.startswith("vc["):
-            del obj[key]
 
 # ---------- Properties / UI ----------
 
@@ -436,11 +371,6 @@ class CSVVA_OT_Import(Operator):
                 bpy.ops.skybrush.recalculate_transitions(scope="ALL")
             except Exception:
                 pass
-            for obj in created:
-                try:
-                    transfer_color_keys(obj)
-                except Exception:
-                    pass
             self.report({"INFO"}, f"Setup complete for {len(created)} folders")
             return {"FINISHED"}
 
@@ -474,10 +404,6 @@ class CSVVA_OT_Import(Operator):
         bpy.ops.object.select_all(action='DESELECT')
         obj.select_set(True)
         context.view_layer.objects.active = obj
-        try:
-            transfer_color_keys(obj)
-        except Exception:
-            pass
         self.report({"INFO"}, f"Setup complete: {obj.name}")
         return {"FINISHED"}
 
