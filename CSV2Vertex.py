@@ -5,6 +5,8 @@ import csv, json, os, re, math
 from mathutils import Vector
 from bisect import bisect_left
 
+from color_key_utils import apply_color_keys_from_key_data
+
 HANDLER_TAG = "_csv_vertex_anim_handler"
 
 # ---------- Utilities ----------
@@ -242,9 +244,10 @@ def clear_drone_keys(start_frame, duration):
 def import_csv_folder(context, folder, start_frame):
     """Import CSV tracks from ``folder`` and create a mesh with animation.
 
-    Returns a tuple ``(object, duration)`` where ``object`` is the created
-    mesh or ``None`` if no tracks were found, and ``duration`` is the animation
-    length in frames."""
+    Returns a tuple ``(object, duration, key_entries)`` where ``object`` is the
+    created mesh or ``None`` if no tracks were found, ``duration`` is the
+    animation length in frames and ``key_entries`` contains color keyframe data
+    prepared for later application."""
     folder_name = os.path.basename(os.path.normpath(folder))
     m = re.search(r"(.+)_\d+$", folder_name)
     if m:
@@ -300,27 +303,14 @@ def import_csv_folder(context, folder, start_frame):
     }
     obj["csv_tracks_json"] = json.dumps(payload)
 
-    # Apply color keyframes directly to drones
-    from color_key_utils import apply_color_keys_to_nearest
-
-    drones_col = bpy.data.collections.get("Drones")
-    if drones_col:
-        available = list(drones_col.objects)
-        key_entries = tracks_to_keydata(tracks, fps)
-        for entry in key_entries:
-            apply_color_keys_to_nearest(
-                entry["location"],
-                entry["keys"],
-                available,
-                frame_offset=start_frame,
-                normalize_255=True,
-            )
+    # Prepare color keyframe data for later application
+    key_entries = tracks_to_keydata(tracks, fps)
 
     # Register/update frame handler
     handler = make_frame_handler(obj)
     register_handler(handler)
 
-    return obj, duration
+    return obj, duration, key_entries
 
 
 # ---------- Properties / UI ----------
@@ -353,6 +343,7 @@ class CSVVA_OT_Import(Operator):
         if subdirs:
             created = []
             next_start = base_start
+            key_data_collection = []
             for d in subdirs:
                 sub_path = os.path.join(folder, d)
                 m = re.search(r".*_(\d+)$", d)
@@ -360,9 +351,10 @@ class CSVVA_OT_Import(Operator):
                     sf = int(m.group(1))
                 else:
                     sf = next_start
-                obj, dur = import_csv_folder(context, sub_path, sf)
+                obj, dur, key_entries = import_csv_folder(context, sub_path, sf)
                 if obj:
                     created.append(obj)
+                    key_data_collection.append((key_entries, sf))
                     next_start = max(next_start, sf + dur)
             if not created:
                 self.report({"ERROR"}, "No CSV/TSV files found in subfolders")
@@ -371,6 +363,8 @@ class CSVVA_OT_Import(Operator):
                 bpy.ops.skybrush.recalculate_transitions(scope="ALL")
             except Exception:
                 pass
+            for key_entries, sf in key_data_collection:
+                apply_color_keys_from_key_data(key_entries, sf)
             self.report({"INFO"}, f"Setup complete for {len(created)} folders")
             return {"FINISHED"}
 
@@ -393,7 +387,7 @@ class CSVVA_OT_Import(Operator):
                 storyboard.entries.remove(idx)
                 break
 
-        obj, _ = import_csv_folder(context, folder, start_frame)
+        obj, _, key_entries = import_csv_folder(context, folder, start_frame)
         if not obj:
             self.report({"ERROR"}, "No CSV/TSV files found in folder")
             return {"CANCELLED"}
@@ -401,6 +395,7 @@ class CSVVA_OT_Import(Operator):
             bpy.ops.skybrush.recalculate_transitions(scope="ALL")
         except Exception:
             pass
+        apply_color_keys_from_key_data(key_entries, start_frame)
         bpy.ops.object.select_all(action='DESELECT')
         obj.select_set(True)
         context.view_layer.objects.active = obj
