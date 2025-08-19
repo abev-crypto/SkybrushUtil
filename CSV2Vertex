@@ -209,10 +209,15 @@ class CSVVA_OT_Import(Operator):
             self.report({"ERROR"}, "CSVフォルダが不正です")
             return {"CANCELLED"}
 
+        folder_name = os.path.basename(os.path.normpath(folder))
         tracks = build_tracks_from_folder(folder, delimiter=prefs.delimiter)
         if not tracks:
             self.report({"ERROR"}, "フォルダ内にCSV/TSVが見つかりません")
             return {"CANCELLED"}
+
+        # Determine total duration in frames
+        max_t_ms = max(tr["data"][-1]["t_ms"] for tr in tracks if tr["data"])
+        duration = int(ms_to_frame(max_t_ms, prefs.fps))
 
         # Build initial positions array
         first_positions = []
@@ -220,8 +225,28 @@ class CSVVA_OT_Import(Operator):
             d0 = tr["data"][0]
             first_positions.append((d0["x"], d0["y"], d0["z"]))
 
-        # Create single mesh with N vertices
-        obj = ensure_single_mesh(name="CSV_Tracks", count=len(tracks), first_positions=first_positions)
+        # Create single mesh with N vertices, named after the folder
+        obj = ensure_single_mesh(name=folder_name, count=len(tracks), first_positions=first_positions)
+
+        # Create a vertex group containing all vertices for formations
+        vg = obj.vertex_groups.new(name="Drones")
+        vg.add(range(len(obj.data.vertices)), 1.0, 'REPLACE')
+
+        if hasattr(obj, "skybrush"):
+            obj.skybrush.formation_vertex_group = "Drones"
+
+        # Create a formation and append it to the storyboard
+        bpy.ops.object.select_all(action='DESELECT')
+        obj.select_set(True)
+        context.view_layer.objects.active = obj
+        bpy.ops.skybrush.create_formation(name=obj.name, contents='SELECTED_OBJECTS')
+        bpy.ops.skybrush.append_formation_to_storyboard()
+        try:
+            sb_entry = context.scene.skybrush.storyboard.entries[-1]
+            sb_entry.frame_start = start_frame
+            sb_entry.duration = duration
+        except Exception:
+            pass
 
         # Build payload for handler: store compact JSON on the object
         payload = {
