@@ -346,7 +346,7 @@ class CSVVA_OT_Import(Operator):
             created = []
             for d in subdirs:
                 sub_path = os.path.join(folder, d)
-                m = re.search(r'_StartFrame(\d+)$', d)
+                m = re.search(r'_(\d+)$', d)
                 sf = int(m.group(1)) if m else base_start
                 obj = import_csv_folder(context, sub_path, sf, prefs)
                 if obj:
