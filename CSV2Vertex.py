@@ -1,7 +1,7 @@
 import bpy
 from bpy.props import StringProperty
 from bpy.types import Operator, Panel, PropertyGroup
-import csv, json, os, re
+import csv, json, os, re, math
 from mathutils import Vector
 from bisect import bisect_left
 
@@ -102,6 +102,9 @@ def ensure_mesh_with_armature(name="CSV_Tracks", count=1, first_positions=None):
     for i in range(count):
         vg = obj.vertex_groups.new(name=f"Bone_{i}")
         vg.add([i], 1.0, "REPLACE")
+
+    # Match original orientation without manual rotation
+    arm_obj.rotation_euler[0] = math.radians(-90)
 
     return obj
 
@@ -222,6 +225,9 @@ def import_csv_folder(context, folder, start_frame):
     mesh or ``None`` if no tracks were found, and ``duration`` is the animation
     length in frames."""
     folder_name = os.path.basename(os.path.normpath(folder))
+    m = re.search(r"(.+)_\d+$", folder_name)
+    if m:
+        folder_name = m.group(1)
     tracks = build_tracks_from_folder(folder)
     if not tracks:
         return None, 0
@@ -411,13 +417,18 @@ class CSVVA_OT_Import(Operator):
         subdirs = [d for d in sorted(os.listdir(folder)) if os.path.isdir(os.path.join(folder, d))]
         if subdirs:
             created = []
-            start_frame = base_start
+            next_start = base_start
             for d in subdirs:
                 sub_path = os.path.join(folder, d)
-                obj, dur = import_csv_folder(context, sub_path, start_frame)
+                m = re.search(r".*_(\d+)$", d)
+                if m:
+                    sf = int(m.group(1))
+                else:
+                    sf = next_start
+                obj, dur = import_csv_folder(context, sub_path, sf)
                 if obj:
                     created.append(obj)
-                    start_frame += dur
+                    next_start = max(next_start, sf + dur)
             if not created:
                 self.report({"ERROR"}, "No CSV/TSV files found in subfolders")
                 return {"CANCELLED"}
@@ -435,22 +446,22 @@ class CSVVA_OT_Import(Operator):
 
         folder_name = os.path.basename(os.path.normpath(folder))
         start_frame = base_start
-        m = re.search(r"(.+)_\d+$", folder_name)
+        base_name = folder_name
+        m = re.search(r"(.+)_([0-9]+)$", folder_name)
         if m:
-            base_name = m.group(1)
-            storyboard = context.scene.skybrush.storyboard
-            for idx, sb in enumerate(storyboard.entries):
-                if sb.name == base_name:
-                    start_frame = sb.frame_start
-                    old_obj = bpy.data.objects.get(sb.name)
-                    if old_obj:
-                        mesh = old_obj.data
-                        bpy.data.objects.remove(old_obj, do_unlink=True)
-                        if mesh and mesh.users == 0:
-                            bpy.data.meshes.remove(mesh)
-                    clear_drone_keys(sb.frame_start, sb.duration)
-                    storyboard.entries.remove(idx)
-                    break
+            base_name, start_frame = m.group(1), int(m.group(2))
+        storyboard = context.scene.skybrush.storyboard
+        for idx, sb in enumerate(storyboard.entries):
+            if sb.name == base_name:
+                old_obj = bpy.data.objects.get(sb.name)
+                if old_obj:
+                    mesh = old_obj.data
+                    bpy.data.objects.remove(old_obj, do_unlink=True)
+                    if mesh and mesh.users == 0:
+                        bpy.data.meshes.remove(mesh)
+                clear_drone_keys(sb.frame_start, sb.duration)
+                storyboard.entries.remove(idx)
+                break
 
         obj, _ = import_csv_folder(context, folder, start_frame)
         if not obj:
