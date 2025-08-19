@@ -237,56 +237,35 @@ def import_csv_folder(context, folder, start_frame, prefs):
     }
     obj["csv_tracks_json"] = json.dumps(payload)
 
-    # Color keyframes: either store on object properties or directly on drone materials
+    # Color keyframes: store on object custom properties
     normalize = prefs.normalize_rgb
     fps = float(prefs.fps)
 
-    for i, tr in enumerate(tracks):
-        # Find corresponding drone material input (Base Color)
-        base_socket = None
-        drones_col = bpy.data.collections.get("Drones")
-        if drones_col:
-            drone = drones_col.objects.get(tr["name"])
-            if drone and drone.active_material and drone.active_material.node_tree:
-                for node in drone.active_material.node_tree.nodes:
-                    if node.inputs and node.inputs[0].type == 'RGBA':
-                        base_socket = node.inputs[0]
-                        break
+    if not obj.animation_data:
+        obj.animation_data_create()
+    if not obj.animation_data.action:
+        obj.animation_data.action = bpy.data.actions.new(name="CSV_ColorKeys")
 
-        # If no material socket is found, fall back to custom properties
-        if not base_socket:
-            if not obj.animation_data:
-                obj.animation_data_create()
-            if not obj.animation_data.action:
-                obj.animation_data.action = bpy.data.actions.new(name="CSV_ColorKeys")
-            for ch in ("R", "G", "B"):
-                key = f'vc[{i}]_{ch}'
-                if key not in obj:
-                    obj[key] = 0.0
+    for i, tr in enumerate(tracks):
+        for ch in ("R", "G", "B"):
+            key = f'vc[{i}]_{ch}'
+            if key not in obj:
+                obj[key] = 0.0
 
         for row in tr["data"]:
             frame = start_frame + ms_to_frame(row["t_ms"], fps)
             raw_r, raw_g, raw_b = row["r"], row["g"], row["b"]
-
-            if base_socket:
-                base_socket.default_value[0] = raw_r / 255.0
-                base_socket.default_value[1] = raw_g / 255.0
-                base_socket.default_value[2] = raw_b / 255.0
-                base_socket.keyframe_insert("default_value", frame=frame, index=0)
-                base_socket.keyframe_insert("default_value", frame=frame, index=1)
-                base_socket.keyframe_insert("default_value", frame=frame, index=2)
-            else:
-                prop_r, prop_g, prop_b = (
-                    (raw_r/255.0, raw_g/255.0, raw_b/255.0)
-                    if normalize
-                    else (raw_r, raw_g, raw_b)
-                )
-                obj[f'vc[{i}]_R'] = float(prop_r)
-                obj[f'vc[{i}]_G'] = float(prop_g)
-                obj[f'vc[{i}]_B'] = float(prop_b)
-                obj.keyframe_insert(f'["vc[{i}]_R"]', frame=frame)
-                obj.keyframe_insert(f'["vc[{i}]_G"]', frame=frame)
-                obj.keyframe_insert(f'["vc[{i}]_B"]', frame=frame)
+            prop_r, prop_g, prop_b = (
+                (raw_r / 255.0, raw_g / 255.0, raw_b / 255.0)
+                if normalize
+                else (raw_r, raw_g, raw_b)
+            )
+            obj[f'vc[{i}]_R'] = float(prop_r)
+            obj[f'vc[{i}]_G'] = float(prop_g)
+            obj[f'vc[{i}]_B'] = float(prop_b)
+            obj.keyframe_insert(f'["vc[{i}]_R"]', frame=frame)
+            obj.keyframe_insert(f'["vc[{i}]_G"]', frame=frame)
+            obj.keyframe_insert(f'["vc[{i}]_B"]', frame=frame)
 
     # Register/update frame handler
     handler = make_frame_handler(obj)
@@ -392,6 +371,17 @@ class CSVVA_OT_Import(Operator):
         if not obj:
             self.report({"ERROR"}, "No CSV/TSV files found in folder")
             return {"CANCELLED"}
+        try:
+            bpy.ops.skybrush.recalculate_transitions(scope="ALL")
+        except Exception:
+            pass
+        bpy.ops.object.select_all(action='DESELECT')
+        obj.select_set(True)
+        context.view_layer.objects.active = obj
+        try:
+            bpy.ops.csvva.transfer_color_keys()
+        except Exception:
+            pass
         self.report({"INFO"}, f"Setup complete: {obj.name}")
         return {"FINISHED"}
 
