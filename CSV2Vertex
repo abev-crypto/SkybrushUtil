@@ -119,13 +119,14 @@ def make_frame_handler(obj):
             return
 
         fps = float(payload.get("fps", 24.0))
+        start_frame = int(payload.get("start_frame", 0))
         tracks = payload.get("tracks", [])
         if not tracks:
             return
 
         # Build per-track time list cache (optional)
         frame = scene.frame_current
-        t_ms = (frame / fps) * 1000.0
+        t_ms = ((frame - start_frame) / fps) * 1000.0
 
         mesh_vertices = mesh.vertices
         # Safety
@@ -175,6 +176,10 @@ class CSVVA_Props(PropertyGroup):
         min=1,
         max=480,
     )
+    start_frame: IntProperty(
+        name="Start Frame",
+        default=0,
+    )
     delimiter: EnumProperty(
         name="区切り",
         items=[
@@ -198,6 +203,7 @@ class CSVVA_OT_Import(Operator):
 
     def execute(self, context):
         prefs = context.scene.csvva_props
+        start_frame = int(prefs.start_frame)
         folder = bpy.path.abspath(prefs.folder)
         if not os.path.isdir(folder):
             self.report({"ERROR"}, "CSVフォルダが不正です")
@@ -220,6 +226,7 @@ class CSVVA_OT_Import(Operator):
         # Build payload for handler: store compact JSON on the object
         payload = {
             "fps": prefs.fps,
+            "start_frame": start_frame,
             "tracks": tracks,  # this is large; OK for moderate sizes
             "time_index": [[row["t_ms"] for row in tr["data"]] for tr in tracks],
         }
@@ -244,7 +251,7 @@ class CSVVA_OT_Import(Operator):
                     obj[key] = 0.0
 
             for row in tr["data"]:
-                frame = ms_to_frame(row["t_ms"], fps)
+                frame = start_frame + ms_to_frame(row["t_ms"], fps)
                 r = row["r"]; g = row["g"]; b = row["b"]
                 if normalize:
                     r, g, b = r/255.0, g/255.0, b/255.0
@@ -287,6 +294,7 @@ class CSVVA_PT_UI(Panel):
         col.prop(prefs, "folder")
         row = col.row(align=True)
         row.prop(prefs, "fps")
+        row.prop(prefs, "start_frame")
         row.prop(prefs, "delimiter")
         col.prop(prefs, "normalize_rgb")
         col.operator(CSVVA_OT_Import.bl_idname, icon="IMPORT")
