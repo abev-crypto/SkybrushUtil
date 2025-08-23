@@ -18,11 +18,8 @@ from bpy.types import Operator, Panel, PropertyGroup
 import importlib
 from os.path import abspath, basename
 
-try:  # pragma: no cover - module is optional at compile time
-    from sbstudio.plugin.light_effects import LightEffect, LightEffectsPanel
-except Exception:  # pragma: no cover - runtime guard
-    LightEffect = None
-    LightEffectsPanel = None
+from sbstudio.plugin.model.light_effects import LightEffect
+from sbstudio.plugin.panels.light_effects import LightEffectsPanel
 
 
 # ---------------------------------------------------------------------------
@@ -85,136 +82,138 @@ class SavePosGradientOperator(bpy.types.Operator):  # pragma: no cover - Blender
 
         return {"FINISHED"}
 
+class PatchedLightEffect(PropertyGroup):
+    type = EnumProperty(
+        name="Effect Type",
+        description=(
+            "Type of the light effect: color ramp-based, image-based or"
+            " custom function"
+        ),
+        items=[("COLOR_RAMP", "Color ramp", "", 1), ("IMAGE", "Image", "", 2), ("FUNCTION", "Function", "", 3)],
+        default="COLOR_RAMP",
+    )
+    loop_count = IntProperty(name="Loop Count", default=0, min=0)
+    loop_method = EnumProperty(
+        name="Loop Method",
+        items=[("FORWARD", "Forward", ""), ("REVERSE", "Reverse", ""), ("PINGPONG", "Ping-Pong", "")],
+        default="FORWARD",
+    )
+    pos_gradient = PointerProperty(type=PosGradientProperties)
+    def apply_on_colors(self, colors, positions, mapping, *, frame, random_seq):
+        mod = importlib.import_module(LightEffect.__module__)
+        BlendMode = mod.BlendMode
+        OUTPUT_TYPE_TO_AXIS_SORT_KEY = mod.OUTPUT_TYPE_TO_AXIS_SORT_KEY
+        output_type_supports_mapping_mode = mod.output_type_supports_mapping_mode
+        get_position_of_object = mod.get_position_of_object
+        distance_sq_of = mod.distance_sq_of
+        load_module = mod.load_module
+        convert_from_srgb_to_linear = mod.convert_from_srgb_to_linear
+        blend_in_place = mod.blend_in_place
+        def get_output_based_on_output_type(output_type, mapping_mode, output_function):
+            outputs = None
+            common_output = None
+            order = None
+            if output_type == "FIRST_COLOR":
+                common_output = 0.0
+            elif output_type == "LAST_COLOR":
+                common_output = 1.0
+            elif output_type == "TEMPORAL":
+                common_output = time_fraction
+            elif output_type_supports_mapping_mode(output_type):
+                proportional = mapping_mode == "PROPORTIONAL"
+                if output_type == "DISTANCE":
+                    if self.mesh:
+                        position_of_mesh = get_position_of_object(self.mesh)
+                        sort_key = lambda idx: distance_sq_of(positions[idx], position_of_mesh)
+                    else:
+                        sort_key = None
+                else:
+                    query_axes = (
+                        OUTPUT_TYPE_TO_AXIS_SORT_KEY.get(output_type)
+                        or OUTPUT_TYPE_TO_AXIS_SORT_KEY["default"]
+                    )
+                    if proportional:
+                        sort_key = lambda idx: query_axes(positions[idx])[0]
+                    else:
+                        sort_key = lambda idx: query_axes(positions[idx])
+                outputs = [1.0] * num_positions
+                order = list(range(num_positions))
+                if num_positions > 1:
+                    if proportional and sort_key is not None:
+                        evaluated_sort_keys = [sort_key(i) for i in order]
+                        min_value, max_value = (min(evaluated_sort_keys), max(evaluated_sort_keys))
+                        diff = max_value - min_value
+                        if diff > 0:
+                            outputs = [(value - min_value) / diff for value in evaluated_sort_keys]
+                    else:
+                        if sort_key is not None:
+                            order.sort(key=sort_key)
+                        assert outputs is not None
+                        for u, v in enumerate(order):
+                            outputs[v] = u / (num_positions - 1)
+            elif output_type == "INDEXED_BY_DRONES":
+                if num_positions > 1:
+                    np_m1 = num_positions - 1
+                    outputs = [i / np_m1 for i in range(num_positions)]
+                else:
+                    outputs = [0.0]
+            elif output_type == "GROUP":
+                outputs = [output_function(idx, 0, 0) for idx in range(num_positions)]
+            elif output_type == "CUSTOM":
+                outputs = [output_function(idx, *pos) for idx, pos in enumerate(positions)]
+            return outputs, common_output, order
+        mapping_mode = getattr(mapping, "mode", None)
+        frame = frame * self.speed
+        if self.texture:
+            pixels = list(self.texture.image.pixels)
+            width = self.texture.image.size[0]
+            height = self.texture.image.size[1]
+        else:
+            pixels = None
+            width = 0
+            height = 0
+        color_ramp = getattr(self.texture, "color_ramp", None)
+        module = load_module(self.function_file)
+        num_positions = len(positions)
+        time_fraction = frame / self.duration if self.duration else frame
+        output_function = getattr(module, "output_function", None)
+        output_type = getattr(module, "OUTPUT_TYPE", "TEMPORAL")
+        output_x_function = getattr(module, "output_x", None)
+        output_y_function = getattr(module, "output_y", None)
+        outputs, common_output, order = get_output_based_on_output_type(output_type, mapping_mode, output_function)
+        for idx, color in enumerate(colors):
+            if outputs is None:
+                output_x = output_y = common_output
+            else:
+                if order is not None:
+                    idx = order[idx]
+                output_x = output_y = outputs[idx]
+            if output_x_function is not None:
+                output_x = output_x_function(idx, output_x, output_y)
+            if output_y_function is not None:
+                output_y = output_y_function(idx, output_y, output_x)
+            new_color = [1.0] * 4
+            alpha = 1.0
+            if pixels is not None:
+                x = int((width - 1) * output_x)
+                y = int((height - 1) * output_y)
+                offset = (x + y * width) * 4
+                pixel_color = pixels[offset : offset + 4]
+                if len(pixel_color) == len(new_color):
+                    new_color[:] = convert_from_srgb_to_linear(pixel_color)
+            elif color_ramp:
+                new_color[:] = color_ramp.evaluate(output_x)
+            else:
+                new_color[:] = (1.0, 1.0, 1.0, 1.0)
+            new_color[3] *= alpha
+            blend_in_place(new_color, color, BlendMode[self.blend_mode])
 
 def patch_light_effect_class():
     """Inject loop properties into ``LightEffect`` using monkey patching."""
     if LightEffect is None:  # pragma: no cover - only runs inside Blender
         return
-    mod = importlib.import_module(LightEffect.__module__)
-    BlendMode = mod.BlendMode
-    OUTPUT_TYPE_TO_AXIS_SORT_KEY = mod.OUTPUT_TYPE_TO_AXIS_SORT_KEY
-    output_type_supports_mapping_mode = mod.output_type_supports_mapping_mode
-    get_position_of_object = mod.get_position_of_object
-    distance_sq_of = mod.distance_sq_of
-    load_module = mod.load_module
-    convert_from_srgb_to_linear = mod.convert_from_srgb_to_linear
-    blend_in_place = mod.blend_in_place
-    class PatchedLightEffect(PropertyGroup):
-        type = EnumProperty(
-            name="Effect Type",
-            description=(
-                "Type of the light effect: color ramp-based, image-based or"
-                " custom function"
-            ),
-            items=[("COLOR_RAMP", "Color ramp", "", 1), ("IMAGE", "Image", "", 2), ("FUNCTION", "Function", "", 3)],
-            default="COLOR_RAMP",
-        )
-        loop_count = IntProperty(name="Loop Count", default=0, min=0)
-        loop_method = EnumProperty(
-            name="Loop Method",
-            items=[("FORWARD", "Forward", ""), ("REVERSE", "Reverse", ""), ("PINGPONG", "Ping-Pong", "")],
-            default="FORWARD",
-        )
-        pos_gradient = PointerProperty(type=PosGradientProperties)
-        def apply_on_colors(self, colors, positions, mapping, *, frame, random_seq):
-            def get_output_based_on_output_type(output_type, mapping_mode, output_function):
-                outputs = None
-                common_output = None
-                order = None
-                if output_type == "FIRST_COLOR":
-                    common_output = 0.0
-                elif output_type == "LAST_COLOR":
-                    common_output = 1.0
-                elif output_type == "TEMPORAL":
-                    common_output = time_fraction
-                elif output_type_supports_mapping_mode(output_type):
-                    proportional = mapping_mode == "PROPORTIONAL"
-                    if output_type == "DISTANCE":
-                        if self.mesh:
-                            position_of_mesh = get_position_of_object(self.mesh)
-                            sort_key = lambda idx: distance_sq_of(positions[idx], position_of_mesh)
-                        else:
-                            sort_key = None
-                    else:
-                        query_axes = (
-                            OUTPUT_TYPE_TO_AXIS_SORT_KEY.get(output_type)
-                            or OUTPUT_TYPE_TO_AXIS_SORT_KEY["default"]
-                        )
-                        if proportional:
-                            sort_key = lambda idx: query_axes(positions[idx])[0]
-                        else:
-                            sort_key = lambda idx: query_axes(positions[idx])
-                    outputs = [1.0] * num_positions
-                    order = list(range(num_positions))
-                    if num_positions > 1:
-                        if proportional and sort_key is not None:
-                            evaluated_sort_keys = [sort_key(i) for i in order]
-                            min_value, max_value = (min(evaluated_sort_keys), max(evaluated_sort_keys))
-                            diff = max_value - min_value
-                            if diff > 0:
-                                outputs = [(value - min_value) / diff for value in evaluated_sort_keys]
-                        else:
-                            if sort_key is not None:
-                                order.sort(key=sort_key)
-                            assert outputs is not None
-                            for u, v in enumerate(order):
-                                outputs[v] = u / (num_positions - 1)
-                elif output_type == "INDEXED_BY_DRONES":
-                    if num_positions > 1:
-                        np_m1 = num_positions - 1
-                        outputs = [i / np_m1 for i in range(num_positions)]
-                    else:
-                        outputs = [0.0]
-                elif output_type == "GROUP":
-                    outputs = [output_function(idx, 0, 0) for idx in range(num_positions)]
-                elif output_type == "CUSTOM":
-                    outputs = [output_function(idx, *pos) for idx, pos in enumerate(positions)]
-                return outputs, common_output, order
-            mapping_mode = getattr(mapping, "mode", None)
-            frame = frame * self.speed
-            if self.texture:
-                pixels = list(self.texture.image.pixels)
-                width = self.texture.image.size[0]
-                height = self.texture.image.size[1]
-            else:
-                pixels = None
-                width = 0
-                height = 0
-            color_ramp = getattr(self.texture, "color_ramp", None)
-            module = load_module(self.function_file)
-            num_positions = len(positions)
-            time_fraction = frame / self.duration if self.duration else frame
-            output_function = getattr(module, "output_function", None)
-            output_type = getattr(module, "OUTPUT_TYPE", "TEMPORAL")
-            output_x_function = getattr(module, "output_x", None)
-            output_y_function = getattr(module, "output_y", None)
-            outputs, common_output, order = get_output_based_on_output_type(output_type, mapping_mode, output_function)
-            for idx, color in enumerate(colors):
-                if outputs is None:
-                    output_x = output_y = common_output
-                else:
-                    if order is not None:
-                        idx = order[idx]
-                    output_x = output_y = outputs[idx]
-                if output_x_function is not None:
-                    output_x = output_x_function(idx, output_x, output_y)
-                if output_y_function is not None:
-                    output_y = output_y_function(idx, output_y, output_x)
-                new_color = [1.0] * 4
-                alpha = 1.0
-                if pixels is not None:
-                    x = int((width - 1) * output_x)
-                    y = int((height - 1) * output_y)
-                    offset = (x + y * width) * 4
-                    pixel_color = pixels[offset : offset + 4]
-                    if len(pixel_color) == len(new_color):
-                        new_color[:] = convert_from_srgb_to_linear(pixel_color)
-                elif color_ramp:
-                    new_color[:] = color_ramp.evaluate(output_x)
-                else:
-                    new_color[:] = (1.0, 1.0, 1.0, 1.0)
-                new_color[3] *= alpha
-                blend_in_place(new_color, color, BlendMode[self.blend_mode])
+
+            
     LightEffect._original_type = getattr(LightEffect, "type", None)
     LightEffect._original_apply_on_colors = getattr(LightEffect, "apply_on_colors", None)
     LightEffect.type = PatchedLightEffect.type
@@ -396,17 +395,11 @@ class PatchedLightEffectsPanel(Panel):  # pragma: no cover - Blender UI code
                 col.prop(entry, "randomness", slider=True)
 
 def patch_light_effects_panel():
-    if LightEffectsPanel is None:  # pragma: no cover
-        return
-
     LightEffectsPanel._original_draw = LightEffectsPanel.draw
     LightEffectsPanel.draw = PatchedLightEffectsPanel.draw
 
 
 def _unpatch_light_effects_panel():
-    if LightEffectsPanel is None or not hasattr(LightEffectsPanel, "_original_draw"):  # pragma: no cover
-        return
-
     LightEffectsPanel.draw = LightEffectsPanel._original_draw
     LightEffectsPanel._original_draw = None
 
