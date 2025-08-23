@@ -1066,6 +1066,8 @@ def try_patch():
         light_effects_patch.patch_light_effects_panel()
     except Exception:
         return 0.5
+    for area in bpy.context.screen.areas:
+        area.tag_redraw()
     bpy.app.timers.unregister(try_patch)
     return None
 
@@ -1197,8 +1199,6 @@ def register():
     bpy.app.timers.register(try_patch)
     light_effects_patch.register()
     CSV2Vertex.register()
-    for area in bpy.context.screen.areas:
-        area.tag_redraw()
 
 def unregister():
     for cls in reversed(classes):

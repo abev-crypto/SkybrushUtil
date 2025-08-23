@@ -323,7 +323,7 @@ class CSVVA_PT_UI(Panel):
     bl_idname = "CSVVA_PT_UI"
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
-    bl_category = "CSV Vertex Anim"
+    bl_category = "SBUtil"
 
     def draw(self, context):
         lay = self.layout
