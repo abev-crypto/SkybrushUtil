@@ -1062,8 +1062,8 @@ def unpatch_recalculate_operator():
 def try_patch():
     try:
         patch_recalculate_operator()
-        light_effects_patch._patch_light_effect_class()
-        light_effects_patch._patch_light_effects_panel()
+        light_effects_patch.patch_light_effect_class()
+        light_effects_patch.patch_light_effects_panel()
     except Exception:
         return 0.5
     bpy.app.timers.unregister(try_patch)
@@ -1197,6 +1197,8 @@ def register():
     bpy.app.timers.register(try_patch)
     light_effects_patch.register()
     CSV2Vertex.register()
+    for area in bpy.context.screen.areas:
+        area.tag_redraw()
 
 def unregister():
     for cls in reversed(classes):

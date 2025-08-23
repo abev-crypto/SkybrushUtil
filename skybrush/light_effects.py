@@ -21,6 +21,18 @@ from os.path import abspath, basename
 from sbstudio.plugin.model.light_effects import LightEffect
 from sbstudio.plugin.panels.light_effects import LightEffectsPanel
 
+from sbstudio.plugin.model.light_effects import (
+    effect_type_supports_randomization,
+    output_type_supports_mapping_mode,
+)
+from sbstudio.plugin.operators import (
+    CreateLightEffectOperator,
+    DuplicateLightEffectOperator,
+    MoveLightEffectDownOperator,
+    MoveLightEffectUpOperator,
+    RemoveLightEffectOperator,
+)
+
 
 # ---------------------------------------------------------------------------
 # Property patching
@@ -163,7 +175,6 @@ class PatchedLightEffect(PropertyGroup):
                 outputs = [output_function(idx, *pos) for idx, pos in enumerate(positions)]
             return outputs, common_output, order
         mapping_mode = getattr(mapping, "mode", None)
-        frame = frame * self.speed
         if self.texture:
             pixels = list(self.texture.image.pixels)
             width = self.texture.image.size[0]
@@ -212,7 +223,6 @@ def patch_light_effect_class():
     """Inject loop properties into ``LightEffect`` using monkey patching."""
     if LightEffect is None:  # pragma: no cover - only runs inside Blender
         return
-
             
     LightEffect._original_type = getattr(LightEffect, "type", None)
     LightEffect._original_apply_on_colors = getattr(LightEffect, "apply_on_colors", None)
@@ -225,9 +235,6 @@ def patch_light_effect_class():
     LightEffect.__annotations__["loop_count"] = LightEffect.loop_count
     LightEffect.__annotations__["loop_method"] = LightEffect.loop_method
     LightEffect.__annotations__["pos_gradient"] = LightEffect.pos_gradient
-    bpy.utils.unregister_class(LightEffect)
-    bpy.utils.register_class(LightEffect)
-
 
 def _unpatch_light_effect_class():
     if LightEffect is None or not hasattr(LightEffect, "_original_type"):  # pragma: no cover
