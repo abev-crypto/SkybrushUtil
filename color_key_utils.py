@@ -21,6 +21,32 @@ def find_nearest_object(location, objects):
     return nearest_obj
 
 
+def _insert_color_keyframes(base_socket, keyframes_by_channel, frame_offset=0, normalize_255=False):
+    """Insert color keyframes on ``base_socket`` for all channels at once.
+
+    ``keyframes_by_channel`` should map channel indices to sequences of
+    ``(frame, value)`` pairs.  All frames across channels are combined and the
+    values from channels without a key on a given frame are kept from their
+    previous value.
+    """
+
+    channel_frames = {
+        ch: {f: v for f, v in frames}
+        for ch, frames in keyframes_by_channel.items()
+    }
+    all_frames = sorted({f for frames in channel_frames.values() for f in frames})
+    current = list(base_socket.default_value)
+
+    for frame in all_frames:
+        for ch, frames in channel_frames.items():
+            if frame in frames:
+                val = frames[frame]
+                val = val / 255.0 if normalize_255 and val > 1.0 else val
+                current[ch] = val
+        for idx, val in enumerate(current):
+            base_socket.default_value[idx] = val
+        base_socket.keyframe_insert("default_value", frame=frame + frame_offset)
+
 def apply_color_keys_to_nearest(location, keyframes_by_channel, available_objects, frame_offset=0, normalize_255=False):
     """Find the nearest object to ``location`` and apply color keyframes.
 
@@ -29,25 +55,27 @@ def apply_color_keys_to_nearest(location, keyframes_by_channel, available_object
     """
     nearest_obj = find_nearest_object(location, available_objects)
     if not nearest_obj:
-        return
+        return available_objects
     mat = nearest_obj.active_material
     if not mat or not mat.node_tree:
-        return
+        return available_objects
     base_socket = None
     for node in mat.node_tree.nodes:
         if node.inputs and node.inputs[0].type == 'RGBA':
             base_socket = node.inputs[0]
             break
     if base_socket is None:
-        return
-    for channel, frames in keyframes_by_channel.items():
-        for frame, value in frames:
-            val = value / 255.0 if normalize_255 and value > 1.0 else value
-            base_socket.default_value[channel] = val
-            base_socket.keyframe_insert(
-                "default_value", frame=frame + frame_offset, index=channel
-            )
-    return available_objects.remove(nearest_obj)
+        return available_objects
+
+    _insert_color_keyframes(
+        base_socket,
+        keyframes_by_channel,
+        frame_offset=frame_offset,
+        normalize_255=normalize_255,
+    )
+
+    available_objects.remove(nearest_obj)
+    return available_objects
 
 
 def apply_color_keys_from_key_data(
@@ -99,12 +127,12 @@ def apply_color_keys_from_key_data(
                 base_socket = node.inputs[0]
                 break
         if base_socket:
-            for channel, frames in key_entries[0]["keys"].items():
-                for frame, value in frames:
-                    base_socket.default_value[channel] = value / 255.0
-                    base_socket.keyframe_insert(
-                        "default_value", frame=frame + start_frame, index=channel
-                    )
+            _insert_color_keyframes(
+                base_socket,
+                key_entries[0]["keys"],
+                frame_offset=start_frame,
+                normalize_255=True,
+            )
 
     # Optionally export RGB data as an image for debugging
     if debug_image_path and Image and key_entries:
