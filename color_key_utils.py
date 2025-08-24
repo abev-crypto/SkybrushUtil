@@ -17,6 +17,7 @@ def find_nearest_object(location, objects):
         if dist < min_dist:
             min_dist = dist
             nearest_obj = obj
+    print(min_dist)
     return nearest_obj
 
 
@@ -46,7 +47,7 @@ def apply_color_keys_to_nearest(location, keyframes_by_channel, available_object
             base_socket.keyframe_insert(
                 "default_value", frame=frame + frame_offset, index=channel
             )
-    available_objects.remove(nearest_obj)
+    return available_objects.remove(nearest_obj)
 
 
 def apply_color_keys_from_key_data(
@@ -77,7 +78,7 @@ def apply_color_keys_from_key_data(
     if drones_col:
         available = list(drones_col.objects)
         for entry in key_entries:
-            apply_color_keys_to_nearest(
+            available = apply_color_keys_to_nearest(
                 entry["location"],
                 entry["keys"],
                 available,

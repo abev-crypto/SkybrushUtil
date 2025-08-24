@@ -934,7 +934,7 @@ def apply_key(filepath, frame_offset, duration=0):
         d["keys"] = {int(k): v for k, v in d["keys"].items()}
 
     for data in color_key_data:
-        apply_color_keys_to_nearest(
+        available_objects = apply_color_keys_to_nearest(
             Vector(data["location"]),
             data["keys"],
             available_objects,
