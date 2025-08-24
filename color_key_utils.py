@@ -17,7 +17,6 @@ def find_nearest_object(location, objects):
         if dist < min_dist:
             min_dist = dist
             nearest_obj = obj
-    print(min_dist)
     return nearest_obj
 
 
@@ -41,11 +40,12 @@ def _insert_color_keyframes(base_socket, keyframes_by_channel, frame_offset=0, n
         for ch, frames in channel_frames.items():
             if frame in frames:
                 val = frames[frame]
-                val = val / 255.0 if normalize_255 and val > 1.0 else val
+                val = val / 255.0 if normalize_255 else val
                 current[ch] = val
         for idx, val in enumerate(current):
             base_socket.default_value[idx] = val
         base_socket.keyframe_insert("default_value", frame=frame + frame_offset)
+        print(current)
 
 def apply_color_keys_to_nearest(location, keyframes_by_channel, available_objects, frame_offset=0, normalize_255=False):
     """Find the nearest object to ``location`` and apply color keyframes.
