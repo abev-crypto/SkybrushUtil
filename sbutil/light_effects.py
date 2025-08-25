@@ -18,6 +18,30 @@ from bpy.types import Operator, Panel, PropertyGroup
 import importlib
 from os.path import abspath, basename
 
+from collections.abc import Callable, Iterable, Sequence
+from functools import partial
+from operator import itemgetter
+from typing import cast, Optional
+
+from mathutils import Vector
+from mathutils.bvhtree import BVHTree
+
+from sbstudio.math.colors import blend_in_place, BlendMode
+from sbstudio.math.rng import RandomSequence
+from sbstudio.model.plane import Plane
+from sbstudio.model.types import Coordinate3D, MutableRGBAColor
+from sbstudio.plugin.constants import DEFAULT_LIGHT_EFFECT_DURATION
+from sbstudio.plugin.meshes import use_b_mesh
+from sbstudio.plugin.model.pixel_cache import PixelCache
+from sbstudio.plugin.utils import remove_if_unused, with_context
+from sbstudio.plugin.utils.collections import pick_unique_name
+from sbstudio.plugin.utils.color_ramp import update_color_ramp_from
+from sbstudio.plugin.utils.evaluator import get_position_of_object
+from sbstudio.plugin.utils.image import convert_from_srgb_to_linear
+from sbstudio.utils import constant, distance_sq_of, load_module, negate
+
+from sbstudio.plugin.model.light_effects import OUTPUT_TYPE_TO_AXIS_SORT_KEY
+
 from sbstudio.plugin.model.light_effects import LightEffect
 from sbstudio.plugin.panels.light_effects import LightEffectsPanel
 
@@ -111,16 +135,15 @@ class PatchedLightEffect(PropertyGroup):
         default="FORWARD",
     )
     pos_gradient = PointerProperty(type=PosGradientProperties)
-    def apply_on_colors(self, colors, positions, mapping, *, frame, random_seq):
-        mod = importlib.import_module(LightEffect.__module__)
-        BlendMode = mod.BlendMode
-        OUTPUT_TYPE_TO_AXIS_SORT_KEY = mod.OUTPUT_TYPE_TO_AXIS_SORT_KEY
-        output_type_supports_mapping_mode = mod.output_type_supports_mapping_mode
-        get_position_of_object = mod.get_position_of_object
-        distance_sq_of = mod.distance_sq_of
-        load_module = mod.load_module
-        convert_from_srgb_to_linear = mod.convert_from_srgb_to_linear
-        blend_in_place = mod.blend_in_place
+    def apply_on_colors(
+        self,
+        colors: Sequence[MutableRGBAColor],
+        positions: Sequence[Coordinate3D],
+        mapping: Optional[list[int]],
+        *,
+        frame: int,
+        random_seq: RandomSequence,
+    ) -> None:
         def get_output_based_on_output_type(output_type, mapping_mode, output_function):
             outputs = None
             common_output = None
@@ -169,55 +192,115 @@ class PatchedLightEffect(PropertyGroup):
                     outputs = [i / np_m1 for i in range(num_positions)]
                 else:
                     outputs = [0.0]
+            elif output_type == "INDEXED_BY_FORMATION":
+                if mapping is not None:
+                    assert num_positions == len(mapping)
+                    if None in mapping:
+                        sorted_valid_mapping = sorted(
+                            x for x in mapping if x is not None
+                        )
+                        np_m1 = max(len(sorted_valid_mapping) - 1, 1)
+                        outputs = [
+                            None if x is None else sorted_valid_mapping.index(x) / np_m1
+                            for x in mapping
+                        ]
+                    else:
+                        np_m1 = max(num_positions - 1, 1)
+                        outputs = [None if x is None else x / np_m1 for x in mapping]
+                else:
+                    outputs = [None] * num_positions  
             elif output_type == "GROUP":
                 outputs = [output_function(idx, 0, 0) for idx in range(num_positions)]
             elif output_type == "CUSTOM":
-                outputs = [output_function(idx, *pos) for idx, pos in enumerate(positions)]
+                absolute_path = abspath(output_function.path)
+                module = load_module(absolute_path) if absolute_path else None
+                if self.output_function.name:
+                    fn = getattr(module, self.output_function.name)
+                    outputs = [
+                        fn(
+                            frame=frame,
+                            time_fraction=time_fraction,
+                            drone_index=index,
+                            formation_index=(
+                                mapping[index] if mapping is not None else None
+                            ),
+                            position=positions[index],
+                            drone_count=num_positions,
+                        )
+                        for index in range(num_positions)
+                    ]
+                else:
+                    common_output = 1.0
+            else:
+                common_output = 1.0
             return outputs, common_output, order
-        mapping_mode = getattr(mapping, "mode", None)
-        if self.texture:
-            image = getattr(self.texture, "image", None)
-            if image:
-                pixels = list(image.pixels)
-                width = image.size[0]
-                height = image.size[1]
-            else:
-                pixels = None
-                width = 0
-                height = 0
-        else:
-            pixels = None
-            width = 0
-            height = 0
-        color_ramp = getattr(self.texture, "color_ramp", None)
-        module = load_module(self.function_file)
+        if not self.enabled or not self.contains_frame(frame):
+            return
+        time_fraction = (frame - self.frame_start) / max(self.duration - 1, 1)
         num_positions = len(positions)
-        time_fraction = frame / self.duration if self.duration else frame
-        output_function = getattr(module, "output_function", None)
-        output_type = getattr(module, "OUTPUT_TYPE", "TEMPORAL")
-        output_x_function = getattr(module, "output_x", None)
-        output_y_function = getattr(module, "output_y", None)
-        outputs, common_output, order = get_output_based_on_output_type(output_type, mapping_mode, output_function)
-        for idx, color in enumerate(colors):
-            if outputs is None:
-                output_x = output_y = common_output
+        color_ramp = self.color_ramp
+        color_image = self.color_image
+        color_function_ref = self.color_function_ref
+        new_color = [0.0] * 4
+        outputs_x, common_output_x = get_output_based_on_output_type(
+            self.output, self.output_mapping_mode, self.output_function
+        )
+        if color_image is not None:
+            outputs_y, common_output_y = get_output_based_on_output_type(
+                self.output_y, self.output_mapping_mode_y, self.output_function_y
+            )
+        condition = self._get_spatial_effect_predicate()
+        for index, position in enumerate(positions):
+            color = colors[index]
+            if common_output_x is not None:
+                output_x = common_output_x
             else:
-                if order is not None:
-                    idx = order[idx]
-                output_x = output_y = outputs[idx]
-            if output_x_function is not None:
-                output_x = output_x_function(idx, output_x, output_y)
-            if output_y_function is not None:
-                output_y = output_y_function(idx, output_y, output_x)
-            new_color = [1.0] * 4
-            alpha = 1.0
-            if pixels is not None:
+                assert outputs_x is not None
+                if outputs_x[index] is None:
+                    continue
+                output_x = outputs_x[index]
+            assert isinstance(output_x, float)
+            if color_image is not None:
+                if common_output_y is not None:
+                    output_y = common_output_y
+                else:
+                    assert outputs_y is not None
+                    if outputs_y[index] is None:
+                        continue
+                    output_y = outputs_y[index]
+                assert isinstance(output_y, float)
+            if self.randomness != 0:
+                offset_x = (random_seq.get_float(index) - 0.5) * self.randomness
+                output_x = (offset_x + output_x) % 1.0
+                if color_image is not None:
+                    offset_y = (random_seq.get_float(index) - 0.5) * self.randomness
+                    output_y = (offset_y + output_y) % 1.0
+            alpha = max(
+                min(self._evaluate_influence_at(position, frame, condition), 1.0), 0.0
+            )
+            if color_function_ref is not None:
+                try:
+                    new_color[:] = color_function_ref(
+                        frame=frame,
+                        time_fraction=time_fraction,
+                        drone_index=index,
+                        formation_index=(
+                            mapping[index] if mapping is not None else None
+                        ),
+                        position=position,
+                        drone_count=num_positions,
+                    )
+                except Exception as exc:
+                    raise RuntimeError("ERROR_COLOR_FUNCTION") from exc
+            elif color_image is not None:
+                width, height = color_image.size
+                pixels = self.get_image_pixels()
                 x = int((width - 1) * output_x)
                 y = int((height - 1) * output_y)
                 offset = (x + y * width) * 4
                 pixel_color = pixels[offset : offset + 4]
                 if len(pixel_color) == len(new_color):
-                    new_color[:] = convert_from_srgb_to_linear(pixel_color)
+                    new_color[:] = convert_from_srgb_to_linear(pixel_color)  
             elif color_ramp:
                 new_color[:] = color_ramp.evaluate(output_x)
             else:
