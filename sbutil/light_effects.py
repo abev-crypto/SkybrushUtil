@@ -176,9 +176,15 @@ class PatchedLightEffect(PropertyGroup):
             return outputs, common_output, order
         mapping_mode = getattr(mapping, "mode", None)
         if self.texture:
-            pixels = list(self.texture.image.pixels)
-            width = self.texture.image.size[0]
-            height = self.texture.image.size[1]
+            image = getattr(self.texture, "image", None)
+            if image:
+                pixels = list(image.pixels)
+                width = image.size[0]
+                height = image.size[1]
+            else:
+                pixels = None
+                width = 0
+                height = 0
         else:
             pixels = None
             width = 0
