@@ -1,7 +1,7 @@
 bl_info = {
     "name": "SkyBrushUtil",
     "author": "ABEYUYA",
-    "version": (1, 9),
+    "version": (2, 0),
     "blender": (4, 3, 0),
     "location": "3D View > Sidebar > SBUtil",
     "description": "SkybrushTransfarUtil",
@@ -1080,9 +1080,12 @@ def _on_load_post(_dummy):
     bpy.app.timers.register(try_patch, first_interval=0.1)
 
 def _restore_originals(): 
-    unpatch_recalculate_operator()
-    light_effects_patch.unpatch_light_effects_panel()
-    light_effects_patch.unpatch_light_effect_class()
+    try:
+        unpatch_recalculate_operator()
+        light_effects_patch.unpatch_light_effects_panel()
+        light_effects_patch.unpatch_light_effect_class()
+    except:
+        return
 # -------------------------------
 # UIパネル
 # -------------------------------
@@ -1215,7 +1218,7 @@ def register():
     if _PATCHED:
         return
     _PATCHED = True
-    bpy.app.timers.register(try_patch)
+    #bpy.app.timers.register(try_patch)
     bpy.app.handlers.load_post.append(_on_load_post)
 
 def unregister():
