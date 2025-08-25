@@ -300,8 +300,22 @@ class PatchedLightEffect(PropertyGroup):
                 offset = (x + y * width) * 4
                 pixel_color = pixels[offset : offset + 4]
                 if len(pixel_color) == len(new_color):
-                    new_color[:] = convert_from_srgb_to_linear(pixel_color)  
+                    new_color[:] = convert_from_srgb_to_linear(pixel_color)
             elif color_ramp:
+                loops = max(self.loop_count, 1)
+                if loops > 1 or self.loop_method != "FORWARD":
+                    t = output_x * loops
+                    idx = min(int(t), loops - 1)
+                    pos = t - idx
+                    if self.loop_method == "PINGPONG":
+                        forward = idx % 2 == 0
+                    elif self.loop_method == "REVERSE":
+                        forward = False
+                    else:
+                        forward = True
+                    if not forward:
+                        pos = 1.0 - pos
+                    output_x = pos
                 new_color[:] = color_ramp.evaluate(output_x)
             else:
                 new_color[:] = (1.0, 1.0, 1.0, 1.0)
