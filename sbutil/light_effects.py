@@ -145,10 +145,16 @@ class PatchedLightEffect(PropertyGroup):
         frame: int,
         random_seq: RandomSequence,
     ) -> None:
-        def get_output_based_on_output_type(output_type, mapping_mode, output_function):
-            outputs = None
-            common_output = None
-            order = None
+        def get_output_based_on_output_type(
+            output_type: str,
+            mapping_mode: str,
+            output_function,
+        ) -> tuple[Optional[list[Optional[float]]], Optional[float]]:
+            
+            outputs: Optional[list[Optional[float]]] = None
+            common_output: Optional[float] = None
+            order: Optional[list[int]] = None
+
             if output_type == "FIRST_COLOR":
                 common_output = 0.0
             elif output_type == "LAST_COLOR":
@@ -234,7 +240,7 @@ class PatchedLightEffect(PropertyGroup):
                     common_output = 1.0
             else:
                 common_output = 1.0
-            return outputs, common_output, order
+            return outputs, common_output
         if not self.enabled or not self.contains_frame(frame):
             return
         time_fraction = (frame - self.frame_start) / max(self.duration - 1, 1)
