@@ -15,8 +15,8 @@ from mathutils import Vector
 import json, os, shutil
 from sbstudio.plugin.operators import RecalculateTransitionsOperator
 from sbstudio.plugin.operators.base import StoryboardOperator
-from skybrush import light_effects as light_effects_patch
-import CSV2Vertex
+from sbutil import light_effects as light_effects_patch
+from sbutil import CSV2Vertex
 
 
 KeydataStr = "_KeyData.json"
@@ -912,7 +912,7 @@ def import_light_effects_from_json(filepath, frame_offset, context):
         set_propertygroup_from_dict(effect, effect_data)
 
 def apply_key(filepath, frame_offset, duration=0):
-    from color_key_utils import apply_color_keys_to_nearest
+    from sbutil.color_key_utils import apply_color_keys_to_nearest
 
     drones_collection = bpy.data.collections.get("Drones")
     available_objects = list(drones_collection.objects)
@@ -1065,6 +1065,7 @@ def try_patch():
         light_effects_patch.patch_light_effect_class()
         light_effects_patch.patch_light_effects_panel()
     except Exception:
+        print("trypatch...")
         return 0.5
     for area in bpy.context.screen.areas:
         area.tag_redraw()
