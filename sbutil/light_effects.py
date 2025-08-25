@@ -9,15 +9,13 @@ plug‑in is not available, the module simply does nothing.
 import bpy
 from bpy.props import (
     EnumProperty,
+    FloatProperty,
     FloatVectorProperty,
     IntProperty,
-    PointerProperty,
-    StringProperty,
 )
 from bpy.types import Operator, Panel, PropertyGroup
-import importlib
 import sys
-from os.path import abspath, basename
+from os.path import abspath
 
 from collections.abc import Callable, Iterable, Sequence
 from functools import partial
@@ -59,65 +57,6 @@ from sbstudio.plugin.operators import (
 )
 
 
-# ---------------------------------------------------------------------------
-# Property patching
-# ---------------------------------------------------------------------------
-
-
-class PosGradientProperties(bpy.types.PropertyGroup):  # pragma: no cover - Blender only
-    first_color: FloatVectorProperty(
-        name="First Color", size=4, subtype="COLOR", min=0.0, max=1.0, default=(1.0, 1.0, 1.0, 1.0)
-    )
-    end_color: FloatVectorProperty(
-        name="End Color", size=4, subtype="COLOR", min=0.0, max=1.0, default=(1.0, 1.0, 1.0, 1.0)
-    )
-    start_pos: FloatVectorProperty(name="Start Pos", size=3, default=(0.0, 0.0, 0.0))
-    end_pos: FloatVectorProperty(name="End Pos", size=3, default=(0.0, 0.0, 0.0))
-    start_offset: FloatVectorProperty(name="Start Offset", size=3, default=(0.0, 0.0, 0.0))
-    end_offset: FloatVectorProperty(name="End Offset", size=3, default=(0.0, 0.0, 0.0))
-
-
-class SavePosGradientOperator(bpy.types.Operator):  # pragma: no cover - Blender UI
-    bl_idname = "skybrush.save_pos_gradient"
-    bl_label = "Embed Properties"
-    bl_description = "Write PosGradient properties into the function file"
-
-    filepath: StringProperty(options={"HIDDEN"})
-
-    def execute(self, context):
-        entry = context.scene.skybrush.light_effects.active_entry
-        props = entry.pos_gradient
-        path = abspath(self.filepath)
-        try:
-            with open(path, "r", encoding="utf-8") as fh:
-                lines = fh.readlines()
-        except OSError as exc:  # pragma: no cover - file I/O
-            self.report({"ERROR"}, str(exc))
-            return {"CANCELLED"}
-
-        def set_line(name, value):
-            line = f"{name} = {tuple(value)}\n"
-            for idx, existing in enumerate(lines):
-                if existing.startswith(name + " ="):
-                    lines[idx] = line
-                    return
-            lines.insert(0, line)
-
-        set_line("FIRST_COLOR", props.first_color)
-        set_line("END_COLOR", props.end_color)
-        set_line("START_POS", props.start_pos)
-        set_line("END_POS", props.end_pos)
-        set_line("START_OFFSET", props.start_offset)
-        set_line("END_OFFSET", props.end_offset)
-
-        try:
-            with open(path, "w", encoding="utf-8") as fh:
-                fh.writelines(lines)
-        except OSError as exc:  # pragma: no cover - file I/O
-            self.report({"ERROR"}, str(exc))
-            return {"CANCELLED"}
-
-        return {"FINISHED"}
 
 class PatchedLightEffect(PropertyGroup):
     type = EnumProperty(
@@ -141,8 +80,43 @@ class PatchedLightEffect(PropertyGroup):
             return None
         absolute_path = abspath(self.color_function.path)
         self.module = load_module(absolute_path)
+        self._update_config_from_module()
         return getattr(self.module, self.color_function.name, None)
-    pos_gradient = PointerProperty(type=PosGradientProperties)
+
+    def _update_config_from_module(self) -> None:
+        module = getattr(self, "module", None)
+        if module is None:
+            return
+        cls = self.__class__
+        config_names: list[str] = []
+        for name in dir(module):
+            if not name.isupper():
+                continue
+            value = getattr(module, name)
+            if isinstance(value, (int, float)):
+                attr_name = name.lower()
+                if not hasattr(cls, attr_name):
+                    setattr(cls, attr_name, FloatProperty(name=name, default=value))
+                    setattr(LightEffect, attr_name, getattr(cls, attr_name))
+                    LightEffect.__annotations__[attr_name] = getattr(cls, attr_name)
+                setattr(self, attr_name, value)
+                config_names.append(attr_name)
+            elif isinstance(value, (tuple, list)) and all(
+                isinstance(v, (int, float)) for v in value
+            ):
+                attr_name = name.lower()
+                size = len(value)
+                if not hasattr(cls, attr_name):
+                    setattr(
+                        cls,
+                        attr_name,
+                        FloatVectorProperty(name=name, size=size, default=value),
+                    )
+                    setattr(LightEffect, attr_name, getattr(cls, attr_name))
+                    LightEffect.__annotations__[attr_name] = getattr(cls, attr_name)
+                setattr(self, attr_name, value)
+                config_names.append(attr_name)
+        self._config_var_names = config_names
     def apply_on_colors(
         self,
         colors: Sequence[MutableRGBAColor],
@@ -255,20 +229,13 @@ class PatchedLightEffect(PropertyGroup):
         color_ramp = self.color_ramp
         color_image = self.color_image
         color_function_ref = self.color_function_ref
-        if (
-            color_function_ref is not None
-            and basename(abspath(self.color_function.path)) == "pos_gradient.py"
-        ):
-            print('set pg')
-            pg = self.pos_gradient
-            if self.module is not None:
-                print('writed module')
-                self.module.FIRST_COLOR = tuple(pg.first_color)
-                self.module.END_COLOR = tuple(pg.end_color)
-                self.module.START_POS = tuple(pg.start_pos)
-                self.module.END_POS = tuple(pg.end_pos)
-                self.module.START_OFFSET = tuple(pg.start_offset)
-                self.module.END_OFFSET = tuple(pg.end_offset)
+        if color_function_ref is not None and self.module is not None:
+            for name in getattr(self, "_config_var_names", []):
+                value = getattr(self, name)
+                if isinstance(value, Iterable):
+                    setattr(self.module, name.upper(), tuple(value))
+                else:
+                    setattr(self.module, name.upper(), value)
         new_color = [0.0] * 4
         outputs_x, common_output_x = get_output_based_on_output_type(
             self.output, self.output_mapping_mode, self.output_function
@@ -361,13 +328,11 @@ def patch_light_effect_class():
     LightEffect.type = PatchedLightEffect.type
     LightEffect.loop_count = PatchedLightEffect.loop_count
     LightEffect.loop_method = PatchedLightEffect.loop_method
-    LightEffect.pos_gradient = PatchedLightEffect.pos_gradient
     LightEffect.apply_on_colors = PatchedLightEffect.apply_on_colors
     LightEffect.color_function_ref = PatchedLightEffect.color_function_ref
     LightEffect.__annotations__["type"] = LightEffect.type
     LightEffect.__annotations__["loop_count"] = LightEffect.loop_count
     LightEffect.__annotations__["loop_method"] = LightEffect.loop_method
-    LightEffect.__annotations__["pos_gradient"] = LightEffect.pos_gradient
 
 def unpatch_light_effect_class():
     if LightEffect is None or not hasattr(LightEffect, "_original_type"):  # pragma: no cover
@@ -375,7 +340,7 @@ def unpatch_light_effect_class():
     bpy.utils.unregister_class(LightEffect)
     LightEffect.type = LightEffect._original_type
     LightEffect.__annotations__["type"] = LightEffect._original_type
-    for attr in ("loop_count", "loop_method", "pos_gradient"):
+    for attr in ("loop_count", "loop_method"):
         if hasattr(LightEffect, attr):
             delattr(LightEffect, attr)
             LightEffect.__annotations__.pop(attr, None)
@@ -485,16 +450,9 @@ class PatchedLightEffectsPanel(Panel):  # pragma: no cover - Blender UI code
                     box = self.layout.box()
                     box.prop(entry.color_function, "path", text="")
                     box.prop(entry.color_function, "name", text="")
-                    if basename(abspath(entry.color_function.path)) == "pos_gradient.py":
-                        pg = entry.pos_gradient
-                        box.prop(pg, "first_color")
-                        box.prop(pg, "end_color")
-                        box.prop(pg, "start_pos")
-                        box.prop(pg, "end_pos")
-                        box.prop(pg, "start_offset")
-                        box.prop(pg, "end_offset")
-                        op = box.operator(SavePosGradientOperator.bl_idname, text="Embed Properties")
-                        op.filepath = entry.color_function.path
+                    entry.color_function_ref
+                    for name in getattr(entry, "_config_var_names", []):
+                        box.prop(entry, name)
                 else:
                     row = layout.box()
                     row.alert = True
@@ -553,12 +511,8 @@ def unpatch_light_effects_panel():
 
 def register():  # pragma: no cover - executed in Blender
     bpy.utils.register_class(BakeColorRampOperator)
-    bpy.utils.register_class(PosGradientProperties)
-    bpy.utils.register_class(SavePosGradientOperator)
 
 
 def unregister():  # pragma: no cover - executed in Blender
-    bpy.utils.unregister_class(SavePosGradientOperator)
-    bpy.utils.unregister_class(PosGradientProperties)
     bpy.utils.unregister_class(BakeColorRampOperator)
 
