@@ -3,7 +3,7 @@ from bpy.props import StringProperty, BoolProperty
 from bpy.types import Operator, Panel, PropertyGroup
 import csv, os, re, math
 
-from color_key_utils import apply_color_keys_from_key_data
+from sbutil.color_key_utils import apply_color_keys_from_key_data
 
 # ---------- Utilities ----------
 
