@@ -324,12 +324,20 @@ def patch_light_effect_class():
             
     LightEffect._original_type = getattr(LightEffect, "type", None)
     LightEffect._original_apply_on_colors = getattr(LightEffect, "apply_on_colors", None)
-    LightEffect._original_color_function_ref = getattr(LightEffect, "color_function_ref", None)
+    LightEffect._original_color_function_ref = getattr(
+        LightEffect, "color_function_ref", None
+    )
+    LightEffect._original_update_config_from_module = getattr(
+        LightEffect, "_update_config_from_module", None
+    )
     LightEffect.type = PatchedLightEffect.type
     LightEffect.loop_count = PatchedLightEffect.loop_count
     LightEffect.loop_method = PatchedLightEffect.loop_method
     LightEffect.apply_on_colors = PatchedLightEffect.apply_on_colors
     LightEffect.color_function_ref = PatchedLightEffect.color_function_ref
+    LightEffect._update_config_from_module = (
+        PatchedLightEffect._update_config_from_module
+    )
     LightEffect.__annotations__["type"] = LightEffect.type
     LightEffect.__annotations__["loop_count"] = LightEffect.loop_count
     LightEffect.__annotations__["loop_method"] = LightEffect.loop_method
@@ -350,6 +358,13 @@ def unpatch_light_effect_class():
     if getattr(LightEffect, "_original_color_function_ref", None) is not None:
         LightEffect.color_function_ref = LightEffect._original_color_function_ref
         LightEffect._original_color_function_ref = None
+    if getattr(LightEffect, "_original_update_config_from_module", None) is not None:
+        LightEffect._update_config_from_module = (
+            LightEffect._original_update_config_from_module
+        )
+    elif hasattr(LightEffect, "_update_config_from_module"):
+        delattr(LightEffect, "_update_config_from_module")
+    LightEffect._original_update_config_from_module = None
     LightEffect._original_type = None
     bpy.utils.register_class(LightEffect)
 # UI patching
