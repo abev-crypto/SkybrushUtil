@@ -247,7 +247,9 @@ class PatchedLightEffect(PropertyGroup):
         num_positions = len(positions)
         color_ramp = self.color_ramp
         color_image = self.color_image
-        color_function_ref = self.color_function_ref
+        color_function_ref = None
+        if self.type == "FUNCTION":
+            color_function_ref = self.color_function_ref
         if (
             color_function_ref is not None
             and basename(abspath(self.color_function.path)) == "pos_gradient.py"
