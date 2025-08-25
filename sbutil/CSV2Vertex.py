@@ -1,5 +1,5 @@
 import bpy
-from bpy.props import StringProperty, BoolProperty
+from bpy.props import StringProperty
 from bpy.types import Operator, Panel, PropertyGroup
 import csv, os, re, math
 
@@ -231,11 +231,6 @@ class CSVVA_Props(PropertyGroup):
         description="Folder containing CSV/TSV files with columns: Time[msec], x[m], y[m], z[m], Red, Green, Blue",
         subtype="DIR_PATH",
     )
-    debug: BoolProperty(
-        name="Debug Colors",
-        description="Output RGB timeline image and apply color keys to the imported mesh",
-        default=False,
-    )
 
 class CSVVA_OT_Import(Operator):
     bl_idname = "csvva.import_setup"
@@ -281,14 +276,9 @@ class CSVVA_OT_Import(Operator):
             for key_entries, sf, obj, sub_path in key_data_collection:
                 current_frame = context.scene.frame_current
                 context.scene.frame_set(sf)
-                debug_mode = prefs.debug
                 apply_color_keys_from_key_data(
                     key_entries,
                     sf,
-                    debug_image_path=(
-                        os.path.join(sub_path, f"{obj.name}_colors.png") if debug_mode else None
-                    ),
-                    debug_object=obj if debug_mode else None,
                 )
                 context.scene.frame_set(current_frame)
             self.report({"INFO"}, f"Setup complete for {len(created)} folders")
@@ -323,14 +313,9 @@ class CSVVA_OT_Import(Operator):
             pass
         current_frame = context.scene.frame_current
         context.scene.frame_set(start_frame)
-        debug_mode = prefs.debug
         apply_color_keys_from_key_data(
             key_entries,
             start_frame,
-            debug_image_path=(
-                os.path.join(folder, f"{obj.name}_colors.png") if debug_mode else None
-            ),
-            debug_object=obj if debug_mode else None,
         )
         context.scene.frame_set(current_frame)
         bpy.ops.object.select_all(action='DESELECT')
@@ -351,7 +336,6 @@ class CSVVA_PT_UI(Panel):
         prefs = context.scene.csvva_props
         col = lay.column(align=True)
         col.prop(prefs, "folder")
-        col.prop(prefs, "debug")
         col.operator(CSVVA_OT_Import.bl_idname, icon="IMPORT")
 
 
