@@ -1072,7 +1072,17 @@ def try_patch():
     bpy.app.timers.unregister(try_patch)
     return None
 
+# --- ファイル読み込み後にも再適用したい場合（原状復帰→再適用が安全） ---
+def _on_load_post(_dummy):
+    # 原状復帰→再適用（複数回読み込みに強くする）
+    _restore_originals()
+    # 遅延パッチも再スケジュール
+    bpy.app.timers.register(try_patch, first_interval=0.1)
 
+def _restore_originals(): 
+    unpatch_recalculate_operator()
+    light_effects_patch.unpatch_light_effects_panel()
+    light_effects_patch.unpatch_light_effect_class()
 # -------------------------------
 # UIパネル
 # -------------------------------
@@ -1190,6 +1200,8 @@ classes = (
     TIMEBIND_OT_create_animated_collection,
     TIMEBIND_OT_shift_prefixes,
 )
+_PATCHED = False
+_ORIGINALS = {}  # {("module.path","attr_name"): original_obj}
 
 def register():
     for cls in classes:
@@ -1197,9 +1209,14 @@ def register():
     bpy.types.Scene.drone_key_props = bpy.props.PointerProperty(type=DroneKeyTransferProperties)
     bpy.types.Scene.time_bind = bpy.props.PointerProperty(type=TimeBindCollection)
     bpy.types.Scene.shift_prefix_list = bpy.props.PointerProperty(type=ShiftPrefixList)
-    bpy.app.timers.register(try_patch)
     light_effects_patch.register()
     CSV2Vertex.register()
+    global _PATCHED
+    if _PATCHED:
+        return
+    _PATCHED = True
+    bpy.app.timers.register(try_patch)
+    bpy.app.handlers.load_post.append(_on_load_post)
 
 def unregister():
     for cls in reversed(classes):
@@ -1207,11 +1224,21 @@ def unregister():
     del bpy.types.Scene.drone_key_props
     del bpy.types.Scene.time_bind
     del bpy.types.Scene.shift_prefix_list
-    if bpy.app.timers.is_registered(try_patch):
-        bpy.app.timers.unregister(try_patch)
-    unpatch_recalculate_operator()
     light_effects_patch.unregister()
     CSV2Vertex.unregister()
+    global _PATCHED
+    if not _PATCHED:
+        return
+    _PATCHED = False
+
+    # ハンドラ除去（存在チェック）
+    if _on_load_post in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.remove(_on_load_post)
+
+    # 元に戻す
+    _restore_originals()
+    if bpy.app.timers.is_registered(try_patch):
+        bpy.app.timers.unregister(try_patch)
 
 if __name__ == "__main__":
     register()

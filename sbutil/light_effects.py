@@ -248,8 +248,7 @@ class PatchedLightEffect(PropertyGroup):
         color_ramp = self.color_ramp
         color_image = self.color_image
         color_function_ref = None
-        if self.type == "FUNCTION":
-            color_function_ref = self.color_function_ref
+        color_function_ref = self.color_function_ref
         if (
             color_function_ref is not None
             and basename(abspath(self.color_function.path)) == "pos_gradient.py"
@@ -361,7 +360,7 @@ def patch_light_effect_class():
     LightEffect.__annotations__["loop_method"] = LightEffect.loop_method
     LightEffect.__annotations__["pos_gradient"] = LightEffect.pos_gradient
 
-def _unpatch_light_effect_class():
+def unpatch_light_effect_class():
     if LightEffect is None or not hasattr(LightEffect, "_original_type"):  # pragma: no cover
         return
     bpy.utils.unregister_class(LightEffect)
@@ -531,7 +530,7 @@ def patch_light_effects_panel():
     LightEffectsPanel.draw = PatchedLightEffectsPanel.draw
 
 
-def _unpatch_light_effects_panel():
+def unpatch_light_effects_panel():
     LightEffectsPanel.draw = LightEffectsPanel._original_draw
     LightEffectsPanel._original_draw = None
 
@@ -547,8 +546,6 @@ def register():  # pragma: no cover - executed in Blender
 
 
 def unregister():  # pragma: no cover - executed in Blender
-    _unpatch_light_effects_panel()
-    _unpatch_light_effect_class()
     bpy.utils.unregister_class(SavePosGradientOperator)
     bpy.utils.unregister_class(PosGradientProperties)
     bpy.utils.unregister_class(BakeColorRampOperator)
