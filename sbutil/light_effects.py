@@ -16,6 +16,7 @@ from bpy.props import (
 )
 from bpy.types import Operator, Panel, PropertyGroup
 import importlib
+import sys
 from os.path import abspath, basename
 
 from collections.abc import Callable, Iterable, Sequence
@@ -241,6 +242,19 @@ class PatchedLightEffect(PropertyGroup):
         color_ramp = self.color_ramp
         color_image = self.color_image
         color_function_ref = self.color_function_ref
+        if (
+            color_function_ref is not None
+            and basename(abspath(self.color_function.path)) == "pos_gradient.py"
+        ):
+            pg = self.pos_gradient
+            module = sys.modules.get(color_function_ref.__module__)
+            if module is not None:
+                module.FIRST_COLOR = tuple(pg.first_color)
+                module.END_COLOR = tuple(pg.end_color)
+                module.START_POS = tuple(pg.start_pos)
+                module.END_POS = tuple(pg.end_pos)
+                module.START_OFFSET = tuple(pg.start_offset)
+                module.END_OFFSET = tuple(pg.end_offset)
         new_color = [0.0] * 4
         outputs_x, common_output_x = get_output_based_on_output_type(
             self.output, self.output_mapping_mode, self.output_function
