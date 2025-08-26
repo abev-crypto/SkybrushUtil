@@ -13,9 +13,10 @@ from bpy.props import (
     FloatVectorProperty,
     IntProperty,
     PointerProperty,
+    StringProperty,
 )
 from bpy.types import Operator, Panel, PropertyGroup
-from os.path import abspath
+from os.path import abspath, basename
 
 from bpy.app.handlers import persistent
 
@@ -40,6 +41,7 @@ from sbstudio.plugin.utils.color_ramp import update_color_ramp_from
 from sbstudio.plugin.utils.evaluator import get_position_of_object
 from sbstudio.plugin.utils.image import convert_from_srgb_to_linear
 from sbstudio.utils import constant, distance_sq_of, load_module, negate
+from types import ModuleType
 
 from sbstudio.plugin.model.light_effects import OUTPUT_TYPE_TO_AXIS_SORT_KEY
 
@@ -79,17 +81,59 @@ def get_state(pg) -> dict:
 
 def initialize_color_function(pg) -> None:
     """Load the color function module and create config schema."""
-    if pg.type != "FUNCTION" or not pg.color_function:
+    if pg.type != "FUNCTION":
         return
-    ap = abspath(pg.color_function.path)
+
     st = get_state(pg)
-    if ap != st.get("absolute_path", ""):
+
+    def reset_state():
         for an in list(pg.get("_config_schema", {})):
             if an in pg:
                 del pg[an]
         if "_config_schema" in pg:
             del pg["_config_schema"]
         st.clear()
+
+    if getattr(pg, "color_function_text", None):
+        text = pg.color_function_text
+        source = text.as_string()
+        text_hash = hash(source)
+        if text_hash != st.get("text_hash"):
+            reset_state()
+            st["text_hash"] = text_hash
+            module = ModuleType(text.name)
+            exec(source, module.__dict__)
+            st["module"] = module
+            schema: dict[str, dict] = {}
+            for name in dir(module):
+                if not name.isupper():
+                    continue
+                value = getattr(module, name)
+                attr_name = name.lower()
+                if isinstance(value, (int, float)):
+                    pg[attr_name] = value
+                    schema[attr_name] = {"default": value}
+                elif (
+                    isinstance(value, (tuple, list))
+                    and all(isinstance(v, (int, float)) for v in value)
+                ):
+                    list_value = list(value)
+                    pg[attr_name] = list_value
+                    meta = {"default": list_value}
+                    if name.endswith("_COLOR"):
+                        # Suffix indicates that the value should be shown as a color
+                        meta["subtype"] = "COLOR"
+                    schema[attr_name] = meta
+            st["config_schema"] = schema
+            pg["_config_schema"] = schema
+        return
+
+    if not pg.color_function or not pg.color_function.path:
+        return
+
+    ap = abspath(pg.color_function.path)
+    if ap != st.get("absolute_path", ""):
+        reset_state()
         st["absolute_path"] = ap
         st["module"] = load_module(ap)
         module = st["module"]
@@ -118,8 +162,7 @@ def initialize_color_function(pg) -> None:
 
 
 def ensure_color_function_initialized(pg) -> None:
-    st = get_state(pg)
-    if pg.type == "FUNCTION" and pg.color_function and "module" not in st:
+    if pg.type == "FUNCTION":
         initialize_color_function(pg)
 
 
@@ -151,6 +194,9 @@ class PatchedLightEffect(PropertyGroup):
         name="Loop Method",
         items=[("FORWARD", "Forward", ""), ("REVERSE", "Reverse", ""), ("PINGPONG", "Ping-Pong", "")],
         default="FORWARD",
+    )
+    color_function_text = PointerProperty(
+        name="Color Function Text", type=bpy.types.Text
     )
     @property
     def color_function_ref(self) -> Optional[Callable]:
@@ -407,6 +453,7 @@ def patch_light_effect_class():
     LightEffect.type = PatchedLightEffect.type
     LightEffect.loop_count = PatchedLightEffect.loop_count
     LightEffect.loop_method = PatchedLightEffect.loop_method
+    LightEffect.color_function_text = PatchedLightEffect.color_function_text
     LightEffect.apply_on_colors = PatchedLightEffect.apply_on_colors
     LightEffect.color_function_ref = PatchedLightEffect.color_function_ref
     LightEffect.draw_color_function_config = (
@@ -437,6 +484,7 @@ def patch_light_effect_class():
     LightEffect.__annotations__["type"] = LightEffect.type
     LightEffect.__annotations__["loop_count"] = LightEffect.loop_count
     LightEffect.__annotations__["loop_method"] = LightEffect.loop_method
+    LightEffect.__annotations__["color_function_text"] = LightEffect.color_function_text
     LightEffect.__annotations__["target"] = LightEffect.target
     LightEffect.__annotations__["target_collection"] = LightEffect.target_collection
     ensure_all_function_entries_initialized()
@@ -447,7 +495,7 @@ def unpatch_light_effect_class():
     bpy.utils.unregister_class(LightEffect)
     LightEffect.type = LightEffect._original_type
     LightEffect.__annotations__["type"] = LightEffect._original_type
-    for attr in ("loop_count", "loop_method"):
+    for attr in ("loop_count", "loop_method", "color_function_text"):
         if hasattr(LightEffect, attr):
             delattr(LightEffect, attr)
             LightEffect.__annotations__.pop(attr, None)
@@ -482,6 +530,61 @@ def unpatch_light_effect_class():
     bpy.utils.register_class(LightEffect)
 # UI patching
 # ---------------------------------------------------------------------------
+
+
+class EmbedColorFunctionOperator(bpy.types.Operator):  # pragma: no cover - Blender UI
+    bl_idname = "skybrush.embed_color_function"
+    bl_label = "Embed"
+    bl_description = "Embed color function file into a text datablock"
+
+    @classmethod
+    def poll(cls, context):
+        entry = getattr(context.scene.skybrush.light_effects, "active_entry", None)
+        return (
+            entry
+            and entry.type == "FUNCTION"
+            and bool(entry.color_function.path)
+        )
+
+    def execute(self, context):
+        entry = context.scene.skybrush.light_effects.active_entry
+        path = abspath(entry.color_function.path)
+        with open(path, "r", encoding="utf-8") as fh:
+            content = fh.read()
+        name = pick_unique_name(bpy.data.texts, basename(path))
+        text = bpy.data.texts.new(name)
+        text.from_string(content)
+        entry.color_function_text = text
+        entry.color_function.path = ""
+        initialize_color_function(entry)
+        return {'FINISHED'}
+
+
+class UnembedColorFunctionOperator(bpy.types.Operator):  # pragma: no cover
+    bl_idname = "skybrush.unembed_color_function"
+    bl_label = "Unembed"
+    bl_description = "Write embedded color function to external file"
+
+    filepath: StringProperty(subtype="FILE_PATH", default="")
+
+    @classmethod
+    def poll(cls, context):
+        entry = getattr(context.scene.skybrush.light_effects, "active_entry", None)
+        return entry and entry.type == "FUNCTION" and entry.color_function_text
+
+    def execute(self, context):
+        entry = context.scene.skybrush.light_effects.active_entry
+        path = self.filepath or entry.color_function.path or basename(
+            entry.color_function_text.name
+        )
+        path = abspath(path)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(entry.color_function_text.as_string())
+        entry.color_function.path = path
+        entry.color_function_text = None
+        st = get_state(entry)
+        st.clear()
+        return {'FINISHED'}
 
 
 class BakeColorRampOperator(bpy.types.Operator):  # pragma: no cover - Blender UI
@@ -609,8 +712,13 @@ class PatchedLightEffectsPanel(Panel):  # pragma: no cover - Blender UI code
                     col.operator("image.open", icon="FILE_FOLDER", text="")
                 elif entry.type == "FUNCTION":
                     box = self.layout.box()
-                    box.prop(entry.color_function, "path", text="")
+                    row = box.row(align=True)
+                    row.prop(entry.color_function, "path", text="")
+                    row.operator(EmbedColorFunctionOperator.bl_idname, text="Embed")
+                    if entry.color_function_text:
+                        row.operator(UnembedColorFunctionOperator.bl_idname, text="Unembed")
                     box.prop(entry.color_function, "name", text="")
+                    box.prop(entry, "color_function_text", text="")
                     entry.draw_color_function_config(box)
                 else:
                     row = layout.box()
@@ -671,6 +779,8 @@ def unpatch_light_effects_panel():
 # ---------------------------------------------------------------------------
 
 def register():  # pragma: no cover - executed in Blender
+    bpy.utils.register_class(EmbedColorFunctionOperator)
+    bpy.utils.register_class(UnembedColorFunctionOperator)
     bpy.utils.register_class(BakeColorRampOperator)
     if _ensure_light_effects_initialized not in bpy.app.handlers.depsgraph_update_pre:
         bpy.app.handlers.depsgraph_update_pre.append(_ensure_light_effects_initialized)
@@ -680,4 +790,6 @@ def unregister():  # pragma: no cover - executed in Blender
     if _ensure_light_effects_initialized in bpy.app.handlers.depsgraph_update_pre:
         bpy.app.handlers.depsgraph_update_pre.remove(_ensure_light_effects_initialized)
     bpy.utils.unregister_class(BakeColorRampOperator)
+    bpy.utils.unregister_class(UnembedColorFunctionOperator)
+    bpy.utils.unregister_class(EmbedColorFunctionOperator)
 
