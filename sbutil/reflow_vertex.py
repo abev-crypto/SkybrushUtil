@@ -17,8 +17,6 @@ def build_selected_graph(bm_verts):
     # 隣接（選択内の辺）グラフを作る
     index_map = {v: i for i, v in enumerate(bm_verts)}
     adj = {i: set() for i in range(len(bm_verts))}
-    for e in bm_verts[0].link_faces.layers.face:  # dummy to silence linter
-        pass
     for e in [edge for v in bm_verts for edge in v.link_edges]:
         v0, v1 = e.verts
         if v0 in index_map and v1 in index_map:
