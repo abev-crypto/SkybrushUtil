@@ -92,7 +92,11 @@ def initialize_color_function(pg) -> None:
             ):
                 list_value = list(value)
                 pg[attr_name] = list_value
-                schema[attr_name] = {"default": list_value}
+                meta = {"default": list_value}
+                if name.endswith("_COLOR"):
+                    # Suffix indicates that the value should be shown as a color
+                    meta["subtype"] = "COLOR"
+                schema[attr_name] = meta
         st["config_schema"] = schema
 
 
@@ -460,6 +464,7 @@ def ensure_schema(pg, schema):
             ("min", "min"), ("max", "max"),
             ("soft_min", "soft_min"), ("soft_max", "soft_max"),
             ("desc", "description"),
+            ("subtype", "subtype"),
         ]:
             if k_src in meta:
                 ui_kwargs[k_dst] = meta[k_src]
