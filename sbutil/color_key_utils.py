@@ -1,14 +1,20 @@
 import bpy
 import numpy as np
-from scipy.spatial import cKDTree
 
 
-def find_nearest_object(location, coords, tree, objects):
-    """Return the object from ``objects`` nearest to ``location`` using a KD-tree."""
+def find_nearest_object(location, coords, objects):
+    """Return the object from ``objects`` nearest to ``location``.
+
+    ``coords`` should contain the positions of ``objects`` as an array of
+    shape ``(N, 3)``. Distances are computed with NumPy to avoid external
+    dependencies such as SciPy.
+    """
     if not objects:
         return None, None
 
-    _, index = tree.query(np.asarray(location))
+    location = np.asarray(location)
+    dists = np.linalg.norm(coords - location, axis=1)
+    index = int(np.argmin(dists))
     return objects[index], index
 
 
@@ -48,8 +54,7 @@ def apply_color_keys_to_nearest(location, keyframes_by_channel, available_object
         return available_objects
 
     coords = np.array([obj.matrix_world.translation[:] for obj in available_objects])
-    tree = cKDTree(coords)
-    nearest_obj, index = find_nearest_object(location, coords, tree, available_objects)
+    nearest_obj, index = find_nearest_object(location, coords, available_objects)
     if not nearest_obj:
         return available_objects
     mat = nearest_obj.active_material
