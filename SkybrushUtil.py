@@ -457,7 +457,74 @@ class DRONE_OT_RecalcTransitionsWithKeys(Operator):
 
         self.report({'INFO'}, f"Transitions recalculated ({self.scope}) and keys reloaded")
         return {'FINISHED'}
-  
+
+class DRONE_OT_ApplyProximityLimit(Operator):
+    """Add Limit Distance constraints for drones closer than the safety threshold."""
+
+    bl_idname = "drone.apply_proximity_limit"
+    bl_label = "Apply Proximity Limit"
+    bl_description = (
+        "Apply Limit Distance constraints between drones that are closer than the"
+        " safety_check proximity threshold in the current frame"
+    )
+
+    def execute(self, context):
+        scene = context.scene
+        threshold = scene.skybrush.safety_check.proximity_warning_threshold
+        drones_collection = bpy.data.collections.get("Drones")
+        if not drones_collection:
+            self.report({'ERROR'}, "Drones collection not found")
+            return {'CANCELLED'}
+
+        storyboard = scene.skybrush.storyboard
+        curr_frame = scene.frame_current
+        entries = sorted(storyboard.entries, key=lambda e: e.frame_start)
+
+        prev_start = entries[0].frame_start if entries else 0
+        next_start = scene.frame_end
+        for entry in entries:
+            if entry.frame_start <= curr_frame:
+                prev_start = entry.frame_start
+            elif entry.frame_start > curr_frame:
+                next_start = entry.frame_start
+                break
+
+        depsgraph = context.evaluated_depsgraph_get()
+        objects = list(drones_collection.objects)
+        pair_count = 0
+
+        for i, obj1 in enumerate(objects):
+            loc1 = obj1.evaluated_get(depsgraph).matrix_world.translation
+            for obj2 in objects[i + 1:]:
+                loc2 = obj2.evaluated_get(depsgraph).matrix_world.translation
+                if (loc1 - loc2).length < threshold:
+                    pair_count += 1
+                    for src, tgt in ((obj1, obj2), (obj2, obj1)):
+                        cname = f"Limit_{tgt.name}"
+                        const = src.constraints.get(cname)
+                        if not const or const.type != 'LIMIT_DISTANCE':
+                            const = src.constraints.new('LIMIT_DISTANCE')
+                            const.name = cname
+                            const.limit_mode = 'LIMITDIST_OUTSIDE'
+                        const.target = tgt
+                        const.distance = threshold
+                        start, end = prev_start, next_start
+                        if end - start >= 2:
+                            const.influence = 0.0
+                            const.keyframe_insert('influence', frame=start)
+                            const.influence = 1.0
+                            const.keyframe_insert('influence', frame=start + 1)
+                            const.keyframe_insert('influence', frame=end - 1)
+                            const.influence = 0.0
+                            const.keyframe_insert('influence', frame=end)
+                        else:
+                            const.influence = 1.0
+                            const.keyframe_insert('influence', frame=start)
+                            const.keyframe_insert('influence', frame=end)
+
+        self.report({'INFO'}, f"Applied proximity constraints to {pair_count} pairs")
+        return {'FINISHED'}
+
 class LIGHTEFFECT_OTadd_prefix_le_tex(bpy.types.Operator):
     bl_idname = "drone.add_prefix"
     bl_label = "Add Prefix"
@@ -1179,6 +1246,9 @@ class DRONE_PT_KeyTransfer(Panel):
             text="Recalc Reload",
         )
         layout.operator("timebind.goto_startframe", text="Goto Start")
+        layout.operator(
+            "drone.apply_proximity_limit", text="Apply Proximity Limit"
+        )
 
         # Refresh button
         layout.operator("timebind.refresh", text="Refresh", icon='FILE_REFRESH')
@@ -1254,6 +1324,7 @@ classes = (
     DRONE_OT_LoadAllKeys,
     DRONE_OT_append_assets,
     DRONE_OT_RecalcTransitionsWithKeys,
+    DRONE_OT_ApplyProximityLimit,
     LIGHTEFFECT_OTadd_prefix_le_tex,
     TIMEBIND_OT_goto_startframe,
     TimeBindEntry,
