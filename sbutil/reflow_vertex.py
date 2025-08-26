@@ -191,7 +191,9 @@ class MESH_OT_reflow_vertices(bpy.types.Operator):
             return {'FINISHED'}
 
         # ---- 端点決定 ----
-        active_bmv = bm.verts.active
+        active_bmv = bm.select_history.active
+        if not isinstance(active_bmv, bmesh.types.BMVert):
+            active_bmv = None
         if self.endpoint_mode == "EDGE_PATH":
             ep = endpoints_edge_path(sel)
             if ep is None:
