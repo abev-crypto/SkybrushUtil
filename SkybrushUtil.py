@@ -10,9 +10,9 @@ bl_info = {
 
 import bpy
 from bpy.props import BoolProperty, StringProperty
-from bpy.types import Panel, Operator, PropertyGroup
+from bpy.types import Panel, Operator, PropertyGroup, AddonPreferences
 from mathutils import Vector
-import json, os, shutil
+import json, os, shutil, tempfile, urllib.request
 from sbstudio.plugin.operators import RecalculateTransitionsOperator
 from sbstudio.plugin.operators.base import StoryboardOperator
 from sbutil import light_effects as light_effects_patch
@@ -21,6 +21,61 @@ from sbutil import CSV2Vertex
 
 KeydataStr = "_KeyData.json"
 LightdataStr = "_LightData.json"
+
+
+class DRONE_OT_UpdateAddon(Operator):
+    """Fetch and install the latest release of the add-on from GitHub."""
+
+    bl_idname = "drone.update_addon"
+    bl_label = "Update Add-on"
+    bl_description = "Download and install the latest version of SkyBrushUtil"
+
+    RELEASE_API = (
+        "https://api.github.com/repos/abeyuya/SkybrushUtil/releases/latest"
+    )
+
+    def execute(self, context):
+        current = tuple(bl_info.get("version", (0, 0)))
+        try:
+            with urllib.request.urlopen(self.RELEASE_API) as response:
+                data = json.load(response)
+        except Exception as exc:  # pragma: no cover - network failure
+            self.report({'ERROR'}, f"Update check failed: {exc}")
+            return {'CANCELLED'}
+
+        tag = data.get("tag_name") or ""
+        try:
+            latest = tuple(int(x) for x in tag.lstrip("vV").split("."))
+        except ValueError:
+            self.report({'ERROR'}, f"Invalid version format: {tag}")
+            return {'CANCELLED'}
+
+        if latest <= current:
+            self.report({'INFO'}, "Add-on is up to date")
+            return {'CANCELLED'}
+
+        zip_url = data.get("zipball_url")
+        if not zip_url:
+            self.report({'ERROR'}, "Release package not found")
+            return {'CANCELLED'}
+
+        try:
+            with urllib.request.urlopen(zip_url) as resp:
+                with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
+                    tmp.write(resp.read())
+                    zip_path = tmp.name
+            bpy.ops.preferences.addon_install(filepath=zip_path, overwrite=True)
+            bpy.ops.preferences.addon_enable(module=__name__)
+            self.report({'INFO'}, f"Updated to {'.'.join(map(str, latest))}")
+            return {'FINISHED'}
+        except Exception as exc:  # pragma: no cover - installation failure
+            self.report({'ERROR'}, f"Update failed: {exc}")
+            return {'CANCELLED'}
+        finally:
+            try:
+                os.remove(zip_path)
+            except Exception:
+                pass
 
 
 def ensure_json_files(blend_dir, prefix):
@@ -1172,6 +1227,18 @@ class DRONE_PT_KeyTransfer(Panel):
         )
 
 # -------------------------------
+# Add-on Preferences
+# -------------------------------
+
+class SBUTIL_AddonPreferences(AddonPreferences):
+    bl_idname = __name__
+    bl_label = "SkyBrush Util Preferences"
+
+    def draw(self, context):
+        layout = self.layout
+        layout.operator("drone.update_addon", text="Update Add-on")
+
+# -------------------------------
 # 登録
 # -------------------------------
 classes = (
@@ -1181,6 +1248,8 @@ classes = (
     DRONE_OT_SaveSignleKeys,
     DRONE_OT_SaveLightEffects,
     DRONE_OT_LoadKeys,
+    SBUTIL_AddonPreferences,
+    DRONE_OT_UpdateAddon,
     DRONE_PT_KeyTransfer,
     DRONE_OT_LoadAllKeys,
     DRONE_OT_append_assets,
