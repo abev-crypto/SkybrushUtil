@@ -1,17 +1,15 @@
 import bpy
-from mathutils import Vector
+import numpy as np
+from scipy.spatial import cKDTree
 
 
-def find_nearest_object(location, objects):
-    """Return the object from ``objects`` nearest to ``location``."""
-    nearest_obj = None
-    min_dist = float('inf')
-    for obj in objects:
-        dist = (Vector(location) - obj.matrix_world.translation).length
-        if dist < min_dist:
-            min_dist = dist
-            nearest_obj = obj
-    return nearest_obj
+def find_nearest_object(location, coords, tree, objects):
+    """Return the object from ``objects`` nearest to ``location`` using a KD-tree."""
+    if not objects:
+        return None, None
+
+    _, index = tree.query(np.asarray(location))
+    return objects[index], index
 
 
 def _insert_color_keyframes(base_socket, keyframes_by_channel, frame_offset=0, normalize_255=False):
@@ -46,7 +44,12 @@ def apply_color_keys_to_nearest(location, keyframes_by_channel, available_object
     ``keyframes_by_channel`` should map channel indices (0=R,1=G,2=B,3=A)
     to sequences of ``(frame, value)`` pairs.
     """
-    nearest_obj = find_nearest_object(location, available_objects)
+    if not available_objects:
+        return available_objects
+
+    coords = np.array([obj.matrix_world.translation[:] for obj in available_objects])
+    tree = cKDTree(coords)
+    nearest_obj, index = find_nearest_object(location, coords, tree, available_objects)
     if not nearest_obj:
         return available_objects
     mat = nearest_obj.active_material
@@ -67,7 +70,7 @@ def apply_color_keys_to_nearest(location, keyframes_by_channel, available_object
         normalize_255=normalize_255,
     )
 
-    available_objects.remove(nearest_obj)
+    del available_objects[index]
     return available_objects
 
 
