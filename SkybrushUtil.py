@@ -525,6 +525,48 @@ class DRONE_OT_ApplyProximityLimit(Operator):
         self.report({'INFO'}, f"Applied proximity constraints to {pair_count} pairs")
         return {'FINISHED'}
 
+
+class DRONE_OT_LinearizeCopyLocationInfluence(Operator):
+    """Set Copy Location constraint influence keys to linear"""
+
+    bl_idname = "drone.linearize_copyloc_influence"
+    bl_label = "Linearize CopyLoc Influence"
+    bl_description = (
+        "Set Copy Location constraint influence keyframe handles to linear for"
+        " selected drones or all drones when none are selected"
+    )
+
+    def execute(self, context):
+        drones_collection = bpy.data.collections.get("Drones")
+        if not drones_collection:
+            self.report({'ERROR'}, "Drones collection not found")
+            return {'CANCELLED'}
+
+        selected = [
+            obj for obj in context.selected_objects if obj in drones_collection.objects
+        ]
+        targets = selected if selected else drones_collection.objects
+
+        for obj in targets:
+            anim = obj.animation_data
+            if not anim or not anim.action:
+                continue
+            action = anim.action
+            for const in obj.constraints:
+                if const.type != 'COPY_LOCATION':
+                    continue
+                fcurve = action.fcurves.find(
+                    f'constraints["{const.name}"].influence'
+                )
+                if not fcurve:
+                    continue
+                for key in fcurve.keyframe_points:
+                    key.interpolation = 'LINEAR'
+                    key.handle_left_type = 'VECTOR'
+                    key.handle_right_type = 'VECTOR'
+
+        return {'FINISHED'}
+
 class LIGHTEFFECT_OTadd_prefix_le_tex(bpy.types.Operator):
     bl_idname = "drone.add_prefix"
     bl_label = "Add Prefix"
@@ -1255,6 +1297,9 @@ class DRONE_PT_KeyTransfer(Panel):
         layout.operator(
             "drone.apply_proximity_limit", text="Apply Proximity Limit"
         )
+        layout.operator(
+            "drone.linearize_copyloc_influence", text="Linearize CopyLoc"
+        )
 
         # Refresh button
         layout.operator("timebind.refresh", text="Refresh", icon='FILE_REFRESH')
@@ -1331,6 +1376,7 @@ classes = (
     DRONE_OT_append_assets,
     DRONE_OT_RecalcTransitionsWithKeys,
     DRONE_OT_ApplyProximityLimit,
+    DRONE_OT_LinearizeCopyLocationInfluence,
     LIGHTEFFECT_OTadd_prefix_le_tex,
     TIMEBIND_OT_goto_startframe,
     TimeBindEntry,
