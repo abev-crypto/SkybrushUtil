@@ -515,28 +515,27 @@ class DRONE_OT_ApplyProximityLimit(Operator):
                 loc2 = obj2.evaluated_get(depsgraph).matrix_world.translation
                 if (loc1 - loc2).length < threshold:
                     pair_count += 1
-                    for src, tgt in ((obj1, obj2), (obj2, obj1)):
-                        cname = f"Limit_{tgt.name}"
-                        const = src.constraints.get(cname)
-                        if not const or const.type != 'LIMIT_DISTANCE':
-                            const = src.constraints.new('LIMIT_DISTANCE')
-                            const.name = cname
-                            const.limit_mode = 'LIMITDIST_OUTSIDE'
-                        const.target = tgt
-                        const.distance = threshold
-                        start, end = prev_start, next_start
-                        if end - start >= 2:
-                            const.influence = 0.0
-                            const.keyframe_insert('influence', frame=start)
-                            const.influence = 1.0
-                            const.keyframe_insert('influence', frame=start + 1)
-                            const.keyframe_insert('influence', frame=end - 1)
-                            const.influence = 0.0
-                            const.keyframe_insert('influence', frame=end)
-                        else:
-                            const.influence = 1.0
-                            const.keyframe_insert('influence', frame=start)
-                            const.keyframe_insert('influence', frame=end)
+                    cname = f"Limit_{obj2.name}"
+                    const = obj1.constraints.get(cname)
+                    if not const or const.type != 'LIMIT_DISTANCE':
+                        const = obj1.constraints.new('LIMIT_DISTANCE')
+                        const.name = cname
+                        const.limit_mode = 'LIMITDIST_ONSURFACE'
+                    const.target = obj2
+                    const.distance = threshold
+                    start, end = prev_start, next_start
+                    if end - start >= 2:
+                        const.influence = 0.0
+                        const.keyframe_insert('influence', frame=start)
+                        const.influence = 1.0
+                        const.keyframe_insert('influence', frame=start + 1)
+                        const.keyframe_insert('influence', frame=end - 1)
+                        const.influence = 0.0
+                        const.keyframe_insert('influence', frame=end)
+                    else:
+                        const.influence = 1.0
+                        const.keyframe_insert('influence', frame=start)
+                        const.keyframe_insert('influence', frame=end)
 
         self.report({'INFO'}, f"Applied proximity constraints to {pair_count} pairs")
         return {'FINISHED'}
