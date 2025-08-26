@@ -83,35 +83,44 @@ class PatchedLightEffect(PropertyGroup):
         ap = abspath(self.color_function.path)
         st = get_state(self)
         if ap != st.get("absolute_path", ""):
+            # remove previously created config variables
+            for an in list(st.get("config_schema", {})):
+                if an in self:
+                    del self[an]
             st.clear()
-            for an in st.get("config_var_names", []):
-                if self.__annotations__ in an:
-                    self.__annotations__.pop(an, None)
-                if hasattr(self, an):
-                    delattr(self, an)
             st["absolute_path"] = ap
             st["module"] = load_module(ap)
-            config_names: list[str] = []
-            for name in dir(st["module"]):
+            module = st["module"]
+            schema: dict[str, dict] = {}
+            for name in dir(module):
                 if not name.isupper():
                     continue
-                value = getattr(st["module"], name)
+                value = getattr(module, name)
                 attr_name = name.lower()
                 if isinstance(value, (int, float)):
-                    if not hasattr(self, attr_name):
-                        prop = FloatProperty(name=name, default=value)
-                        setattr(self, attr_name, prop)
-                        self.__annotations__[attr_name] = prop
-                    config_names.append(attr_name)
-                elif (isinstance(value, (tuple, list))
-                    and all(isinstance(v, (int, float)) for v in value)):
-                    if not hasattr(self, attr_name):
-                        prop = FloatVectorProperty(name=name, size=len(value), default=value)
-                        setattr(self, attr_name, prop)
-                        self.__annotations__[attr_name] = prop
-                    config_names.append(attr_name)
-            st["config_var_names"] = config_names
+                    self[attr_name] = value
+                    schema[attr_name] = {"default": value}
+                elif (
+                    isinstance(value, (tuple, list))
+                    and all(isinstance(v, (int, float)) for v in value)
+                ):
+                    # store vector values as lists for custom properties
+                    list_value = list(value)
+                    self[attr_name] = list_value
+                    schema[attr_name] = {"default": list_value}
+            st["config_schema"] = schema
         return getattr(st.get("module", None), self.color_function.name, None)
+
+    def draw_color_function_config(self, layout) -> None:
+        """Draw UI controls for dynamically discovered config variables."""
+        # ensure that the config schema is initialized
+        self.color_function_ref
+        st = get_state(self)
+        schema = st.get("config_schema", {})
+        if not schema:
+            return
+        ensure_schema(self, schema)
+        draw_dynamic(self, layout, schema.keys())
 
     def apply_on_colors(
         self,
@@ -227,8 +236,8 @@ class PatchedLightEffect(PropertyGroup):
         color_function_ref = self.color_function_ref
         st = get_state(self)
         if color_function_ref is not None and st.get("module", None) is not None:
-            for name in st.get("_config_var_names", []):
-                value = getattr(self, name)
+            for name in st.get("config_schema", {}).keys():
+                value = self.get(name)
                 if isinstance(value, Iterable):
                     setattr(st["module"], name.upper(), tuple(value))
                 else:
@@ -321,12 +330,20 @@ def patch_light_effect_class():
             
     LightEffect._original_type = getattr(LightEffect, "type", None)
     LightEffect._original_apply_on_colors = getattr(LightEffect, "apply_on_colors", None)
-    LightEffect._original_color_function_ref = getattr(LightEffect, "color_function_ref", None)
+    LightEffect._original_color_function_ref = getattr(
+        LightEffect, "color_function_ref", None
+    )
+    LightEffect._original_draw_color_function_config = getattr(
+        LightEffect, "draw_color_function_config", None
+    )
     LightEffect.type = PatchedLightEffect.type
     LightEffect.loop_count = PatchedLightEffect.loop_count
     LightEffect.loop_method = PatchedLightEffect.loop_method
     LightEffect.apply_on_colors = PatchedLightEffect.apply_on_colors
     LightEffect.color_function_ref = PatchedLightEffect.color_function_ref
+    LightEffect.draw_color_function_config = (
+        PatchedLightEffect.draw_color_function_config
+    )
     LightEffect.__annotations__["type"] = LightEffect.type
     LightEffect.__annotations__["loop_count"] = LightEffect.loop_count
     LightEffect.__annotations__["loop_method"] = LightEffect.loop_method
@@ -347,6 +364,13 @@ def unpatch_light_effect_class():
     if getattr(LightEffect, "_original_color_function_ref", None) is not None:
         LightEffect.color_function_ref = LightEffect._original_color_function_ref
         LightEffect._original_color_function_ref = None
+    if getattr(LightEffect, "_original_draw_color_function_config", None) is not None:
+        LightEffect.draw_color_function_config = (
+            LightEffect._original_draw_color_function_config
+        )
+        LightEffect._original_draw_color_function_config = None
+    elif hasattr(LightEffect, "draw_color_function_config"):
+        delattr(LightEffect, "draw_color_function_config")
     LightEffect._original_type = None
     bpy.utils.register_class(LightEffect)
 # UI patching
@@ -391,32 +415,11 @@ class BakeColorRampOperator(bpy.types.Operator):  # pragma: no cover - Blender U
         entry.loop_method = "FORWARD"
         return {'FINISHED'}
 
-def dyn_set(pg, name, value, **ui_kwargs):
-    """インスタンスpgに per-instance の動的プロパティを設定し、UIメタも付ける。"""
-    pg[name] = value
-    if ui_kwargs:
-        pg.id_properties_ui(name).update(**ui_kwargs)
-
-def dyn_get(pg, name, default=None):
-    return pg.get(name, default)
-
-def dyn_del(pg, name):
-    if name in pg:
-        del pg[name]
-        # UIメタはキー削除で自動的に消える
-
 def dyn_keys(pg):
     """このPGインスタンスに存在する動的(ID)プロパティ名の一覧"""
     # PropertyGroupのRNAスロットを避け、IDプロパティのみを列挙
     return [k for k in pg.keys() if k != "_RNA_UI"]
-
-SCHEMA = {
-    "exposure": dict(default=1.0, min=0.0, max=10.0, soft_max=2.0, desc="Exposure"),
-    "gamma":    dict(default=2.2, min=0.1, max=5.0,  desc="Gamma"),
-    "note":     dict(default="memo", desc="Free text"),
-}
-
-def ensure_schema(pg, schema=SCHEMA):
+def ensure_schema(pg, schema):
     for name, meta in schema.items():
         if name not in pg:
             pg[name] = meta.get("default")
@@ -433,15 +436,12 @@ def ensure_schema(pg, schema=SCHEMA):
         if ui_kwargs:
             ui.update(**ui_kwargs)
 
-def draw_dynamic(pg, layout):
-    # RNAスロットではなく、IDプロパティだけ描く
-    for name in dyn_keys(pg):
-        layout.prop(pg, f'["{name}"]', text=name)
-        
-def draw(self, context): #実装サンプルUI draw関数
-    pg = context.scene.my_pg
-    ensure_schema(pg)            # 必要なキーをその場で保証
-    draw_dynamic(pg, self.layout)
+def draw_dynamic(pg, layout, keys=None):
+    """Draw ID properties from ``pg`` on ``layout``."""
+    if keys is None:
+        keys = dyn_keys(pg)
+    for name in keys:
+        layout.prop(pg, f'["{name}"]', text=name.upper())
 
 class PatchedLightEffectsPanel(Panel):  # pragma: no cover - Blender UI code
     def draw(self, context):
@@ -499,8 +499,7 @@ class PatchedLightEffectsPanel(Panel):  # pragma: no cover - Blender UI code
                     box = self.layout.box()
                     box.prop(entry.color_function, "path", text="")
                     box.prop(entry.color_function, "name", text="")
-                    for name in get_state(entry).get("config_var_names", []):
-                        box.prop(entry, name)
+                    entry.draw_color_function_config(box)
                 else:
                     row = layout.box()
                     row.alert = True
