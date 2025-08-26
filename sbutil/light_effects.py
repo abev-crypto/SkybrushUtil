@@ -12,6 +12,7 @@ from bpy.props import (
     FloatProperty,
     FloatVectorProperty,
     IntProperty,
+    PointerProperty,
 )
 from bpy.types import Operator, Panel, PropertyGroup
 from os.path import abspath
@@ -169,6 +170,20 @@ class PatchedLightEffect(PropertyGroup):
             return
         ensure_schema(self, schema)
         draw_dynamic(self, layout, schema.keys())
+
+    def _get_spatial_effect_predicate(self):
+        if self.target == "COLLECTION" and getattr(self, "target_collection", None):
+            positions = {
+                tuple(get_position_of_object(obj))
+                for obj in self.target_collection.objects
+            }
+            if self.invert_target:
+                return lambda pos: tuple(pos) not in positions
+            return lambda pos: tuple(pos) in positions
+        original = getattr(LightEffect, "_original_get_spatial_effect_predicate", None)
+        if original is not None:
+            return original(self)
+        return constant(True)
 
     def apply_on_colors(
         self,
@@ -385,6 +400,10 @@ def patch_light_effect_class():
     LightEffect._original_draw_color_function_config = getattr(
         LightEffect, "draw_color_function_config", None
     )
+    LightEffect._original_target = getattr(LightEffect, "target", None)
+    LightEffect._original_get_spatial_effect_predicate = getattr(
+        LightEffect, "_get_spatial_effect_predicate", None
+    )
     LightEffect.type = PatchedLightEffect.type
     LightEffect.loop_count = PatchedLightEffect.loop_count
     LightEffect.loop_method = PatchedLightEffect.loop_method
@@ -393,9 +412,33 @@ def patch_light_effect_class():
     LightEffect.draw_color_function_config = (
         PatchedLightEffect.draw_color_function_config
     )
+    LightEffect.target = EnumProperty(
+        name="Target",
+        description=(
+            "Specifies whether to apply this light effect to all drones or only"
+            " to those drones that are inside the given mesh or are in front of"
+            " the plane of the first face of the mesh. See also the 'Invert'"
+            " property"
+        ),
+        items=[
+            ("ALL", "All drones", "", 1),
+            ("INSIDE_MESH", "Inside the mesh", "", 2),
+            ("OUTSIDE_MESH", "Outside mesh", "", 3),
+            ("COLLECTION", "Collection", "", 4),
+        ],
+        default="ALL",
+    )
+    LightEffect.target_collection = PointerProperty(
+        name="Collection", type=bpy.types.Collection
+        )
+    LightEffect._get_spatial_effect_predicate = (
+        PatchedLightEffect._get_spatial_effect_predicate
+    )
     LightEffect.__annotations__["type"] = LightEffect.type
     LightEffect.__annotations__["loop_count"] = LightEffect.loop_count
     LightEffect.__annotations__["loop_method"] = LightEffect.loop_method
+    LightEffect.__annotations__["target"] = LightEffect.target
+    LightEffect.__annotations__["target_collection"] = LightEffect.target_collection
     ensure_all_function_entries_initialized()
 
 def unpatch_light_effect_class():
@@ -421,6 +464,20 @@ def unpatch_light_effect_class():
         LightEffect._original_draw_color_function_config = None
     elif hasattr(LightEffect, "draw_color_function_config"):
         delattr(LightEffect, "draw_color_function_config")
+    if getattr(LightEffect, "_original_target", None) is not None:
+        LightEffect.target = LightEffect._original_target
+        LightEffect.__annotations__["target"] = LightEffect._original_target
+        LightEffect._original_target = None
+    if getattr(LightEffect, "_original_get_spatial_effect_predicate", None) is not None:
+        LightEffect._get_spatial_effect_predicate = (
+            LightEffect._original_get_spatial_effect_predicate
+        )
+        LightEffect._original_get_spatial_effect_predicate = None
+    elif hasattr(LightEffect, "_get_spatial_effect_predicate"):
+        delattr(LightEffect, "_get_spatial_effect_predicate")
+    if hasattr(LightEffect, "target_collection"):
+        delattr(LightEffect, "target_collection")
+        LightEffect.__annotations__.pop("target_collection", None)
     LightEffect._original_type = None
     bpy.utils.register_class(LightEffect)
 # UI patching
@@ -587,10 +644,12 @@ class PatchedLightEffectsPanel(Panel):  # pragma: no cover - Blender UI code
                 if entry.output_y == "CUSTOM":
                     col.prop(entry.output_function_y, "path", text="Fn file")
                     col.prop(entry.output_function_y, "name", text="Fn name")
-                if output_type_supports_mapping_mode(entry.output_y):
-                    col.prop(entry, "output_mapping_mode_y")
+            if output_type_supports_mapping_mode(entry.output_y):
+                col.prop(entry, "output_mapping_mode_y")
             col.prop(entry, "target")
             col.prop(entry, "invert_target")
+            if entry.target == "COLLECTION":
+                col.prop(entry, "target_collection")
             col.prop(entry, "blend_mode")
             col.prop(entry, "influence", slider=True)
 
