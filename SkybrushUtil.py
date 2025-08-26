@@ -954,6 +954,12 @@ def set_propertygroup_from_dict(pg, data):
                 setattr(pg, key, obj)
             continue
 
+        if key == "target_collection":
+            coll = bpy.data.collections.get(value)
+            if coll:
+                setattr(pg, key, coll)
+            continue
+
         current_value = getattr(pg, key)
 
         # ネストしたPropertyGroupの場合
