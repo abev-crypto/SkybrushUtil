@@ -1385,16 +1385,6 @@ class DRONE_PT_KeyTransfer(Panel):
             text="Recalc Reload",
         )
         layout.operator("timebind.goto_startframe", text="Goto Start")
-        layout.operator(
-            "drone.apply_proximity_limit", text="Apply Proximity Limit"
-        )
-        layout.operator(
-            "drone.remove_proximity_limit", text="Remove Proximity Limit"
-        )
-        layout.operator(
-            "drone.linearize_copyloc_influence", text="Linearize CopyLoc"
-        )
-        layout.operator("mesh.reflow_vertices", text="Reflow Vertices")
 
         # Refresh button
         layout.operator("timebind.refresh", text="Refresh", icon='FILE_REFRESH')
@@ -1443,6 +1433,31 @@ class DRONE_PT_KeyTransfer(Panel):
         )
 
 # -------------------------------
+# Utility panel
+# -------------------------------
+
+
+class DRONE_PT_Utilities(Panel):
+    bl_label = "Drone Utilities"
+    bl_idname = "DRONE_PT_utilities"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "SBUtil"
+
+    def draw(self, context):
+        layout = self.layout
+        layout.operator(
+            "drone.apply_proximity_limit", text="Apply Proximity Limit"
+        )
+        layout.operator(
+            "drone.remove_proximity_limit", text="Remove Proximity Limit"
+        )
+        layout.operator(
+            "drone.linearize_copyloc_influence", text="Linearize CopyLoc"
+        )
+        layout.operator("mesh.reflow_vertices", text="Reflow Vertices")
+
+# -------------------------------
 # Add-on Preferences
 # -------------------------------
 
@@ -1467,6 +1482,7 @@ classes = (
     SBUTIL_AddonPreferences,
     DRONE_OT_UpdateAddon,
     DRONE_PT_KeyTransfer,
+    DRONE_PT_Utilities,
     DRONE_OT_LoadAllKeys,
     DRONE_OT_append_assets,
     DRONE_OT_RecalcTransitionsWithKeys,
