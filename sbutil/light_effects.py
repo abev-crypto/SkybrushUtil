@@ -391,6 +391,58 @@ class BakeColorRampOperator(bpy.types.Operator):  # pragma: no cover - Blender U
         entry.loop_method = "FORWARD"
         return {'FINISHED'}
 
+def dyn_set(pg, name, value, **ui_kwargs):
+    """インスタンスpgに per-instance の動的プロパティを設定し、UIメタも付ける。"""
+    pg[name] = value
+    if ui_kwargs:
+        pg.id_properties_ui(name).update(**ui_kwargs)
+
+def dyn_get(pg, name, default=None):
+    return pg.get(name, default)
+
+def dyn_del(pg, name):
+    if name in pg:
+        del pg[name]
+        # UIメタはキー削除で自動的に消える
+
+def dyn_keys(pg):
+    """このPGインスタンスに存在する動的(ID)プロパティ名の一覧"""
+    # PropertyGroupのRNAスロットを避け、IDプロパティのみを列挙
+    return [k for k in pg.keys() if k != "_RNA_UI"]
+
+SCHEMA = {
+    "exposure": dict(default=1.0, min=0.0, max=10.0, soft_max=2.0, desc="Exposure"),
+    "gamma":    dict(default=2.2, min=0.1, max=5.0,  desc="Gamma"),
+    "note":     dict(default="memo", desc="Free text"),
+}
+
+def ensure_schema(pg, schema=SCHEMA):
+    for name, meta in schema.items():
+        if name not in pg:
+            pg[name] = meta.get("default")
+        ui = pg.id_properties_ui(name)
+        # Float/Int境界は数値にだけ意味があるので存在するものだけ設定
+        ui_kwargs = {}
+        for k_src, k_dst in [
+            ("min", "min"), ("max", "max"),
+            ("soft_min", "soft_min"), ("soft_max", "soft_max"),
+            ("desc", "description"),
+        ]:
+            if k_src in meta:
+                ui_kwargs[k_dst] = meta[k_src]
+        if ui_kwargs:
+            ui.update(**ui_kwargs)
+
+def draw_dynamic(pg, layout):
+    # RNAスロットではなく、IDプロパティだけ描く
+    for name in dyn_keys(pg):
+        layout.prop(pg, f'["{name}"]', text=name)
+        
+def draw(self, context): #実装サンプルUI draw関数
+    pg = context.scene.my_pg
+    ensure_schema(pg)            # 必要なキーをその場で保証
+    draw_dynamic(pg, self.layout)
+
 class PatchedLightEffectsPanel(Panel):  # pragma: no cover - Blender UI code
     def draw(self, context):
         layout = self.layout
