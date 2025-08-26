@@ -83,35 +83,37 @@ class PatchedLightEffect(PropertyGroup):
         ap = abspath(self.color_function.path)
         st = get_state(self)
         if ap != st.get("absolute_path", ""):
-            st.clear()
+            # remove previously created config variables
             for an in st.get("config_var_names", []):
-                if self.__annotations__ in an:
-                    self.__annotations__.pop(an, None)
-                if hasattr(self, an):
-                    delattr(self, an)
+                if an in self:
+                    del self[an]
+            st.clear()
             st["absolute_path"] = ap
             st["module"] = load_module(ap)
             config_names: list[str] = []
-            for name in dir(st["module"]):
+            module = st["module"]
+            for name in dir(module):
                 if not name.isupper():
                     continue
-                value = getattr(st["module"], name)
+                value = getattr(module, name)
                 attr_name = name.lower()
                 if isinstance(value, (int, float)):
-                    if not hasattr(self, attr_name):
-                        prop = FloatProperty(name=name, default=value)
-                        setattr(self, attr_name, prop)
-                        self.__annotations__[attr_name] = prop
+                    self[attr_name] = value
                     config_names.append(attr_name)
-                elif (isinstance(value, (tuple, list))
-                    and all(isinstance(v, (int, float)) for v in value)):
-                    if not hasattr(self, attr_name):
-                        prop = FloatVectorProperty(name=name, size=len(value), default=value)
-                        setattr(self, attr_name, prop)
-                        self.__annotations__[attr_name] = prop
+                elif (
+                    isinstance(value, (tuple, list))
+                    and all(isinstance(v, (int, float)) for v in value)
+                ):
+                    # store vector values as lists for custom properties
+                    self[attr_name] = list(value)
                     config_names.append(attr_name)
             st["config_var_names"] = config_names
         return getattr(st.get("module", None), self.color_function.name, None)
+
+    def draw_color_function_config(self, layout) -> None:
+        """Draw UI controls for dynamically discovered config variables."""
+        for name in get_state(self).get("config_var_names", []):
+            layout.prop(self, f'["{name}"]', text=name.upper())
 
     def apply_on_colors(
         self,
@@ -227,8 +229,8 @@ class PatchedLightEffect(PropertyGroup):
         color_function_ref = self.color_function_ref
         st = get_state(self)
         if color_function_ref is not None and st.get("module", None) is not None:
-            for name in st.get("_config_var_names", []):
-                value = getattr(self, name)
+            for name in st.get("config_var_names", []):
+                value = self.get(name)
                 if isinstance(value, Iterable):
                     setattr(st["module"], name.upper(), tuple(value))
                 else:
@@ -321,12 +323,20 @@ def patch_light_effect_class():
             
     LightEffect._original_type = getattr(LightEffect, "type", None)
     LightEffect._original_apply_on_colors = getattr(LightEffect, "apply_on_colors", None)
-    LightEffect._original_color_function_ref = getattr(LightEffect, "color_function_ref", None)
+    LightEffect._original_color_function_ref = getattr(
+        LightEffect, "color_function_ref", None
+    )
+    LightEffect._original_draw_color_function_config = getattr(
+        LightEffect, "draw_color_function_config", None
+    )
     LightEffect.type = PatchedLightEffect.type
     LightEffect.loop_count = PatchedLightEffect.loop_count
     LightEffect.loop_method = PatchedLightEffect.loop_method
     LightEffect.apply_on_colors = PatchedLightEffect.apply_on_colors
     LightEffect.color_function_ref = PatchedLightEffect.color_function_ref
+    LightEffect.draw_color_function_config = (
+        PatchedLightEffect.draw_color_function_config
+    )
     LightEffect.__annotations__["type"] = LightEffect.type
     LightEffect.__annotations__["loop_count"] = LightEffect.loop_count
     LightEffect.__annotations__["loop_method"] = LightEffect.loop_method
@@ -347,6 +357,13 @@ def unpatch_light_effect_class():
     if getattr(LightEffect, "_original_color_function_ref", None) is not None:
         LightEffect.color_function_ref = LightEffect._original_color_function_ref
         LightEffect._original_color_function_ref = None
+    if getattr(LightEffect, "_original_draw_color_function_config", None) is not None:
+        LightEffect.draw_color_function_config = (
+            LightEffect._original_draw_color_function_config
+        )
+        LightEffect._original_draw_color_function_config = None
+    elif hasattr(LightEffect, "draw_color_function_config"):
+        delattr(LightEffect, "draw_color_function_config")
     LightEffect._original_type = None
     bpy.utils.register_class(LightEffect)
 # UI patching
@@ -499,8 +516,7 @@ class PatchedLightEffectsPanel(Panel):  # pragma: no cover - Blender UI code
                     box = self.layout.box()
                     box.prop(entry.color_function, "path", text="")
                     box.prop(entry.color_function, "name", text="")
-                    for name in get_state(entry).get("config_var_names", []):
-                        box.prop(entry, name)
+                    entry.draw_color_function_config(box)
                 else:
                     row = layout.box()
                     row.alert = True
