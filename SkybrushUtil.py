@@ -525,6 +525,40 @@ class DRONE_OT_ApplyProximityLimit(Operator):
         self.report({'INFO'}, f"Applied proximity constraints to {pair_count} pairs")
         return {'FINISHED'}
 
+class DRONE_OT_RemoveProximityLimit(Operator):
+    """Remove all Limit Distance constraints from drones."""
+
+    bl_idname = "drone.remove_proximity_limit"
+    bl_label = "Remove Proximity Limit"
+    bl_description = (
+        "Remove all Limit Distance constraints from selected drones or,"
+        " if none are selected, from all drones in the Drones collection"
+    )
+
+    def execute(self, context):
+        drones_collection = bpy.data.collections.get("Drones")
+        if not drones_collection:
+            self.report({'ERROR'}, "Drones collection not found")
+            return {'CANCELLED'}
+
+        selected = [
+            obj for obj in context.selected_objects if obj in drones_collection.objects
+        ]
+        targets = selected if selected else list(drones_collection.objects)
+
+        removed = 0
+        for obj in targets:
+            constraints = [c for c in obj.constraints if c.type == 'LIMIT_DISTANCE']
+            for c in constraints:
+                obj.constraints.remove(c)
+                removed += 1
+
+        self.report(
+            {'INFO'},
+            f"Removed {removed} Limit Distance constraints from {len(targets)} drones",
+        )
+        return {'FINISHED'}
+
 class LIGHTEFFECT_OTadd_prefix_le_tex(bpy.types.Operator):
     bl_idname = "drone.add_prefix"
     bl_label = "Add Prefix"
@@ -1255,6 +1289,9 @@ class DRONE_PT_KeyTransfer(Panel):
         layout.operator(
             "drone.apply_proximity_limit", text="Apply Proximity Limit"
         )
+        layout.operator(
+            "drone.remove_proximity_limit", text="Remove Proximity Limit"
+        )
 
         # Refresh button
         layout.operator("timebind.refresh", text="Refresh", icon='FILE_REFRESH')
@@ -1331,6 +1368,7 @@ classes = (
     DRONE_OT_append_assets,
     DRONE_OT_RecalcTransitionsWithKeys,
     DRONE_OT_ApplyProximityLimit,
+    DRONE_OT_RemoveProximityLimit,
     LIGHTEFFECT_OTadd_prefix_le_tex,
     TIMEBIND_OT_goto_startframe,
     TimeBindEntry,
