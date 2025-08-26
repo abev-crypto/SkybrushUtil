@@ -59,8 +59,21 @@ from sbstudio.plugin.operators import (
 
 _state: dict[int, dict] = {}
 
+
+def _as_dict(value):
+    """Convert ID property containers to plain Python dictionaries."""
+    if hasattr(value, "items"):
+        return {k: _as_dict(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_as_dict(v) for v in value]
+    return value
+
+
 def get_state(pg) -> dict:
-    return _state.setdefault(pg.as_pointer(), {})
+    st = _state.setdefault(pg.as_pointer(), {})
+    if "config_schema" not in st and "_config_schema" in pg:
+        st["config_schema"] = _as_dict(pg["_config_schema"])
+    return st
 
 
 def initialize_color_function(pg) -> None:
@@ -70,9 +83,11 @@ def initialize_color_function(pg) -> None:
     ap = abspath(pg.color_function.path)
     st = get_state(pg)
     if ap != st.get("absolute_path", ""):
-        for an in list(st.get("config_schema", {})):
+        for an in list(pg.get("_config_schema", {})):
             if an in pg:
                 del pg[an]
+        if "_config_schema" in pg:
+            del pg["_config_schema"]
         st.clear()
         st["absolute_path"] = ap
         st["module"] = load_module(ap)
@@ -98,6 +113,7 @@ def initialize_color_function(pg) -> None:
                     meta["subtype"] = "COLOR"
                 schema[attr_name] = meta
         st["config_schema"] = schema
+        pg["_config_schema"] = schema
 
 
 def ensure_color_function_initialized(pg) -> None:
@@ -450,15 +466,16 @@ class BakeColorRampOperator(bpy.types.Operator):  # pragma: no cover - Blender U
         return {'FINISHED'}
 
 def dyn_keys(pg):
-    """このPGインスタンスに存在する動的(ID)プロパティ名の一覧"""
-    # PropertyGroupのRNAスロットを避け、IDプロパティのみを列挙
-    return [k for k in pg.keys() if k != "_RNA_UI"]
+    """Return dynamic ID property names for ``pg``."""
+    # Ignore RNA slots and internal keys prefixed with ``_``
+    return [k for k in pg.keys() if k != "_RNA_UI" and not k.startswith("_")]
+
 def ensure_schema(pg, schema):
     for name, meta in schema.items():
         if name not in pg:
-            pg[name] = meta.get("default")
+            default = meta.get("default") if hasattr(meta, "get") else meta["default"]
+            pg[name] = default
         ui = pg.id_properties_ui(name)
-        # Float/Int境界は数値にだけ意味があるので存在するものだけ設定
         ui_kwargs = {}
         for k_src, k_dst in [
             ("min", "min"), ("max", "max"),
@@ -466,8 +483,11 @@ def ensure_schema(pg, schema):
             ("desc", "description"),
             ("subtype", "subtype"),
         ]:
-            if k_src in meta:
-                ui_kwargs[k_dst] = meta[k_src]
+            if (hasattr(meta, "get") and k_src in meta) or (
+                not hasattr(meta, "get") and k_src in meta
+            ):
+                value = meta.get(k_src) if hasattr(meta, "get") else meta[k_src]
+                ui_kwargs[k_dst] = value
         if ui_kwargs:
             ui.update(**ui_kwargs)
 
