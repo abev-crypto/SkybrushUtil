@@ -134,6 +134,7 @@ def polyline_resample(points, count):
 class MESH_OT_reflow_vertices(bpy.types.Operator):
     bl_idname = "mesh.reflow_vertices"
     bl_label = "Reflow Vertices"
+    bl_options = {'REGISTER', 'UNDO'}
 
     flow_mode: bpy.props.EnumProperty(
         name="Flow",
@@ -163,6 +164,18 @@ class MESH_OT_reflow_vertices(bpy.types.Operator):
         items=[("XYZ","XYZ",""),("XY","XY",""),("XZ","XZ",""),("YZ","YZ",""),("X","X",""),("Y","Y",""),("Z","Z","")],
         default="XY"
     )
+
+    def draw(self, context):
+        layout = self.layout
+        layout.prop(self, "flow_mode")
+        layout.prop(self, "endpoint_mode")
+        if self.flow_mode == "REPULSION":
+            layout.prop(self, "min_distance")
+            layout.prop(self, "iterations")
+        layout.prop(self, "axis_limit")
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_props_dialog(self)
 
     def execute(self, context):
         obj = context.object
