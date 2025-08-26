@@ -17,6 +17,7 @@ from sbstudio.plugin.operators import RecalculateTransitionsOperator
 from sbstudio.plugin.operators.base import StoryboardOperator
 from sbutil import light_effects as light_effects_patch
 from sbutil import CSV2Vertex
+from sbutil import reflow_vertex
 
 
 KeydataStr = "_KeyData.json"
@@ -534,6 +535,8 @@ class DRONE_OT_RemoveProximityLimit(Operator):
     bl_description = (
         "Remove all Limit Distance constraints from selected drones or,"
         " if none are selected, from all drones in the Drones collection"
+    )
+
     def execute(self, context):
         drones_collection = bpy.data.collections.get("Drones")
         if not drones_collection:
@@ -1330,8 +1333,11 @@ class DRONE_PT_KeyTransfer(Panel):
         )
         layout.operator(
             "drone.remove_proximity_limit", text="Remove Proximity Limit"
+        )
+        layout.operator(
             "drone.linearize_copyloc_influence", text="Linearize CopyLoc"
         )
+        layout.operator("mesh.reflow_vertices", text="Reflow Vertices")
 
         # Refresh button
         layout.operator("timebind.refresh", text="Refresh", icon='FILE_REFRESH')
@@ -1439,6 +1445,7 @@ def register():
     bpy.types.Scene.shift_prefix_list = bpy.props.PointerProperty(type=ShiftPrefixList)
     light_effects_patch.register()
     CSV2Vertex.register()
+    reflow_vertex.register()
     global _PATCHED
     if _PATCHED:
         return
@@ -1454,6 +1461,7 @@ def unregister():
     del bpy.types.Scene.shift_prefix_list
     light_effects_patch.unregister()
     CSV2Vertex.unregister()
+    reflow_vertex.unregister()
     global _PATCHED
     if not _PATCHED:
         return

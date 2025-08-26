@@ -132,6 +132,9 @@ def polyline_resample(points, count):
 
 # --------- オペレーター ---------
 class MESH_OT_reflow_vertices(bpy.types.Operator):
+    bl_idname = "mesh.reflow_vertices"
+    bl_label = "Reflow Vertices"
+
     flow_mode: bpy.props.EnumProperty(
         name="Flow",
         items=[
@@ -234,3 +237,16 @@ class MESH_OT_reflow_vertices(bpy.types.Operator):
 
         bmesh.update_edit_mesh(obj.data)
         return {'FINISHED'}
+
+
+classes = (MESH_OT_reflow_vertices,)
+
+
+def register():
+    for cls in classes:
+        bpy.utils.register_class(cls)
+
+
+def unregister():
+    for cls in reversed(classes):
+        bpy.utils.unregister_class(cls)
