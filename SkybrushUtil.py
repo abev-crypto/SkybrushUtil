@@ -1,7 +1,7 @@
 bl_info = {
     "name": "SkyBrushUtil",
     "author": "ABEYUYA",
-    "version": (2, 0),
+    "version": (2, 2, 1),
     "blender": (4, 3, 0),
     "location": "3D View > Sidebar > SBUtil",
     "description": "SkybrushTransfarUtil",
@@ -47,7 +47,7 @@ class DRONE_OT_UpdateAddon(Operator):
     bl_description = "Download and install the latest version of SkyBrushUtil"
 
     RELEASE_API = (
-        "https://api.github.com/repos/abeyuya/SkybrushUtil/releases/latest"
+        "https://api.github.com/repos/abev-crypto/SkybrushUtil/releases/latest"
     )
 
     def execute(self, context):
