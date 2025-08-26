@@ -9,6 +9,7 @@ bl_info = {
 }
 
 import bpy
+from bpy.app.handlers import persistent
 from bpy.props import BoolProperty, StringProperty
 from bpy.types import Panel, Operator, PropertyGroup, AddonPreferences
 from mathutils import Vector
@@ -18,6 +19,20 @@ from sbstudio.plugin.operators.base import StoryboardOperator
 from sbutil import light_effects as light_effects_patch
 from sbutil import CSV2Vertex
 from sbutil import reflow_vertex
+
+try:  # pragma: no cover - depends on sbstudio
+    from sbstudio.plugin.operators.safety_check import RunFullProximityCheckOperator
+except Exception:  # pragma: no cover - optional dependency
+    try:
+        from sbstudio.plugin.operators import RunFullProximityCheckOperator
+    except Exception:  # pragma: no cover - optional dependency
+        RunFullProximityCheckOperator = None
+
+_RUN_FULL_PROXIMITY_OP = (
+    RunFullProximityCheckOperator.bl_idname
+    if RunFullProximityCheckOperator is not None
+    else "skybrush.run_full_proximity_check"
+)
 
 
 KeydataStr = "_KeyData.json"
@@ -1263,11 +1278,52 @@ def unpatch_recalculate_operator():
         RecalculateTransitionsOperator._original_execute = None
 
 
+def _draw_auto_proximity_toggle(self, context):  # pragma: no cover - Blender UI
+    self.layout.prop(
+        context.scene,
+        "auto_proximity_check",
+        text="Auto Check",
+    )
+
+
+def patch_safety_check_panel():  # pragma: no cover - executed in Blender
+    try:
+        from sbstudio.plugin.panels import SafetyCheckPanel
+    except Exception:
+        return
+    SafetyCheckPanel.append(_draw_auto_proximity_toggle)
+
+
+def unpatch_safety_check_panel():  # pragma: no cover - executed in Blender
+    try:
+        from sbstudio.plugin.panels import SafetyCheckPanel
+    except Exception:
+        return
+    try:
+        SafetyCheckPanel.remove(_draw_auto_proximity_toggle)
+    except Exception:
+        pass
+
+
+@persistent
+def _auto_run_proximity_check(scene, _depsgraph):  # pragma: no cover - Blender handler
+    if not getattr(scene, "auto_proximity_check", False):
+        return
+    op = bpy.ops
+    for part in _RUN_FULL_PROXIMITY_OP.split("."):
+        op = getattr(op, part)
+    try:
+        op("INVOKE_DEFAULT")
+    except Exception:
+        pass
+
+
 def try_patch():
     try:
         patch_recalculate_operator()
         light_effects_patch.patch_light_effect_class()
         light_effects_patch.patch_light_effects_panel()
+        patch_safety_check_panel()
     except Exception:
         print("trypatch...")
         return 0.5
@@ -1283,11 +1339,12 @@ def _on_load_post(_dummy):
     # 遅延パッチも再スケジュール
     bpy.app.timers.register(try_patch, first_interval=0.1)
 
-def _restore_originals(): 
+def _restore_originals():
     try:
         unpatch_recalculate_operator()
         light_effects_patch.unpatch_light_effects_panel()
         light_effects_patch.unpatch_light_effect_class()
+        unpatch_safety_check_panel()
     except:
         return
 # -------------------------------
@@ -1443,6 +1500,11 @@ def register():
     bpy.types.Scene.drone_key_props = bpy.props.PointerProperty(type=DroneKeyTransferProperties)
     bpy.types.Scene.time_bind = bpy.props.PointerProperty(type=TimeBindCollection)
     bpy.types.Scene.shift_prefix_list = bpy.props.PointerProperty(type=ShiftPrefixList)
+    bpy.types.Scene.auto_proximity_check = BoolProperty(
+        name="Auto Proximity Check",
+        description="Run full proximity check when frame changes",
+        default=False,
+    )
     light_effects_patch.register()
     CSV2Vertex.register()
     reflow_vertex.register()
@@ -1452,6 +1514,8 @@ def register():
     _PATCHED = True
     #bpy.app.timers.register(try_patch)
     bpy.app.handlers.load_post.append(_on_load_post)
+    if _auto_run_proximity_check not in bpy.app.handlers.frame_change_post:
+        bpy.app.handlers.frame_change_post.append(_auto_run_proximity_check)
 
 def unregister():
     for cls in reversed(classes):
@@ -1459,6 +1523,8 @@ def unregister():
     del bpy.types.Scene.drone_key_props
     del bpy.types.Scene.time_bind
     del bpy.types.Scene.shift_prefix_list
+    if hasattr(bpy.types.Scene, "auto_proximity_check"):
+        del bpy.types.Scene.auto_proximity_check
     light_effects_patch.unregister()
     CSV2Vertex.unregister()
     reflow_vertex.unregister()
@@ -1470,6 +1536,8 @@ def unregister():
     # ハンドラ除去（存在チェック）
     if _on_load_post in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.remove(_on_load_post)
+    if _auto_run_proximity_check in bpy.app.handlers.frame_change_post:
+        bpy.app.handlers.frame_change_post.remove(_auto_run_proximity_check)
 
     # 元に戻す
     _restore_originals()
