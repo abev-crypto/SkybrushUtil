@@ -43,6 +43,7 @@ def _insert_color_keyframes(base_socket, keyframes_by_channel, frame_offset=0, n
 def apply_color_keys_to_nearest(location, keyframes_by_channel, available_objects, frame_offset=0, normalize_255=False):
     """Find the nearest object to ``location`` and apply color keyframes.
 
+    ``available_objects`` is a set of objects that have not yet been used.
     ``keyframes_by_channel`` should map channel indices (0=R,1=G,2=B,3=A)
     to sequences of ``(frame, value)`` pairs.
     """
@@ -67,7 +68,7 @@ def apply_color_keys_to_nearest(location, keyframes_by_channel, available_object
         normalize_255=normalize_255,
     )
 
-    available_objects.remove(nearest_obj)
+    available_objects.discard(nearest_obj)
     return available_objects
 
 
@@ -89,7 +90,7 @@ def apply_color_keys_from_key_data(
 
     drones_col = bpy.data.collections.get(collection_name)
     if drones_col:
-        available = list(drones_col.objects)
+        available = set(drones_col.objects)
         for entry in key_entries:
             available = apply_color_keys_to_nearest(
                 entry["location"],

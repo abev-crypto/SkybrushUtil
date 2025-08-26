@@ -1119,9 +1119,9 @@ def apply_key(filepath, frame_offset, duration=0):
     from sbutil.color_key_utils import apply_color_keys_to_nearest
 
     drones_collection = bpy.data.collections.get("Drones")
-    available_objects = list(drones_collection.objects)
+    available_objects = set(drones_collection.objects)
     if duration != 0:
-        for obj in available_objects:
+        for obj in list(available_objects):
             mat = obj.active_material
             anim = mat.node_tree.animation_data
             if not anim or not anim.action:
