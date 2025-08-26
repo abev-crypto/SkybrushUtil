@@ -16,6 +16,8 @@ from bpy.props import (
 from bpy.types import Operator, Panel, PropertyGroup
 from os.path import abspath
 
+from bpy.app.handlers import persistent
+
 from collections.abc import Callable, Iterable, Sequence
 from functools import partial
 from operator import itemgetter
@@ -60,6 +62,59 @@ _state: dict[int, dict] = {}
 def get_state(pg) -> dict:
     return _state.setdefault(pg.as_pointer(), {})
 
+
+def initialize_color_function(pg) -> None:
+    """Load the color function module and create config schema."""
+    if pg.type != "FUNCTION" or not pg.color_function:
+        return
+    ap = abspath(pg.color_function.path)
+    st = get_state(pg)
+    if ap != st.get("absolute_path", ""):
+        for an in list(st.get("config_schema", {})):
+            if an in pg:
+                del pg[an]
+        st.clear()
+        st["absolute_path"] = ap
+        st["module"] = load_module(ap)
+        module = st["module"]
+        schema: dict[str, dict] = {}
+        for name in dir(module):
+            if not name.isupper():
+                continue
+            value = getattr(module, name)
+            attr_name = name.lower()
+            if isinstance(value, (int, float)):
+                pg[attr_name] = value
+                schema[attr_name] = {"default": value}
+            elif (
+                isinstance(value, (tuple, list))
+                and all(isinstance(v, (int, float)) for v in value)
+            ):
+                list_value = list(value)
+                pg[attr_name] = list_value
+                schema[attr_name] = {"default": list_value}
+        st["config_schema"] = schema
+
+
+def ensure_color_function_initialized(pg) -> None:
+    st = get_state(pg)
+    if pg.type == "FUNCTION" and pg.color_function and "module" not in st:
+        initialize_color_function(pg)
+
+
+def ensure_all_function_entries_initialized() -> None:
+    for scene in bpy.data.scenes:
+        le_group = getattr(scene.skybrush, "light_effects", None)
+        if not le_group:
+            continue
+        for entry in getattr(le_group, "entries", []):
+            ensure_color_function_initialized(entry)
+
+
+@persistent
+def _ensure_light_effects_initialized(_dummy=None):  # pragma: no cover - Blender UI
+    ensure_all_function_entries_initialized()
+
 class PatchedLightEffect(PropertyGroup):
     type = EnumProperty(
         name="Effect Type",
@@ -80,41 +135,14 @@ class PatchedLightEffect(PropertyGroup):
     def color_function_ref(self) -> Optional[Callable]:
         if self.type != "FUNCTION" or not self.color_function:
             return None
-        ap = abspath(self.color_function.path)
         st = get_state(self)
-        if ap != st.get("absolute_path", ""):
-            # remove previously created config variables
-            for an in list(st.get("config_schema", {})):
-                if an in self:
-                    del self[an]
-            st.clear()
-            st["absolute_path"] = ap
-            st["module"] = load_module(ap)
-            module = st["module"]
-            schema: dict[str, dict] = {}
-            for name in dir(module):
-                if not name.isupper():
-                    continue
-                value = getattr(module, name)
-                attr_name = name.lower()
-                if isinstance(value, (int, float)):
-                    self[attr_name] = value
-                    schema[attr_name] = {"default": value}
-                elif (
-                    isinstance(value, (tuple, list))
-                    and all(isinstance(v, (int, float)) for v in value)
-                ):
-                    # store vector values as lists for custom properties
-                    list_value = list(value)
-                    self[attr_name] = list_value
-                    schema[attr_name] = {"default": list_value}
-            st["config_schema"] = schema
-        return getattr(st.get("module", None), self.color_function.name, None)
+        module = st.get("module")
+        if module is None:
+            return None
+        return getattr(module, self.color_function.name, None)
 
     def draw_color_function_config(self, layout) -> None:
         """Draw UI controls for dynamically discovered config variables."""
-        # ensure that the config schema is initialized
-        self.color_function_ref
         st = get_state(self)
         schema = st.get("config_schema", {})
         if not schema:
@@ -131,6 +159,7 @@ class PatchedLightEffect(PropertyGroup):
         frame: int,
         random_seq: RandomSequence,
     ) -> None:
+        ensure_color_function_initialized(self)
         def get_output_based_on_output_type(
             output_type: str,
             mapping_mode: str,
@@ -347,6 +376,7 @@ def patch_light_effect_class():
     LightEffect.__annotations__["type"] = LightEffect.type
     LightEffect.__annotations__["loop_count"] = LightEffect.loop_count
     LightEffect.__annotations__["loop_method"] = LightEffect.loop_method
+    ensure_all_function_entries_initialized()
 
 def unpatch_light_effect_class():
     if LightEffect is None or not hasattr(LightEffect, "_original_type"):  # pragma: no cover
@@ -558,8 +588,12 @@ def unpatch_light_effects_panel():
 
 def register():  # pragma: no cover - executed in Blender
     bpy.utils.register_class(BakeColorRampOperator)
+    if _ensure_light_effects_initialized not in bpy.app.handlers.depsgraph_update_pre:
+        bpy.app.handlers.depsgraph_update_pre.append(_ensure_light_effects_initialized)
 
 
 def unregister():  # pragma: no cover - executed in Blender
+    if _ensure_light_effects_initialized in bpy.app.handlers.depsgraph_update_pre:
+        bpy.app.handlers.depsgraph_update_pre.remove(_ensure_light_effects_initialized)
     bpy.utils.unregister_class(BakeColorRampOperator)
 
