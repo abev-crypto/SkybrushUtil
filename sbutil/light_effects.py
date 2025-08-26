@@ -7,6 +7,7 @@ plug‑in is not available, the module simply does nothing.
 """
 
 import bpy
+import bmesh
 from bpy.props import (
     EnumProperty,
     FloatProperty,
@@ -25,7 +26,7 @@ from functools import partial
 from operator import itemgetter
 from typing import cast, Optional
 
-from mathutils import Vector
+from mathutils import Matrix, Vector
 from mathutils.bvhtree import BVHTree
 
 from sbstudio.math.colors import blend_in_place, BlendMode
@@ -625,6 +626,76 @@ class BakeColorRampOperator(bpy.types.Operator):  # pragma: no cover - Blender U
         entry.loop_method = "FORWARD"
         return {'FINISHED'}
 
+
+class ConvertCollectionToMeshOperator(bpy.types.Operator):  # pragma: no cover - Blender UI
+    bl_idname = "skybrush.convert_collection_to_mesh"
+    bl_label = "Convert Collection to Mesh"
+    bl_description = "Create animated mesh from target collection"
+
+    @classmethod
+    def poll(cls, context):
+        entry = getattr(context.scene.skybrush.light_effects, "active_entry", None)
+        return (
+            entry
+            and entry.target == "COLLECTION"
+            and getattr(entry, "target_collection", None)
+            and len(entry.target_collection.objects) > 0
+        )
+
+    def execute(self, context):
+        scene = context.scene
+        entry = scene.skybrush.light_effects.active_entry
+        objs = list(entry.target_collection.objects)
+
+        mesh_name = pick_unique_name(
+            bpy.data.meshes, f"{entry.name}_targets"
+        )
+        mesh = bpy.data.meshes.new(mesh_name)
+        mesh_obj = bpy.data.objects.new(mesh_name, mesh)
+        scene.collection.objects.link(mesh_obj)
+
+        arm_name = pick_unique_name(bpy.data.armatures, f"{entry.name}_arm")
+        armature = bpy.data.armatures.new(arm_name)
+        arm_obj = bpy.data.objects.new(arm_name, armature)
+        scene.collection.objects.link(arm_obj)
+
+        vg_map = []
+        with use_b_mesh(mesh) as bm:
+            for obj in objs:
+                loc = Vector(get_position_of_object(obj))
+                result = bmesh.ops.create_cube(
+                    bm, size=0.75, matrix=Matrix.Translation(loc)
+                )
+                vg_map.append([v.index for v in result["verts"]])
+
+        mesh_obj.parent = arm_obj
+        mod = mesh_obj.modifiers.new(name="Armature", type="ARMATURE")
+        mod.object = arm_obj
+
+        bpy.context.view_layer.objects.active = arm_obj
+        bpy.ops.object.mode_set(mode="EDIT")
+        for i, obj in enumerate(objs):
+            loc = Vector(get_position_of_object(obj))
+            bone = armature.edit_bones.new(f"Bone_{i}")
+            bone.head = loc
+            bone.tail = loc + Vector((0, 0, 0.1))
+        bpy.ops.object.mode_set(mode="POSE")
+        for i, obj in enumerate(objs):
+            pb = arm_obj.pose.bones[f"Bone_{i}"]
+            constr = pb.constraints.new(type="COPY_TRANSFORMS")
+            constr.target = obj
+        bpy.ops.object.mode_set(mode="OBJECT")
+
+        for i, verts in enumerate(vg_map):
+            vg = mesh_obj.vertex_groups.new(name=f"Bone_{i}")
+            vg.add(verts, 1.0, "REPLACE")
+
+        entry.mesh = mesh_obj
+        entry.target = "INSIDE_MESH"
+        entry.target_collection = None
+
+        return {'FINISHED'}
+
 def dyn_keys(pg):
     """Return dynamic ID property names for ``pg``."""
     # Ignore RNA slots and internal keys prefixed with ``_``
@@ -758,6 +829,10 @@ class PatchedLightEffectsPanel(Panel):  # pragma: no cover - Blender UI code
             col.prop(entry, "invert_target")
             if entry.target == "COLLECTION":
                 col.prop(entry, "target_collection")
+                col.operator(
+                    ConvertCollectionToMeshOperator.bl_idname,
+                    text="Convert to Mesh",
+                )
             col.prop(entry, "blend_mode")
             col.prop(entry, "influence", slider=True)
 
@@ -782,6 +857,7 @@ def register():  # pragma: no cover - executed in Blender
     bpy.utils.register_class(EmbedColorFunctionOperator)
     bpy.utils.register_class(UnembedColorFunctionOperator)
     bpy.utils.register_class(BakeColorRampOperator)
+    bpy.utils.register_class(ConvertCollectionToMeshOperator)
     if _ensure_light_effects_initialized not in bpy.app.handlers.depsgraph_update_pre:
         bpy.app.handlers.depsgraph_update_pre.append(_ensure_light_effects_initialized)
 
@@ -789,6 +865,7 @@ def register():  # pragma: no cover - executed in Blender
 def unregister():  # pragma: no cover - executed in Blender
     if _ensure_light_effects_initialized in bpy.app.handlers.depsgraph_update_pre:
         bpy.app.handlers.depsgraph_update_pre.remove(_ensure_light_effects_initialized)
+    bpy.utils.unregister_class(ConvertCollectionToMeshOperator)
     bpy.utils.unregister_class(BakeColorRampOperator)
     bpy.utils.unregister_class(UnembedColorFunctionOperator)
     bpy.utils.unregister_class(EmbedColorFunctionOperator)
