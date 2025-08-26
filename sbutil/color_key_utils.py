@@ -6,8 +6,9 @@ def find_nearest_object(location, objects):
     """Return the object from ``objects`` nearest to ``location``."""
     nearest_obj = None
     min_dist = float('inf')
+    loc_vec = Vector(location)
     for obj in objects:
-        dist = (Vector(location) - obj.matrix_world.translation).length
+        dist = (loc_vec - obj.matrix_world.translation).length
         if dist < min_dist:
             min_dist = dist
             nearest_obj = obj
