@@ -25,7 +25,7 @@ from collections.abc import Callable, Iterable, Sequence
 from functools import partial
 from operator import itemgetter
 from typing import cast, Optional
-import ctypes
+import hashlib
 
 from mathutils import Matrix, Vector
 from mathutils.bvhtree import BVHTree
@@ -134,7 +134,7 @@ def initialize_color_function(pg) -> None:
     if getattr(pg, "color_function_text", None):
         text = pg.color_function_text
         source = text.as_string()
-        text_hash = ctypes.c_int(hash(source)).value
+        text_hash = hashlib.sha256(source.encode()).hexdigest()
         if text_hash != st.get("text_hash"):
             reset_state()
             st["text_hash"] = text_hash
