@@ -455,6 +455,12 @@ class PatchedLightEffect(PropertyGroup):
         color_ramp = self.color_ramp
         color_image = self.color_image
         color_function_ref = self.color_function_ref
+        if (
+            self.type == "FUNCTION"
+            and not getattr(self, "color_function_text", None)
+            and not getattr(getattr(self, "color_function", None), "name", "")
+        ):
+            return
         st = get_state(self)
         if color_function_ref is not None and st.get("module", None) is not None:
             for name, meta in st.get("config_schema", {}).items():
@@ -913,7 +919,8 @@ class PatchedLightEffectsPanel(Panel):  # pragma: no cover - Blender UI code
                         row.operator(
                             EmbedColorFunctionOperator.bl_idname, text="Embed"
                         )
-                    box.prop(entry.color_function, "name", text="")
+                    if not entry.color_function_text:
+                        box.prop(entry.color_function, "name", text="")
                     box.prop(entry, "color_function_text", text="")
                     entry.draw_color_function_config(box)
                 else:
