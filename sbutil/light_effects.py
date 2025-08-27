@@ -34,7 +34,10 @@ from sbstudio.math.rng import RandomSequence
 from sbstudio.model.plane import Plane
 from sbstudio.model.types import Coordinate3D, MutableRGBAColor
 from sbstudio.plugin.constants import DEFAULT_LIGHT_EFFECT_DURATION
-from sbstudio.plugin.meshes import use_b_mesh
+try:  # pragma: no cover - optional dependency
+    from sbstudio.plugin.meshes import use_b_mesh as _use_b_mesh
+except Exception:  # pragma: no cover - fallback when plugin missing
+    _use_b_mesh = None
 from sbstudio.plugin.model.pixel_cache import PixelCache
 from sbstudio.plugin.utils import remove_if_unused, with_context
 from sbstudio.plugin.utils.collections import pick_unique_name
@@ -43,6 +46,7 @@ from sbstudio.plugin.utils.evaluator import get_position_of_object
 from sbstudio.plugin.utils.image import convert_from_srgb_to_linear
 from sbstudio.utils import constant, distance_sq_of, load_module, negate
 from types import ModuleType
+from contextlib import contextmanager
 
 from sbstudio.plugin.model.light_effects import OUTPUT_TYPE_TO_AXIS_SORT_KEY
 
@@ -60,6 +64,33 @@ from sbstudio.plugin.operators import (
     MoveLightEffectUpOperator,
     RemoveLightEffectOperator,
 )
+
+@contextmanager
+def use_b_mesh(mesh):  # pragma: no cover - Blender integration
+    """Return a ``BMesh`` for ``mesh`` regardless of plug-in version."""
+    if _use_b_mesh is not None:
+        try:  # new signature accepting the mesh directly
+            with _use_b_mesh(mesh) as bm:
+                yield bm
+            return
+        except TypeError:
+            try:  # original helper provided only a bare BMesh
+                with _use_b_mesh() as bm:
+                    bm.from_mesh(mesh)
+                    yield bm
+                    bm.to_mesh(mesh)
+                return
+            except Exception:
+                pass
+        except Exception:
+            pass
+    bm = bmesh.new()
+    bm.from_mesh(mesh)
+    try:
+        yield bm
+        bm.to_mesh(mesh)
+    finally:
+        bm.free()
 
 _state: dict[int, dict] = {}
 
