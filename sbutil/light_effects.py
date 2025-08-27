@@ -429,20 +429,43 @@ class PatchedLightEffect(PropertyGroup):
                         else None
                     )
                 if self.output_function.name and module:
-                    fn = getattr(module, self.output_function.name)
-                    outputs = [
-                        fn(
-                            frame=frame,
-                            time_fraction=time_fraction,
-                            drone_index=index,
-                            formation_index=(
+                    fn_name = self.output_function.name
+                    if getattr(self, "color_function_text", None):
+                        ctx = module.__dict__
+                        outputs = []
+                        for index in range(num_positions):
+                            formation_index = (
                                 mapping[index] if mapping is not None else None
-                            ),
-                            position=positions[index],
-                            drone_count=num_positions,
-                        )
-                        for index in range(num_positions)
-                    ]
+                            )
+                            ctx.update(
+                                frame=frame,
+                                time_fraction=time_fraction,
+                                drone_index=index,
+                                formation_index=formation_index,
+                                position=positions[index],
+                                drone_count=num_positions,
+                            )
+                            outputs.append(
+                                eval(
+                                    f"{fn_name}(frame=frame, time_fraction=time_fraction, drone_index=drone_index, formation_index=formation_index, position=position, drone_count=drone_count)",
+                                    ctx,
+                                )
+                            )
+                    else:
+                        fn = getattr(module, fn_name)
+                        outputs = [
+                            fn(
+                                frame=frame,
+                                time_fraction=time_fraction,
+                                drone_index=index,
+                                formation_index=(
+                                    mapping[index] if mapping is not None else None
+                                ),
+                                position=positions[index],
+                                drone_count=num_positions,
+                            )
+                            for index in range(num_positions)
+                        ]
                 else:
                     common_output = 1.0
             else:
@@ -455,6 +478,7 @@ class PatchedLightEffect(PropertyGroup):
         color_ramp = self.color_ramp
         color_image = self.color_image
         color_function_ref = self.color_function_ref
+        function_name = getattr(getattr(self, "color_function", None), "name", "")
         if (
             self.type == "FUNCTION"
             and not getattr(self, "color_function_text", None)
@@ -462,22 +486,42 @@ class PatchedLightEffect(PropertyGroup):
         ):
             return
         st = get_state(self)
-        if color_function_ref is not None and st.get("module", None) is not None:
-            for name, meta in st.get("config_schema", {}).items():
-                if meta.get("type") == "OBJECT":
-                    continue
-                value = self.get(name)
-                obj_attr = meta.get("object_ref_attr")
-                if obj_attr:
-                    obj_name = self.get(obj_attr)
-                    if obj_name:
-                        obj = bpy.data.objects.get(obj_name)
-                        if obj is not None:
-                            value = tuple(get_position_of_object(obj))
-                if isinstance(value, Iterable):
-                    setattr(st["module"], name.upper(), tuple(value))
-                else:
-                    setattr(st["module"], name.upper(), value)
+        module = st.get("module", None)
+        if module is not None:
+            schema = st.get("config_schema", {})
+            if getattr(self, "color_function_text", None):
+                ctx = module.__dict__
+                for name, meta in schema.items():
+                    if meta.get("type") == "OBJECT":
+                        continue
+                    value = self.get(name)
+                    obj_attr = meta.get("object_ref_attr")
+                    if obj_attr:
+                        obj_name = self.get(obj_attr)
+                        if obj_name:
+                            obj = bpy.data.objects.get(obj_name)
+                            if obj is not None:
+                                value = tuple(get_position_of_object(obj))
+                    if isinstance(value, Iterable):
+                        ctx[name.upper()] = tuple(value)
+                    else:
+                        ctx[name.upper()] = value
+            elif color_function_ref is not None:
+                for name, meta in schema.items():
+                    if meta.get("type") == "OBJECT":
+                        continue
+                    value = self.get(name)
+                    obj_attr = meta.get("object_ref_attr")
+                    if obj_attr:
+                        obj_name = self.get(obj_attr)
+                        if obj_name:
+                            obj = bpy.data.objects.get(obj_name)
+                            if obj is not None:
+                                value = tuple(get_position_of_object(obj))
+                    if isinstance(value, Iterable):
+                        setattr(module, name.upper(), tuple(value))
+                    else:
+                        setattr(module, name.upper(), value)
         new_color = [0.0] * 4
         outputs_x, common_output_x = get_output_based_on_output_type(
             self.output, self.output_mapping_mode, self.output_function
@@ -515,7 +559,24 @@ class PatchedLightEffect(PropertyGroup):
             alpha = max(
                 min(self._evaluate_influence_at(position, frame, condition), 1.0), 0.0
             )
-            if color_function_ref is not None:
+            if getattr(self, "color_function_text", None) and function_name:
+                ctx = st.get("module", ModuleType("_dummy")).__dict__
+                ctx.update(
+                    frame=frame,
+                    time_fraction=time_fraction,
+                    drone_index=index,
+                    formation_index=(mapping[index] if mapping is not None else None),
+                    position=position,
+                    drone_count=num_positions,
+                )
+                try:
+                    new_color[:] = eval(
+                        f"{function_name}(frame=frame, time_fraction=time_fraction, drone_index=drone_index, formation_index=formation_index, position=position, drone_count=drone_count)",
+                        ctx,
+                    )
+                except Exception as exc:
+                    raise RuntimeError("ERROR_COLOR_FUNCTION") from exc
+            elif color_function_ref is not None:
                 try:
                     new_color[:] = color_function_ref(
                         frame=frame,
