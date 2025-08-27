@@ -552,7 +552,7 @@ class EmbedColorFunctionOperator(bpy.types.Operator):  # pragma: no cover - Blen
         path = abspath(entry.color_function.path)
         with open(path, "r", encoding="utf-8") as fh:
             content = fh.read()
-        name = pick_unique_name(bpy.data.texts, basename(path))
+        name = pick_unique_name(basename(path), bpy.data.texts)
         text = bpy.data.texts.new(name)
         text.from_string(content)
         entry.color_function_text = text
@@ -648,13 +648,13 @@ class ConvertCollectionToMeshOperator(bpy.types.Operator):  # pragma: no cover -
         objs = list(entry.target_collection.objects)
 
         mesh_name = pick_unique_name(
-            bpy.data.meshes, f"{entry.name}_targets"
+            f"{entry.name}_targets", bpy.data.meshes
         )
         mesh = bpy.data.meshes.new(mesh_name)
         mesh_obj = bpy.data.objects.new(mesh_name, mesh)
         scene.collection.objects.link(mesh_obj)
 
-        arm_name = pick_unique_name(bpy.data.armatures, f"{entry.name}_arm")
+        arm_name = pick_unique_name(f"{entry.name}_arm", bpy.data.armatures)
         armature = bpy.data.armatures.new(arm_name)
         arm_obj = bpy.data.objects.new(arm_name, armature)
         scene.collection.objects.link(arm_obj)
