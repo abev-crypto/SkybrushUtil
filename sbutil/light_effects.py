@@ -129,6 +129,13 @@ def initialize_color_function(pg) -> None:
 
     st = get_state(pg)
 
+    # Cache existing dynamic property values so they can be restored later if
+    # the state needs to be reset and the new schema still contains them.
+    cached_values = {
+        name: _as_dict(pg[name])
+        for name in pg.get("_config_schema", {})
+        if name in pg
+    }
     brna = getattr(pg, "bl_rna", None)
     reserved = {p.identifier.lower() for p in getattr(brna, "properties", [])}
 
@@ -180,6 +187,11 @@ def initialize_color_function(pg) -> None:
                     schema[attr_name] = meta
             st["config_schema"] = schema
             pg["_config_schema"] = schema
+            # Restore cached property values when possible, but only update
+            # when the value actually differs from the current one.
+            for name, value in cached_values.items():
+                if name in schema and pg.get(name) != value:
+                    pg[name] = value
         return
 
     if not pg.color_function or not pg.color_function.path:
@@ -220,6 +232,9 @@ def initialize_color_function(pg) -> None:
                 schema[attr_name] = meta
         st["config_schema"] = schema
         pg["_config_schema"] = schema
+        for name, value in cached_values.items():
+            if name in schema and pg.get(name) != value:
+                pg[name] = value
 
 
 def ensure_color_function_initialized(pg) -> None:
