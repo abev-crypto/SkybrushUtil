@@ -284,6 +284,9 @@ class PatchedLightEffect(PropertyGroup):
         st = get_state(self)
         module = st.get("module")
         if module is None:
+            initialize_color_function(self)
+            module = st.get("module")
+        if module is None:
             return None
         return getattr(module, function_name, None)
 
@@ -862,10 +865,15 @@ class PatchedLightEffectsPanel(Panel):  # pragma: no cover - Blender UI code
                 elif entry.type == "FUNCTION":
                     box = self.layout.box()
                     row = box.row(align=True)
-                    row.prop(entry.color_function, "path", text="")
-                    row.operator(EmbedColorFunctionOperator.bl_idname, text="Embed")
                     if entry.color_function_text:
-                        row.operator(UnembedColorFunctionOperator.bl_idname, text="Unembed")
+                        row.operator(
+                            UnembedColorFunctionOperator.bl_idname, text="Unembed"
+                        )
+                    else:
+                        row.prop(entry.color_function, "path", text="")
+                        row.operator(
+                            EmbedColorFunctionOperator.bl_idname, text="Embed"
+                        )
                     box.prop(entry.color_function, "name", text="")
                     box.prop(entry, "color_function_text", text="")
                     entry.draw_color_function_config(box)
