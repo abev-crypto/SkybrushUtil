@@ -191,7 +191,6 @@ def initialize_color_function(pg) -> None:
                             pg[obj_attr_name] = ""
                         schema[obj_attr_name] = {
                             "default": "",
-                            "subtype": "OBJECT",
                             "type": "OBJECT",
                         }
                         meta["object_ref_attr"] = obj_attr_name
@@ -250,7 +249,6 @@ def initialize_color_function(pg) -> None:
                         pg[obj_attr_name] = ""
                     schema[obj_attr_name] = {
                         "default": "",
-                        "subtype": "OBJECT",
                         "type": "OBJECT",
                     }
                     meta["object_ref_attr"] = obj_attr_name
