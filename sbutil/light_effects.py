@@ -276,13 +276,16 @@ class PatchedLightEffect(PropertyGroup):
     )
     @property
     def color_function_ref(self) -> Optional[Callable]:
-        if self.type != "FUNCTION" or not self.color_function:
+        if self.type != "FUNCTION":
+            return None
+        function_name = getattr(getattr(self, "color_function", None), "name", None)
+        if not function_name:
             return None
         st = get_state(self)
         module = st.get("module")
         if module is None:
             return None
-        return getattr(module, self.color_function.name, None)
+        return getattr(module, function_name, None)
 
     def draw_color_function_config(self, layout) -> None:
         """Draw UI controls for dynamically discovered config variables."""
