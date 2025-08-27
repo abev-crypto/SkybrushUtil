@@ -77,6 +77,10 @@ def get_state(pg) -> dict:
     st = _state.setdefault(pg.as_pointer(), {})
     if "config_schema" not in st and "_config_schema" in pg:
         st["config_schema"] = _as_dict(pg["_config_schema"])
+    if "text_hash" not in st and "_text_hash" in pg:
+        st["text_hash"] = pg["_text_hash"]
+    if "absolute_path" not in st and "_absolute_path" in pg:
+        st["absolute_path"] = pg["_absolute_path"]
     return st
 
 
@@ -102,9 +106,13 @@ def initialize_color_function(pg) -> None:
         if text_hash != st.get("text_hash"):
             reset_state()
             st["text_hash"] = text_hash
+            pg["_text_hash"] = text_hash
+        if "module" not in st:
             module = ModuleType(text.name)
             exec(source, module.__dict__)
             st["module"] = module
+        module = st["module"]
+        if "config_schema" not in st:
             schema: dict[str, dict] = {}
             for name in dir(module):
                 if not name.isupper():
@@ -112,14 +120,16 @@ def initialize_color_function(pg) -> None:
                 value = getattr(module, name)
                 attr_name = name.lower()
                 if isinstance(value, (int, float)):
-                    pg[attr_name] = value
+                    if attr_name not in pg:
+                        pg[attr_name] = value
                     schema[attr_name] = {"default": value}
                 elif (
                     isinstance(value, (tuple, list))
                     and all(isinstance(v, (int, float)) for v in value)
                 ):
                     list_value = list(value)
-                    pg[attr_name] = list_value
+                    if attr_name not in pg:
+                        pg[attr_name] = list_value
                     meta = {"default": list_value}
                     if name.endswith("_COLOR"):
                         # Suffix indicates that the value should be shown as a color
@@ -136,8 +146,11 @@ def initialize_color_function(pg) -> None:
     if ap != st.get("absolute_path", ""):
         reset_state()
         st["absolute_path"] = ap
+        pg["_absolute_path"] = ap
+    if "module" not in st:
         st["module"] = load_module(ap)
-        module = st["module"]
+    module = st["module"]
+    if "config_schema" not in st:
         schema: dict[str, dict] = {}
         for name in dir(module):
             if not name.isupper():
@@ -145,14 +158,16 @@ def initialize_color_function(pg) -> None:
             value = getattr(module, name)
             attr_name = name.lower()
             if isinstance(value, (int, float)):
-                pg[attr_name] = value
+                if attr_name not in pg:
+                    pg[attr_name] = value
                 schema[attr_name] = {"default": value}
             elif (
                 isinstance(value, (tuple, list))
                 and all(isinstance(v, (int, float)) for v in value)
             ):
                 list_value = list(value)
-                pg[attr_name] = list_value
+                if attr_name not in pg:
+                    pg[attr_name] = list_value
                 meta = {"default": list_value}
                 if name.endswith("_COLOR"):
                     # Suffix indicates that the value should be shown as a color
