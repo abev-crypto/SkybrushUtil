@@ -117,11 +117,20 @@ def get_state(pg) -> dict:
 
 
 def initialize_color_function(pg) -> None:
-    """Load the color function module and create config schema."""
+    """Load the color function module and create config schema.
+
+    Constants defined in the module are exposed as configuration variables.
+    Constants whose lowercase names clash with existing RNA properties of the
+    light effect (e.g. ``name`` or ``type``) are ignored to avoid overwriting
+    those properties; these names are therefore reserved for Blender.
+    """
     if pg.type != "FUNCTION":
         return
 
     st = get_state(pg)
+
+    brna = getattr(pg, "bl_rna", None)
+    reserved = {p.identifier.lower() for p in getattr(brna, "properties", [])}
 
     def reset_state():
         for an in list(pg.get("_config_schema", {})):
@@ -149,8 +158,10 @@ def initialize_color_function(pg) -> None:
             for name in dir(module):
                 if not name.isupper():
                     continue
-                value = getattr(module, name)
                 attr_name = name.lower()
+                if attr_name in reserved:
+                    continue
+                value = getattr(module, name)
                 if isinstance(value, (int, float)):
                     if attr_name not in pg:
                         pg[attr_name] = value
@@ -187,8 +198,10 @@ def initialize_color_function(pg) -> None:
         for name in dir(module):
             if not name.isupper():
                 continue
-            value = getattr(module, name)
             attr_name = name.lower()
+            if attr_name in reserved:
+                continue
+            value = getattr(module, name)
             if isinstance(value, (int, float)):
                 if attr_name not in pg:
                     pg[attr_name] = value

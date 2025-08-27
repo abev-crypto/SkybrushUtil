@@ -11,6 +11,13 @@ Blender add-on for transferring keyframes and light effects.
 - Recalculate transitions while preserving material color keys.
 - Drive light effects with ColorRamps or custom Python functions.
 
+## Custom color functions
+
+Custom Python modules may define uppercase constants that show up as
+configuration options in Blender. The names of these constants must not clash
+with existing RNA properties of the light effect. Names such as `name`, `type`,
+`id_data` or `rna_type` are reserved and will be ignored if defined.
+
 ## Updating
 
 In **Edit > Preferences > Add-ons**, open the Skybrush Util entry and use the
