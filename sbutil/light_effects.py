@@ -17,7 +17,7 @@ from bpy.props import (
     StringProperty,
 )
 from bpy.types import Operator, Panel, PropertyGroup
-from os.path import abspath, basename
+from os.path import abspath, basename, join
 
 from bpy.app.handlers import persistent
 
@@ -622,9 +622,9 @@ class UnembedColorFunctionOperator(bpy.types.Operator):  # pragma: no cover
 
     def execute(self, context):
         entry = context.scene.skybrush.light_effects.active_entry
-        path = self.filepath or entry.color_function.path or basename(
-            entry.color_function_text.name
-        )
+        path = self.filepath or entry.color_function.path
+        if not path:
+            path = join(bpy.app.tempdir, basename(entry.color_function_text.name))
         path = abspath(path)
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(entry.color_function_text.as_string())
