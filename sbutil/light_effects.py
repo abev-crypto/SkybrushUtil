@@ -209,6 +209,9 @@ def initialize_color_function(pg) -> None:
         return
 
     ap = abspath(pg.color_function.path)
+    if not ap.lower().endswith(".py"):
+        reset_state()
+        return
     if ap != st.get("absolute_path", ""):
         reset_state()
         st["absolute_path"] = ap
@@ -419,9 +422,15 @@ class PatchedLightEffect(PropertyGroup):
             elif output_type == "GROUP":
                 outputs = [output_function(idx, 0, 0) for idx in range(num_positions)]
             elif output_type == "CUSTOM":
-                absolute_path = abspath(output_function.path)
-                module = load_module(absolute_path) if absolute_path else None
-                if self.output_function.name:
+                module = get_state(self).get("module")
+                if module is None:
+                    path = output_function.path
+                    module = (
+                        load_module(abspath(path))
+                        if path and path.lower().endswith(".py")
+                        else None
+                    )
+                if self.output_function.name and module:
                     fn = getattr(module, self.output_function.name)
                     outputs = [
                         fn(
