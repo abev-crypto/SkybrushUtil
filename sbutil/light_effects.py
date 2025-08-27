@@ -184,6 +184,17 @@ def initialize_color_function(pg) -> None:
                     if name.endswith("_COLOR"):
                         # Suffix indicates that the value should be shown as a color
                         meta["subtype"] = "COLOR"
+                    elif name.endswith("_POS"):
+                        meta["subtype"] = "XYZ"
+                        obj_attr_name = f"{attr_name}_object"
+                        if obj_attr_name not in pg:
+                            pg[obj_attr_name] = ""
+                        schema[obj_attr_name] = {
+                            "default": "",
+                            "subtype": "OBJECT",
+                            "type": "OBJECT",
+                        }
+                        meta["object_ref_attr"] = obj_attr_name
                     schema[attr_name] = meta
             st["config_schema"] = schema
             pg["_config_schema"] = schema
@@ -229,6 +240,17 @@ def initialize_color_function(pg) -> None:
                 if name.endswith("_COLOR"):
                     # Suffix indicates that the value should be shown as a color
                     meta["subtype"] = "COLOR"
+                elif name.endswith("_POS"):
+                    meta["subtype"] = "XYZ"
+                    obj_attr_name = f"{attr_name}_object"
+                    if obj_attr_name not in pg:
+                        pg[obj_attr_name] = ""
+                    schema[obj_attr_name] = {
+                        "default": "",
+                        "subtype": "OBJECT",
+                        "type": "OBJECT",
+                    }
+                    meta["object_ref_attr"] = obj_attr_name
                 schema[attr_name] = meta
         st["config_schema"] = schema
         pg["_config_schema"] = schema
@@ -297,7 +319,7 @@ class PatchedLightEffect(PropertyGroup):
         if not schema:
             return
         ensure_schema(self, schema)
-        draw_dynamic(self, layout, schema.keys())
+        draw_dynamic(self, layout, schema)
 
     def _get_spatial_effect_predicate(self):
         if self.target == "COLLECTION" and getattr(self, "target_collection", None):
@@ -428,8 +450,17 @@ class PatchedLightEffect(PropertyGroup):
         color_function_ref = self.color_function_ref
         st = get_state(self)
         if color_function_ref is not None and st.get("module", None) is not None:
-            for name in st.get("config_schema", {}).keys():
+            for name, meta in st.get("config_schema", {}).items():
+                if meta.get("type") == "OBJECT":
+                    continue
                 value = self.get(name)
+                obj_attr = meta.get("object_ref_attr")
+                if obj_attr:
+                    obj_name = self.get(obj_attr)
+                    if obj_name:
+                        obj = bpy.data.objects.get(obj_name)
+                        if obj is not None:
+                            value = tuple(get_position_of_object(obj))
                 if isinstance(value, Iterable):
                     setattr(st["module"], name.upper(), tuple(value))
                 else:
@@ -803,12 +834,13 @@ def ensure_schema(pg, schema):
         if ui_kwargs:
             ui.update(**ui_kwargs)
 
-def draw_dynamic(pg, layout, keys=None):
+def draw_dynamic(pg, layout, schema):
     """Draw ID properties from ``pg`` on ``layout``."""
-    if keys is None:
-        keys = dyn_keys(pg)
-    for name in keys:
-        layout.prop(pg, f'["{name}"]', text=name.upper())
+    for name, meta in schema.items():
+        if meta.get("type") == "OBJECT":
+            layout.prop_search(pg, f'["{name}"]', bpy.data, "objects", text=name.upper())
+        else:
+            layout.prop(pg, f'["{name}"]', text=name.upper())
 
 class PatchedLightEffectsPanel(Panel):  # pragma: no cover - Blender UI code
     def draw(self, context):
