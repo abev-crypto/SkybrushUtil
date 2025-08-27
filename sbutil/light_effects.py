@@ -25,6 +25,7 @@ from collections.abc import Callable, Iterable, Sequence
 from functools import partial
 from operator import itemgetter
 from typing import cast, Optional
+import ctypes
 
 from mathutils import Matrix, Vector
 from mathutils.bvhtree import BVHTree
@@ -102,7 +103,7 @@ def initialize_color_function(pg) -> None:
     if getattr(pg, "color_function_text", None):
         text = pg.color_function_text
         source = text.as_string()
-        text_hash = hash(source)
+        text_hash = ctypes.c_int(hash(source)).value
         if text_hash != st.get("text_hash"):
             reset_state()
             st["text_hash"] = text_hash
