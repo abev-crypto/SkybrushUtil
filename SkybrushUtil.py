@@ -1455,6 +1455,7 @@ class DRONE_PT_Utilities(Panel):
             "drone.linearize_copyloc_influence", text="Linearize CopyLoc"
         )
         layout.operator("mesh.reflow_vertices", text="Reflow Vertices")
+        layout.operator("mesh.repel_from_neighbors", text="Repel From Neighbors")
 
 # -------------------------------
 # Add-on Preferences

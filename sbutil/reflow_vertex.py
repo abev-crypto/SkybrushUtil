@@ -252,7 +252,88 @@ class MESH_OT_reflow_vertices(bpy.types.Operator):
         return {'FINISHED'}
 
 
-classes = (MESH_OT_reflow_vertices,)
+class MESH_OT_repel_from_neighbors(bpy.types.Operator):
+    bl_idname = "mesh.repel_from_neighbors"
+    bl_label = "Repel From Neighbors"
+    bl_options = {"REGISTER", "UNDO"}
+    bl_description = (
+        "Move selected vertices away from surrounding vertices to ensure"
+        " a minimum proximity distance"
+    )
+
+    min_distance: bpy.props.FloatProperty(name="Min Distance", default=0.1, min=0.0)
+    iterations: bpy.props.IntProperty(name="Iterations", default=10, min=1)
+    axis_limit: bpy.props.EnumProperty(
+        name="Axis Limit",
+        items=[
+            ("XYZ", "XYZ", ""),
+            ("XY", "XY", ""),
+            ("XZ", "XZ", ""),
+            ("YZ", "YZ", ""),
+            ("X", "X", ""),
+            ("Y", "Y", ""),
+            ("Z", "Z", ""),
+        ],
+        default="XY",
+    )
+
+    @classmethod
+    def poll(cls, context):
+        obj = getattr(context, "object", None)
+        return obj is not None and obj.type == 'MESH'
+
+    def draw(self, context):
+        layout = self.layout
+        layout.prop(self, "min_distance")
+        layout.prop(self, "iterations")
+        layout.prop(self, "axis_limit")
+
+    def invoke(self, context, event):
+        # Prefill from Skybrush safety threshold if present
+        try:
+            t = context.scene.skybrush.safety_check.proximity_warning_threshold
+            if t and t > 0:
+                self.min_distance = float(t)
+        except Exception:
+            pass
+        return context.window_manager.invoke_props_dialog(self)
+
+    def execute(self, context):
+        obj = context.object
+        if not obj or obj.type != 'MESH':
+            self.report({'ERROR'}, "Mesh object required")
+            return {'CANCELLED'}
+        bm = bmesh.from_edit_mesh(obj.data)
+        selected = [v for v in bm.verts if v.select]
+        if not selected:
+            self.report({'WARNING'}, "Select at least one vertex")
+            return {'CANCELLED'}
+        others = [v for v in bm.verts if not v.select]
+        if not others:
+            self.report({'INFO'}, "No unselected vertices to repel from")
+            return {'CANCELLED'}
+        min_d = max(self.min_distance, 0.0)
+        for _ in range(self.iterations):
+            disps = {v: Vector((0.0, 0.0, 0.0)) for v in selected}
+            for v in selected:
+                acc = disps[v]
+                vc = v.co
+                for u in others:
+                    d = vc - u.co
+                    L = d.length
+                    if L < 1e-12:
+                        continue
+                    if L < min_d:
+                        acc += d.normalized() * (min_d - L) * 0.5
+            # apply
+            for v, move in disps.items():
+                move = project_axis_limit(move, self.axis_limit)
+                v.co += move
+        bmesh.update_edit_mesh(obj.data)
+        return {'FINISHED'}
+
+
+classes = (MESH_OT_reflow_vertices, MESH_OT_repel_from_neighbors)
 
 
 def register():
