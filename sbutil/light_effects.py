@@ -26,6 +26,8 @@ from functools import partial
 from operator import itemgetter
 from typing import cast, Optional
 import hashlib
+import json
+from uuid import uuid4
 
 from mathutils import Matrix, Vector
 from mathutils.bvhtree import BVHTree
@@ -924,6 +926,236 @@ class BakeColorRampOperator(bpy.types.Operator):  # pragma: no cover - Blender U
         return {'FINISHED'}
 
 
+class BakeColorRampSplitOperator(bpy.types.Operator):  # pragma: no cover - Blender UI
+    bl_idname = "skybrush.bake_color_ramp_split"
+    bl_label = "Bake (Split)"
+    bl_description = (
+        "Bake looped ColorRamp, splitting into multiple effects if needed"
+    )
+
+    max_points: IntProperty(name="Max Ramp Points", default=32, min=2)
+
+    @classmethod
+    def poll(cls, context):
+        entry = getattr(context.scene.skybrush.light_effects, "active_entry", None)
+        return entry and entry.type == "COLOR_RAMP" and entry.texture
+
+    def _bake_into_ramp(self, ramp, baked_points):
+        elems = ramp.elements
+        baked_points.sort(key=lambda x: x[0])
+        elems[0].position, elems[0].color = baked_points[0]
+        while len(elems) > 1:
+            elems.remove(elems[-1])
+        for pos, col in baked_points[1:]:
+            elem = elems.new(pos)
+            elem.color = col
+
+    def execute(self, context):
+        scene = context.scene
+        le = scene.skybrush.light_effects
+        index = le.active_entry_index
+        entry = le.active_entry
+        if entry is None:
+            return {'CANCELLED'}
+
+        ramp = entry.texture.color_ramp
+        loops = max(entry.loop_count, 1)
+        src = [(e.position, list(e.color)) for e in ramp.elements]
+
+        # If fits into limit, perform normal bake
+        if len(src) * loops <= max(self.max_points, 2):
+            baked = []
+            for i in range(loops):
+                if entry.loop_method == "PINGPONG":
+                    forward = i % 2 == 0
+                elif entry.loop_method == "REVERSE":
+                    forward = False
+                else:
+                    forward = True
+                for pos, col in src:
+                    new_pos = (i + (pos if forward else 1 - pos)) / loops
+                    baked.append((new_pos, col[:]))
+            self._bake_into_ramp(ramp, baked)
+            entry.loop_count = 0
+            entry.loop_method = "FORWARD"
+            return {'FINISHED'}
+
+        # Need to split into multiple effects by time segments
+        src_count = max(len(src), 1)
+        loops_per_chunk = max(self.max_points // src_count, 1)
+        num_chunks = (loops + loops_per_chunk - 1) // loops_per_chunk
+
+        base_name = entry.name
+        group_id = uuid4().hex
+        base_ramp_json = json.dumps(
+            [[float(p), [float(c[0]), float(c[1]), float(c[2]), float(c[3])]] for p, c in src]
+        )
+        original_duration = int(entry.duration)
+        original_start = int(entry.frame_start)
+        loop_method = entry.loop_method
+
+        # Prepare chunk timings
+        # Split duration as evenly as possible
+        chunk_starts = [original_start + (original_duration * i) // num_chunks for i in range(num_chunks)]
+        chunk_durs = [
+            (original_start + (original_duration * (i + 1)) // num_chunks) - chunk_starts[i]
+            for i in range(num_chunks)
+        ]
+        chunk_durs = [max(d, 1) for d in chunk_durs]
+
+        # We'll overwrite the original entry with the first chunk and append others
+        remaining_loops = loops
+        loop_index_offset = 0
+
+        def build_baked_for_chunk(offset, count):
+            baked_local = []
+            for j in range(count):
+                i = offset + j
+                if loop_method == "PINGPONG":
+                    forward = i % 2 == 0
+                elif loop_method == "REVERSE":
+                    forward = False
+                else:
+                    forward = True
+                for pos, col in src:
+                    new_pos = j / max(count, 1) + ((pos if forward else 1 - pos) / max(count, 1))
+                    baked_local.append((new_pos, col[:]))
+            return baked_local
+
+        # Apply first chunk to the selected entry
+        first_count = min(loops_per_chunk, remaining_loops)
+        baked0 = build_baked_for_chunk(loop_index_offset, first_count)
+        self._bake_into_ramp(ramp, baked0)
+        entry.loop_count = 0
+        entry.loop_method = "FORWARD"
+        entry.frame_start = chunk_starts[0]
+        entry.duration = chunk_durs[0]
+        entry.name = pick_unique_name(f"{base_name} [1/{num_chunks}]", le.entries)
+        entry["_split_group_id"] = group_id
+        entry["_split_group_order"] = 0
+        entry["_split_group_size"] = num_chunks
+        entry["_split_group_loops_total"] = loops
+        entry["_split_group_loop_method"] = loop_method
+        entry["_split_group_base_name"] = base_name
+        entry["_split_group_base_ramp"] = base_ramp_json
+        entry["_split_group_original_start"] = original_start
+        entry["_split_group_original_duration"] = original_duration
+
+        remaining_loops -= first_count
+        loop_index_offset += first_count
+
+        # Create subsequent chunks
+        for k in range(1, num_chunks):
+            count = min(loops_per_chunk, remaining_loops)
+            bakedk = build_baked_for_chunk(loop_index_offset, count)
+            # Duplicate after current index to preserve order
+            le.active_entry_index = index + k - 1
+            new_entry = le.duplicate_selected_entry(select=True)
+            new_entry.frame_start = chunk_starts[k]
+            new_entry.duration = chunk_durs[k]
+            new_entry.name = pick_unique_name(f"{base_name} [{k+1}/{num_chunks}]", le.entries)
+            # Write ramp
+            self._bake_into_ramp(new_entry.texture.color_ramp, bakedk)
+            new_entry.loop_count = 0
+            new_entry.loop_method = "FORWARD"
+            # Tag as part of group
+            new_entry["_split_group_id"] = group_id
+            new_entry["_split_group_order"] = k
+            new_entry["_split_group_size"] = num_chunks
+            new_entry["_split_group_loops_total"] = loops
+            new_entry["_split_group_loop_method"] = loop_method
+            new_entry["_split_group_base_name"] = base_name
+            new_entry["_split_group_base_ramp"] = base_ramp_json
+            new_entry["_split_group_original_start"] = original_start
+            new_entry["_split_group_original_duration"] = original_duration
+
+            remaining_loops -= count
+            loop_index_offset += count
+
+        # Reselect first of the group
+        le.active_entry_index = index
+        return {'FINISHED'}
+
+
+class MergeSplitLightEffectsOperator(bpy.types.Operator):  # pragma: no cover - Blender UI
+    bl_idname = "skybrush.merge_split_light_effects"
+    bl_label = "Merge Split Ramps"
+    bl_description = "Merge split ColorRamp effects back into one looped effect"
+
+    @classmethod
+    def poll(cls, context):
+        entry = getattr(context.scene.skybrush.light_effects, "active_entry", None)
+        return entry and entry.get("_split_group_id") is not None
+
+    def execute(self, context):
+        scene = context.scene
+        le = scene.skybrush.light_effects
+        entry = le.active_entry
+        if entry is None:
+            return {'CANCELLED'}
+        gid = entry.get("_split_group_id")
+        if not gid:
+            return {'CANCELLED'}
+        # Collect all entries in the same group
+        members = []
+        for idx, e in enumerate(le.entries):
+            try:
+                if e.get("_split_group_id") == gid:
+                    members.append((idx, e))
+            except Exception:
+                pass
+        if not members:
+            return {'CANCELLED'}
+        members.sort(key=lambda t: int(t[1].get("_split_group_order", 0)))
+
+        # Restore base values
+        base_name = members[0][1].get("_split_group_base_name") or entry.name
+        base_ramp_json = members[0][1].get("_split_group_base_ramp")
+        loops_total = int(members[0][1].get("_split_group_loops_total", 1))
+        loop_method = members[0][1].get("_split_group_loop_method", "FORWARD")
+        original_start = int(members[0][1].get("_split_group_original_start", members[0][1].frame_start))
+        original_duration = int(members[0][1].get("_split_group_original_duration", members[0][1].duration))
+
+        # Use the first entry slot to place the merged effect
+        first_index = members[0][0]
+        le.active_entry_index = first_index
+        merged = le.entries[first_index]
+        merged.name = pick_unique_name(str(base_name), le.entries)
+        merged.frame_start = original_start
+        merged.duration = original_duration
+        merged.loop_count = loops_total
+        merged.loop_method = loop_method
+
+        # Restore base ramp and then bake if desired? Keep as looped to avoid 32-limit again
+        try:
+            src = json.loads(base_ramp_json) if base_ramp_json else None
+        except Exception:
+            src = None
+        if src:
+            # Write base ramp back
+            elems = merged.texture.color_ramp.elements
+            elems[0].position, elems[0].color = float(src[0][0]), src[0][1]
+            while len(elems) > 1:
+                elems.remove(elems[-1])
+            for pos, col in src[1:]:
+                el = elems.new(float(pos))
+                el.color = col
+
+        # Remove the rest of the members (from last to first+1)
+        for idx, _e in sorted(members[1:], key=lambda t: t[0], reverse=True):
+            le.entries.remove(idx)
+
+        # Clear split tags on merged
+        for key in list(merged.keys()):
+            if key.startswith("_split_group_"):
+                try:
+                    del merged[key]
+                except Exception:
+                    pass
+
+        return {'FINISHED'}
+
+
 class ConvertCollectionToMeshOperator(bpy.types.Operator):  # pragma: no cover - Blender UI
     bl_idname = "skybrush.convert_collection_to_mesh"
     bl_label = "Convert Collection to Mesh"
@@ -1115,6 +1347,12 @@ class PatchedLightEffectsPanel(Panel):  # pragma: no cover - Blender UI code
                 col.prop(entry, "loop_count")
                 col.prop(entry, "loop_method")
                 col.operator(BakeColorRampOperator.bl_idname, text="Bake Ramp")
+                row2 = col.row(align=True)
+                row2.operator(BakeColorRampSplitOperator.bl_idname, text="Bake (Split)")
+                if entry.get("_split_group_id"):
+                    row2.operator(
+                        MergeSplitLightEffectsOperator.bl_idname, text="Merge Splits"
+                    )
             if entry.type == "COLOR_RAMP" or entry.type == "IMAGE":
                 col.prop(entry, "output")
                 if entry.output == "CUSTOM":
@@ -1162,6 +1400,8 @@ def register():  # pragma: no cover - executed in Blender
     bpy.utils.register_class(UnembedColorFunctionOperator)
     bpy.utils.register_class(BakeColorRampOperator)
     bpy.utils.register_class(ConvertCollectionToMeshOperator)
+    bpy.utils.register_class(BakeColorRampSplitOperator)
+    bpy.utils.register_class(MergeSplitLightEffectsOperator)
     if _ensure_light_effects_initialized not in bpy.app.handlers.depsgraph_update_pre:
         bpy.app.handlers.depsgraph_update_pre.append(_ensure_light_effects_initialized)
 
@@ -1173,4 +1413,6 @@ def unregister():  # pragma: no cover - executed in Blender
     bpy.utils.unregister_class(BakeColorRampOperator)
     bpy.utils.unregister_class(UnembedColorFunctionOperator)
     bpy.utils.unregister_class(EmbedColorFunctionOperator)
+    bpy.utils.unregister_class(BakeColorRampSplitOperator)
+    bpy.utils.unregister_class(MergeSplitLightEffectsOperator)
 
