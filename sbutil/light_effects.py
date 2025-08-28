@@ -559,7 +559,7 @@ class PatchedLightEffect(PropertyGroup):
             alpha = max(
                 min(self._evaluate_influence_at(position, frame, condition), 1.0), 0.0
             )
-            if getattr(self, "color_function_text", None) and function_name:
+            if getattr(self, "color_function_text", None):
                 ctx = st.get("module", ModuleType("_dummy")).__dict__
                 ctx.update(
                     frame=frame,
@@ -571,7 +571,7 @@ class PatchedLightEffect(PropertyGroup):
                 )
                 try:
                     new_color[:] = eval(
-                        f"{function_name}(frame=frame, time_fraction=time_fraction, drone_index=drone_index, formation_index=formation_index, position=position, drone_count=drone_count)",
+                        f"color_function(frame=frame, time_fraction=time_fraction, drone_index=drone_index, formation_index=formation_index, position=position, drone_count=drone_count)",
                         ctx,
                     )
                 except Exception as exc:
