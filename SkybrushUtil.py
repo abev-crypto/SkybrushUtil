@@ -1527,7 +1527,7 @@ def register():
     if _PATCHED:
         return
     _PATCHED = True
-    #bpy.app.timers.register(try_patch)
+    bpy.app.timers.register(try_patch)
     bpy.app.handlers.load_post.append(_on_load_post)
     if _auto_run_proximity_check not in bpy.app.handlers.frame_change_post:
         bpy.app.handlers.frame_change_post.append(_auto_run_proximity_check)
