@@ -116,6 +116,41 @@ def get_state(pg) -> dict:
     return st
 
 
+def _get_object_property(obj, prop_type):
+    """Return dynamic property of ``obj`` based on ``prop_type``."""
+    if prop_type == "POS":
+        return tuple(get_position_of_object(obj))
+    if prop_type == "ROT":
+        return tuple(getattr(obj, "rotation_euler", (0.0, 0.0, 0.0)))
+    if prop_type == "SCL":
+        return tuple(getattr(obj, "scale", (1.0, 1.0, 1.0)))
+    if prop_type == "MAT":
+        mat = None
+        if getattr(obj, "material_slots", None):
+            slot = obj.material_slots[0]
+            mat = getattr(slot, "material", None)
+        if mat is None:
+            mat = getattr(obj, "active_material", None)
+        if mat is None:
+            return None
+        color = None
+        if getattr(mat, "use_nodes", False) and getattr(mat, "node_tree", None):
+            node = next(
+                (n for n in mat.node_tree.nodes if getattr(n, "type", "") == "BSDF_PRINCIPLED"),
+                None,
+            )
+            if node is not None:
+                inp = node.inputs.get("Base Color")
+                if inp is not None:
+                    color = tuple(inp.default_value[:4])
+        if color is None:
+            diff = getattr(mat, "diffuse_color", None)
+            if diff is not None:
+                color = tuple(diff[:4])
+        return color
+    return None
+
+
 def initialize_color_function(pg) -> None:
     """Load the color function module and create config schema.
 
@@ -194,6 +229,40 @@ def initialize_color_function(pg) -> None:
                             "type": "OBJECT",
                         }
                         meta["object_ref_attr"] = obj_attr_name
+                        meta["object_ref_type"] = "POS"
+                    elif name.endswith("_ROT"):
+                        meta["subtype"] = "EULER"
+                        obj_attr_name = f"{attr_name}_object"
+                        if obj_attr_name not in pg:
+                            pg[obj_attr_name] = ""
+                        schema[obj_attr_name] = {
+                            "default": "",
+                            "type": "OBJECT",
+                        }
+                        meta["object_ref_attr"] = obj_attr_name
+                        meta["object_ref_type"] = "ROT"
+                    elif name.endswith("_SCL"):
+                        meta["subtype"] = "XYZ"
+                        obj_attr_name = f"{attr_name}_object"
+                        if obj_attr_name not in pg:
+                            pg[obj_attr_name] = ""
+                        schema[obj_attr_name] = {
+                            "default": "",
+                            "type": "OBJECT",
+                        }
+                        meta["object_ref_attr"] = obj_attr_name
+                        meta["object_ref_type"] = "SCL"
+                    elif name.endswith("_MAT"):
+                        meta["subtype"] = "COLOR"
+                        obj_attr_name = f"{attr_name}_object"
+                        if obj_attr_name not in pg:
+                            pg[obj_attr_name] = ""
+                        schema[obj_attr_name] = {
+                            "default": "",
+                            "type": "OBJECT",
+                        }
+                        meta["object_ref_attr"] = obj_attr_name
+                        meta["object_ref_type"] = "MAT"
                     schema[attr_name] = meta
             st["config_schema"] = schema
             pg["_config_schema"] = schema
@@ -252,6 +321,40 @@ def initialize_color_function(pg) -> None:
                         "type": "OBJECT",
                     }
                     meta["object_ref_attr"] = obj_attr_name
+                    meta["object_ref_type"] = "POS"
+                elif name.endswith("_ROT"):
+                    meta["subtype"] = "EULER"
+                    obj_attr_name = f"{attr_name}_object"
+                    if obj_attr_name not in pg:
+                        pg[obj_attr_name] = ""
+                    schema[obj_attr_name] = {
+                        "default": "",
+                        "type": "OBJECT",
+                    }
+                    meta["object_ref_attr"] = obj_attr_name
+                    meta["object_ref_type"] = "ROT"
+                elif name.endswith("_SCL"):
+                    meta["subtype"] = "XYZ"
+                    obj_attr_name = f"{attr_name}_object"
+                    if obj_attr_name not in pg:
+                        pg[obj_attr_name] = ""
+                    schema[obj_attr_name] = {
+                        "default": "",
+                        "type": "OBJECT",
+                    }
+                    meta["object_ref_attr"] = obj_attr_name
+                    meta["object_ref_type"] = "SCL"
+                elif name.endswith("_MAT"):
+                    meta["subtype"] = "COLOR"
+                    obj_attr_name = f"{attr_name}_object"
+                    if obj_attr_name not in pg:
+                        pg[obj_attr_name] = ""
+                    schema[obj_attr_name] = {
+                        "default": "",
+                        "type": "OBJECT",
+                    }
+                    meta["object_ref_attr"] = obj_attr_name
+                    meta["object_ref_type"] = "MAT"
                 schema[attr_name] = meta
         st["config_schema"] = schema
         pg["_config_schema"] = schema
@@ -501,7 +604,11 @@ class PatchedLightEffect(PropertyGroup):
                         if obj_name:
                             obj = bpy.data.objects.get(obj_name)
                             if obj is not None:
-                                value = tuple(get_position_of_object(obj))
+                                obj_val = _get_object_property(
+                                    obj, meta.get("object_ref_type", "POS")
+                                )
+                                if obj_val is not None:
+                                    value = obj_val
                     if isinstance(value, Iterable):
                         ctx[name.upper()] = tuple(value)
                     else:
@@ -517,7 +624,11 @@ class PatchedLightEffect(PropertyGroup):
                         if obj_name:
                             obj = bpy.data.objects.get(obj_name)
                             if obj is not None:
-                                value = tuple(get_position_of_object(obj))
+                                obj_val = _get_object_property(
+                                    obj, meta.get("object_ref_type", "POS")
+                                )
+                                if obj_val is not None:
+                                    value = obj_val
                     if isinstance(value, Iterable):
                         setattr(module, name.upper(), tuple(value))
                     else:
