@@ -1348,11 +1348,12 @@ class PatchedLightEffectsPanel(Panel):  # pragma: no cover - Blender UI code
                 col.prop(entry, "loop_method")
                 col.operator(BakeColorRampOperator.bl_idname, text="Bake Ramp")
                 row2 = col.row(align=True)
-                row2.operator(BakeColorRampSplitOperator.bl_idname, text="Bake (Split)")
                 if entry.get("_split_group_id"):
                     row2.operator(
                         MergeSplitLightEffectsOperator.bl_idname, text="Merge Splits"
                     )
+                else:
+                    row2.operator(BakeColorRampSplitOperator.bl_idname, text="Bake (Split)")
             if entry.type == "COLOR_RAMP" or entry.type == "IMAGE":
                 col.prop(entry, "output")
                 if entry.output == "CUSTOM":
