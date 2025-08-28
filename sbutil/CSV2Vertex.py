@@ -177,7 +177,12 @@ def import_csv_folder(context, folder, start_frame):
         first_positions.append((d0["x"], d0["y"], d0["z"]))
 
     # Create mesh and armature with N bones/vertices
-    obj = ensure_mesh_with_armature(name=folder_name, count=len(tracks), first_positions=first_positions)
+    # Name it after the storyboard entry + "_CSV" for clarity
+    obj = ensure_mesh_with_armature(
+        name=f"{folder_name}_CSV",
+        count=len(tracks),
+        first_positions=first_positions,
+    )
 
     # Create a vertex group containing all vertices for formations
     vg = obj.vertex_groups.new(name="Drones")
