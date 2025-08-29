@@ -1268,8 +1268,6 @@ class Patched_RTOP(StoryboardOperator):
 def patch_recalculate_operator():
     RecalculateTransitionsOperator._original_execute = RecalculateTransitionsOperator.execute
     RecalculateTransitionsOperator.execute = Patched_RTOP.execute
-    print("patch success!")
-
 
 def unpatch_recalculate_operator():
     if RecalculateTransitionsOperator._original_execute:
@@ -1318,14 +1316,20 @@ def _auto_run_proximity_check(scene, _depsgraph):  # pragma: no cover - Blender 
 
 
 def try_patch():
+    global _PATCHED
     try:
+        if _PATCHED:
+            bpy.app.timers.unregister(try_patch)
+            return None
         patch_recalculate_operator()
         light_effects_patch.patch_light_effect_class()
         light_effects_patch.patch_light_effects_panel()
         patch_safety_check_panel()
-    except Exception:
-        print("trypatch...")
+        print("patch success!")
+    except Exception as e:
+        print(e)
         return 0.5
+    _PATCHED = True
     for area in bpy.context.screen.areas:
         area.tag_redraw()
     bpy.app.timers.unregister(try_patch)
@@ -1524,10 +1528,6 @@ def register():
     light_effects_patch.register()
     CSV2Vertex.register()
     reflow_vertex.register()
-    global _PATCHED
-    if _PATCHED:
-        return
-    _PATCHED = True
     bpy.app.timers.register(try_patch)
     bpy.app.handlers.load_post.append(_on_load_post)
     if _auto_run_proximity_check not in bpy.app.handlers.frame_change_post:
@@ -1544,10 +1544,6 @@ def unregister():
     light_effects_patch.unregister()
     CSV2Vertex.unregister()
     reflow_vertex.unregister()
-    global _PATCHED
-    if not _PATCHED:
-        return
-    _PATCHED = False
 
     # ハンドラ除去（存在チェック）
     if _on_load_post in bpy.app.handlers.load_post:
