@@ -4,132 +4,152 @@ def create_curve_segment_cylinder_gn():
     tree_name = "CurveSegmentCylinder_VCol"
     ng = bpy.data.node_groups.new(tree_name, 'GeometryNodeTree')
 
-    #----------------------------------------------------------
-    # インターフェース定義（Blender 4.3 仕様）
-    #----------------------------------------------------------
+    # ----------------------------------------------------------
+    # インターフェース定義（Blender 4.x：interface.new_socket）
+    # ----------------------------------------------------------
     interface = ng.interface
-    sockets_in = []
-    sockets_out = []
 
-    sockets_in.append(interface.new_socket(
-        name="Geometry", in_out='INPUT',
-        socket_type='NodeSocketGeometry',
-        description="入力カーブ"))
+    # INPUTS
+    s_geom = interface.new_socket("Geometry", 'INPUT', 'NodeSocketGeometry')
 
-    sockets_in.append(interface.new_socket(
-        name="Segment Start", in_out='INPUT',
-        socket_type='NodeSocketFloat',
-        description="トリム開始位置"))
-    sockets_in[-1].default_value = 0.3
-    sockets_in[-1].min_value = 0.0
-    sockets_in[-1].max_value = 1.0
+    s_start = interface.new_socket("Segment Start", 'INPUT', 'NodeSocketFloat')
+    s_start.default_value = 0.3
+    s_start.min_value = 0.0
+    s_start.max_value = 1.0
 
-    sockets_in.append(interface.new_socket(
-        name="Segment End", in_out='INPUT',
-        socket_type='NodeSocketFloat',
-        description="トリム終了位置"))
-    sockets_in[-1].default_value = 0.7
-    sockets_in[-1].min_value = 0.0
-    sockets_in[-1].max_value = 1.0
+    s_end = interface.new_socket("Segment End", 'INPUT', 'NodeSocketFloat')
+    s_end.default_value = 0.7
+    s_end.min_value = 0.0
+    s_end.max_value = 1.0
 
-    sockets_in.append(interface.new_socket(
-        name="Radius", in_out='INPUT',
-        socket_type='NodeSocketFloat',
-        description="円柱半径"))
-    sockets_in[-1].default_value = 0.05
-    sockets_in[-1].min_value = 0.0
+    s_radius = interface.new_socket("Radius", 'INPUT', 'NodeSocketFloat')
+    s_radius.default_value = 0.05
+    s_radius.min_value = 0.0
 
-    sockets_in.append(interface.new_socket(
-        name="Sample Count", in_out='INPUT',
-        socket_type='NodeSocketInt',
-        description="リサンプリング数"))
-    sockets_in[-1].default_value = 64
-    sockets_in[-1].min_value = 2
+    s_count = interface.new_socket("Sample Count", 'INPUT', 'NodeSocketInt')
+    s_count.default_value = 64
+    s_count.min_value = 2
 
-    sockets_out.append(interface.new_socket(
-        name="Geometry", in_out='OUTPUT',
-        socket_type='NodeSocketGeometry',
-        description="出力ジオメトリ"))
+    # ★ 追加：絶対長さで頂点カラーを書くかどうか
+    s_abs = interface.new_socket("Use Absolute Length", 'INPUT', 'NodeSocketBool')
+    s_abs.default_value = False  # デフォルトは従来通り 0〜1 グラデ
 
-    #----------------------------------------------------------
-    # ノード群
-    #----------------------------------------------------------
+    # OUTPUTS
+    interface.new_socket("Geometry", 'OUTPUT', 'NodeSocketGeometry')
+
     nodes = ng.nodes
     links = ng.links
     nodes.clear()
 
-    group_in = nodes.new('NodeGroupInput'); group_in.location = (-800, 0)
-    group_out = nodes.new('NodeGroupOutput'); group_out.location = (800, 0)
+    # ----------------------------------------------------------
+    # ノード作成
+    # ----------------------------------------------------------
+    group_in  = nodes.new('NodeGroupInput');           group_in.location  = (-900,   0)
+    group_out = nodes.new('NodeGroupOutput');          group_out.location = ( 600,   0)
 
+    # 0.3〜0.7 区間のトリム
     trim = nodes.new('GeometryNodeTrimCurve')
-    trim.location = (-600, 0)
+    trim.location = (-700, 0)
     trim.mode = 'FACTOR'
 
+    # 均等サンプル
     resample = nodes.new('GeometryNodeResampleCurve')
-    resample.location = (-400, 0)
+    resample.location = (-500, 0)
     resample.mode = 'COUNT'
 
+    # カーブ長（トリム＋リサンプル後）
+    curve_length = nodes.new('GeometryNodeCurveLength')
+    curve_length.location = (-500, -200)
+
+    # 0〜1 の位置パラメータ
     spline_param = nodes.new('GeometryNodeSplineParameter')
-    spline_param.location = (-400, -180)
+    spline_param.location = (-500, -400)
 
+    # 絶対長さ = Factor * Length 用 Math
+    math_mul = nodes.new('ShaderNodeMath')
+    math_mul.location = (-300, -300)
+    math_mul.operation = 'MULTIPLY'
+
+    # 正規化 or 絶対長さ の切り替え
+    switch = nodes.new('FunctionNodeSwitch')
+    switch.location = (-100, -300)
+    switch.input_type = 'FLOAT'
+
+    # グレースケール → Color
     comb_color = nodes.new('FunctionNodeCombineColor')
-    comb_color.location = (-200, -180)
+    comb_color.location = (100, -300)
 
+    # 頂点カラー "color" を書き込む
     store_attr = nodes.new('GeometryNodeStoreNamedAttribute')
-    store_attr.location = (0, 0)
+    store_attr.location = (100, 0)
     store_attr.data_type = 'FLOAT_COLOR'
     store_attr.domain = 'POINT'
     store_attr.inputs["Name"].default_value = "color"
 
+    # 円柱断面
     circle = nodes.new('GeometryNodeCurvePrimitiveCircle')
-    circle.location = (-200, 200)
+    circle.location = (-100, 200)
 
+    # カーブをチューブに
     curve_to_mesh = nodes.new('GeometryNodeCurveToMesh')
-    curve_to_mesh.location = (200, 0)
-    # ★ 両端をフィル
-    curve_to_mesh.inputs["Fill Caps"].default_value = True
+    curve_to_mesh.location = (350, 0)
 
-    # ★ Output の前に Realize Instances
-    realize = nodes.new('GeometryNodeRealizeInstances')
-    realize.location = (500, 0)
+    circle.inputs["Resolution"].default_value = 16
 
-    #----------------------------------------------------------
+    # ----------------------------------------------------------
     # 接続
-    #----------------------------------------------------------
+    # ----------------------------------------------------------
     l = links.new
 
-    # 入力 → Trim
-    l(group_in.outputs['Geometry'], trim.inputs['Curve'])
+    # Group Input → Trim
+    l(group_in.outputs['Geometry'],      trim.inputs['Curve'])
     l(group_in.outputs['Segment Start'], trim.inputs['Start'])
-    l(group_in.outputs['Segment End'], trim.inputs['End'])
+    l(group_in.outputs['Segment End'],   trim.inputs['End'])
 
     # Trim → Resample
     l(trim.outputs['Curve'], resample.inputs['Curve'])
     l(group_in.outputs['Sample Count'], resample.inputs['Count'])
 
-    # Resample → Store Named Attribute
+    # Resample → Curve Length（長さ[m]）
+    l(resample.outputs['Curve'], curve_length.inputs['Curve'])
+
+    # Resample → Store Attribute（ジオメトリ本体）
     l(resample.outputs['Curve'], store_attr.inputs['Geometry'])
 
-    # Spline Parameter Factor → RGB 同じ値で頂点カラー
-    l(spline_param.outputs['Factor'], comb_color.inputs['Red'])
-    l(spline_param.outputs['Factor'], comb_color.inputs['Green'])
-    l(spline_param.outputs['Factor'], comb_color.inputs['Blue'])
+    # Spline Parameter (0〜1) → Math(入力1)
+    l(spline_param.outputs['Factor'], math_mul.inputs[0])
+
+    # Curve Length (m) → Math(入力2)
+    l(curve_length.outputs['Length'], math_mul.inputs[1])
+
+    # Switch: Bool → "Use Absolute Length"
+    l(group_in.outputs['Use Absolute Length'], switch.inputs['Switch'])
+
+    # Switch False（OFF時） = 0〜1 の Factor
+    l(spline_param.outputs['Factor'], switch.inputs['False'])
+
+    # Switch True（ON時） = 絶対長さ[m] = Factor * Length
+    l(math_mul.outputs['Value'], switch.inputs['True'])
+
+    # Switch 出力 → Combine Color (R,G,B 全て同じ値)
+    l(switch.outputs['Output'], comb_color.inputs['Red'])
+    l(switch.outputs['Output'], comb_color.inputs['Green'])
+    l(switch.outputs['Output'], comb_color.inputs['Blue'])
+
+    # Combine Color → Store Named Attribute
     l(comb_color.outputs['Color'], store_attr.inputs['Value'])
 
     # Radius → Circle
     l(group_in.outputs['Radius'], circle.inputs['Radius'])
 
-    # StoreAttr → Curve to Mesh
+    # Store Named Attribute → Curve to Mesh（Curve）
     l(store_attr.outputs['Geometry'], curve_to_mesh.inputs['Curve'])
 
-    # Circle → Curve to Mesh Profile
+    # Circle → Curve to Mesh（Profile Curve）
     l(circle.outputs['Curve'], curve_to_mesh.inputs['Profile Curve'])
 
-    # Curve to Mesh → Realize Instances → Output
-    l(curve_to_mesh.outputs['Mesh'], realize.inputs['Geometry'])
-    l(realize.outputs['Geometry'], group_out.inputs['Geometry'])
-
-    circle.inputs["Resolution"].default_value = 16
+    # Curve to Mesh → Group Output
+    l(curve_to_mesh.outputs['Mesh'], group_out.inputs['Geometry'])
 
     return ng
 
@@ -139,9 +159,18 @@ def add_modifier_to_active_object(ng):
     if obj is None:
         print("アクティブオブジェクトがありません。")
         return
+
     mod = obj.modifiers.new(name=ng.name, type='NODES')
     mod.node_group = ng
-    print(f"モディファイア '{ng.name}' を '{obj.name}' に追加しました。")
+
+    print(f"Geometry Nodes モディファイア '{ng.name}' を '{obj.name}' に追加しました。")
+    print("Segment Start / End / Radius / Sample Count / Use Absolute Length はモディファイアから調整できます。")
+
+
+# 実行
+ng = create_curve_segment_cylinder_gn()
+add_modifier_to_active_object(ng)
+
 
 
 # 実行
