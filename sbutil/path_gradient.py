@@ -1,7 +1,13 @@
 import bpy
 
+
 def create_curve_segment_cylinder_gn():
+    """Return the geometry node group that generates a colored curve mesh."""
+
     tree_name = "CurveSegmentCylinder_VCol"
+    if tree_name in bpy.data.node_groups:
+        return bpy.data.node_groups[tree_name]
+
     ng = bpy.data.node_groups.new(tree_name, 'GeometryNodeTree')
 
     # ----------------------------------------------------------
@@ -154,32 +160,27 @@ def create_curve_segment_cylinder_gn():
     return ng
 
 
-def add_modifier_to_active_object(ng):
-    obj = bpy.context.active_object
+def add_modifier_to_object(obj, ng):
+    """Attach ``ng`` as a Geometry Nodes modifier to ``obj``."""
+
     if obj is None:
-        print("アクティブオブジェクトがありません。")
-        return
+        raise ValueError("An object is required to add the modifier to.")
 
-    mod = obj.modifiers.new(name=ng.name, type='NODES')
-    mod.node_group = ng
+    modifier = None
+    for mod in obj.modifiers:
+        if mod.type == 'NODES' and mod.node_group == ng:
+            modifier = mod
+            break
 
-    print(f"Geometry Nodes モディファイア '{ng.name}' を '{obj.name}' に追加しました。")
-    print("Segment Start / End / Radius / Sample Count / Use Absolute Length はモディファイアから調整できます。")
+    if modifier is None:
+        modifier = obj.modifiers.new(name=ng.name, type='NODES')
+        modifier.node_group = ng
 
-
-# 実行
-ng = create_curve_segment_cylinder_gn()
-add_modifier_to_active_object(ng)
-
-
-
-# 実行
-# sort_vtx_and_create_curve()
-# ng = create_curve_segment_cylinder_gn()
-# add_modifier_to_active_object(ng)
+    return modifier
 
 
 import bmesh
+
 
 def sort_vtx_and_create_curve():
     # -------------------------------------------------------
@@ -249,3 +250,14 @@ def sort_vtx_and_create_curve():
     bpy.context.collection.objects.link(curve_obj)
 
     print(f"{len(coords_local)} 個の頂点から SortedVerts / Path を作成しました。")
+
+    return sorted_obj, curve_obj
+
+
+def create_gradient_curve_from_selection():
+    """Create a curve with the geometry nodes modifier from the current selection."""
+
+    _sorted_obj, curve_obj = sort_vtx_and_create_curve()
+    node_group = create_curve_segment_cylinder_gn()
+    add_modifier_to_object(curve_obj, node_group)
+    return curve_obj

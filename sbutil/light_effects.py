@@ -9,6 +9,7 @@ plug‑in is not available, the module simply does nothing.
 import bpy
 import bmesh
 from bpy.props import (
+    BoolProperty,
     EnumProperty,
     FloatProperty,
     FloatVectorProperty,
@@ -67,6 +68,7 @@ from sbstudio.plugin.operators import (
     MoveLightEffectUpOperator,
     RemoveLightEffectOperator,
 )
+from sbutil import path_gradient
 
 @contextmanager
 def use_b_mesh(mesh):  # pragma: no cover - Blender integration
@@ -118,6 +120,99 @@ def get_state(pg) -> dict:
     return st
 
 
+def _barycentric_weights(point: Vector, a: Vector, b: Vector, c: Vector) -> tuple[float, float, float]:
+    """Return barycentric weights of ``point`` on triangle ``(a, b, c)``."""
+
+    v0 = b - a
+    v1 = c - a
+    v2 = point - a
+    d00 = v0.dot(v0)
+    d01 = v0.dot(v1)
+    d11 = v1.dot(v1)
+    d20 = v2.dot(v0)
+    d21 = v2.dot(v1)
+    denom = d00 * d11 - d01 * d01
+    if abs(denom) < 1e-12:
+        return (1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0)
+    v = (d11 * d20 - d01 * d21) / denom
+    w = (d00 * d21 - d01 * d20) / denom
+    u = 1.0 - v - w
+    return (u, v, w)
+
+
+def _get_color_attribute(mesh) -> Optional[object]:
+    """Return the active vertex color attribute from ``mesh`` if present."""
+
+    layer = None
+    if hasattr(mesh, "color_attributes"):
+        layer = mesh.color_attributes.get("color")
+        if layer is None:
+            try:
+                layer = mesh.color_attributes.active_color
+            except AttributeError:
+                layer = None
+    if layer is None and hasattr(mesh, "vertex_colors"):
+        vcols = mesh.vertex_colors
+        if vcols:
+            layer = vcols.get("color") or getattr(vcols, "active", None)
+    return layer
+
+
+def sample_vertex_color_factors(mesh_obj, positions: Sequence[Coordinate3D]) -> Optional[list[Optional[float]]]:
+    """Sample vertex color values from ``mesh_obj`` at ``positions``."""
+
+    if mesh_obj is None or not positions:
+        return None
+
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    eval_obj = mesh_obj.evaluated_get(depsgraph)
+    eval_mesh = eval_obj.to_mesh(preserve_all_data_layers=True)
+    try:
+        color_layer = _get_color_attribute(eval_mesh)
+        if color_layer is None:
+            return None
+        domain = getattr(color_layer, "domain", None)
+        if domain not in {"POINT", "CORNER"}:
+            return None
+        eval_mesh.calc_loop_triangles()
+        if not eval_mesh.loop_triangles:
+            return None
+        tree = BVHTree.FromMesh(eval_mesh, epsilon=0.0)
+        if tree is None:
+            return None
+        inv_world = mesh_obj.matrix_world.inverted()
+        outputs: list[Optional[float]] = []
+        for pos in positions:
+            co = Vector(pos) if not isinstance(pos, Vector) else pos.copy()
+            local = inv_world @ co
+            nearest = tree.find_nearest(local)
+            if nearest is None:
+                outputs.append(None)
+                continue
+            location, _normal, tri_index, _dist = nearest
+            if tri_index is None:
+                outputs.append(None)
+                continue
+            tri = eval_mesh.loop_triangles[tri_index]
+            verts = tri.vertices
+            loops = tri.loops
+            v0 = eval_mesh.vertices[verts[0]].co
+            v1 = eval_mesh.vertices[verts[1]].co
+            v2 = eval_mesh.vertices[verts[2]].co
+            w0, w1, w2 = _barycentric_weights(location, v0, v1, v2)
+            if domain == "POINT":
+                c0 = color_layer.data[verts[0]].color
+                c1 = color_layer.data[verts[1]].color
+                c2 = color_layer.data[verts[2]].color
+            else:  # CORNER
+                c0 = color_layer.data[loops[0]].color
+                c1 = color_layer.data[loops[1]].color
+                c2 = color_layer.data[loops[2]].color
+            value = (c0[0] * w0 + c1[0] * w1 + c2[0] * w2) % 1.0
+            outputs.append(float(value))
+        return outputs
+    finally:
+        eval_obj.to_mesh_clear()
 def _get_object_property(obj, prop_type):
     """Return dynamic property of ``obj`` based on ``prop_type``."""
     if prop_type == "POS":
@@ -399,6 +494,14 @@ class PatchedLightEffect(PropertyGroup):
         items=[("FORWARD", "Forward", ""), ("REVERSE", "Reverse", ""), ("PINGPONG", "Ping-Pong", "")],
         default="FORWARD",
     )
+    use_inside_mesh_vertex_colors = BoolProperty(
+        name="Sample Position from Mesh Colors",
+        description=(
+            "When targeting drones inside a mesh, use the mesh vertex colors as"
+            " the sampling position for the Color Ramp"
+        ),
+        default=False,
+    )
     color_function_text = PointerProperty(
         name="Color Function Text", type=bpy.types.Text
     )
@@ -636,9 +739,27 @@ class PatchedLightEffect(PropertyGroup):
                     else:
                         setattr(module, name.upper(), value)
         new_color = [0.0] * 4
+        mesh_outputs = None
+        if (
+            self.type == "COLOR_RAMP"
+            and self.target == "INSIDE_MESH"
+            and getattr(self, "use_inside_mesh_vertex_colors", False)
+            and getattr(self, "mesh", None)
+        ):
+            mesh_outputs = sample_vertex_color_factors(self.mesh, positions)
         outputs_x, common_output_x = get_output_based_on_output_type(
             self.output, self.output_mapping_mode, self.output_function
         )
+        if mesh_outputs is not None:
+            if common_output_x is not None:
+                outputs_x = [common_output_x] * num_positions
+                common_output_x = None
+            if outputs_x is None:
+                outputs_x = mesh_outputs
+            else:
+                for i, value in enumerate(mesh_outputs):
+                    if value is not None:
+                        outputs_x[i] = value
         if color_image is not None:
             outputs_y, common_output_y = get_output_based_on_output_type(
                 self.output_y, self.output_mapping_mode_y, self.output_function_y
@@ -753,6 +874,9 @@ def patch_light_effect_class():
     LightEffect.type = PatchedLightEffect.type
     LightEffect.loop_count = PatchedLightEffect.loop_count
     LightEffect.loop_method = PatchedLightEffect.loop_method
+    LightEffect.use_inside_mesh_vertex_colors = (
+        PatchedLightEffect.use_inside_mesh_vertex_colors
+    )
     LightEffect.color_function_text = PatchedLightEffect.color_function_text
     LightEffect.apply_on_colors = PatchedLightEffect.apply_on_colors
     LightEffect.color_function_ref = PatchedLightEffect.color_function_ref
@@ -784,6 +908,9 @@ def patch_light_effect_class():
     LightEffect.__annotations__["type"] = LightEffect.type
     LightEffect.__annotations__["loop_count"] = LightEffect.loop_count
     LightEffect.__annotations__["loop_method"] = LightEffect.loop_method
+    LightEffect.__annotations__["use_inside_mesh_vertex_colors"] = (
+        LightEffect.use_inside_mesh_vertex_colors
+    )
     LightEffect.__annotations__["color_function_text"] = LightEffect.color_function_text
     LightEffect.__annotations__["target"] = LightEffect.target
     LightEffect.__annotations__["target_collection"] = LightEffect.target_collection
@@ -795,7 +922,12 @@ def unpatch_light_effect_class():
     bpy.utils.unregister_class(LightEffect)
     LightEffect.type = LightEffect._original_type
     LightEffect.__annotations__["type"] = LightEffect._original_type
-    for attr in ("loop_count", "loop_method", "color_function_text"):
+    for attr in (
+        "loop_count",
+        "loop_method",
+        "use_inside_mesh_vertex_colors",
+        "color_function_text",
+    ):
         if hasattr(LightEffect, attr):
             delattr(LightEffect, attr)
             LightEffect.__annotations__.pop(attr, None)
@@ -923,6 +1055,42 @@ class BakeColorRampOperator(bpy.types.Operator):  # pragma: no cover - Blender U
             elem.color = col
         entry.loop_count = 0
         entry.loop_method = "FORWARD"
+        return {'FINISHED'}
+
+
+class GeneratePathGradientMeshOperator(bpy.types.Operator):  # pragma: no cover - Blender UI
+    bl_idname = "skybrush.generate_path_gradient_mesh"
+    bl_label = "Generate Curve Mesh"
+    bl_description = (
+        "Create a curve with Geometry Nodes from the selected vertices and"
+        " assign it to this light effect"
+    )
+
+    @classmethod
+    def poll(cls, context):
+        entry = getattr(context.scene.skybrush.light_effects, "active_entry", None)
+        edit_obj = context.edit_object
+        return (
+            entry is not None
+            and entry.type == "COLOR_RAMP"
+            and edit_obj is not None
+            and edit_obj.type == "MESH"
+        )
+
+    def execute(self, context):
+        entry = context.scene.skybrush.light_effects.active_entry
+        try:
+            curve_obj = path_gradient.create_gradient_curve_from_selection()
+        except Exception as exc:  # pragma: no cover - Blender UI
+            self.report({'ERROR'}, str(exc))
+            return {'CANCELLED'}
+
+        entry.mesh = curve_obj
+        entry.target = "INSIDE_MESH"
+        if hasattr(entry, "use_inside_mesh_vertex_colors"):
+            entry.use_inside_mesh_vertex_colors = True
+
+        self.report({'INFO'}, f"Generated curve mesh '{curve_obj.name}'")
         return {'FINISHED'}
 
 
@@ -1354,6 +1522,19 @@ class PatchedLightEffectsPanel(Panel):  # pragma: no cover - Blender UI code
                     )
                 else:
                     row2.operator(BakeColorRampSplitOperator.bl_idname, text="Bake (Split)")
+                col.separator()
+                row_mesh = col.row()
+                row_mesh.enabled = entry.target == "INSIDE_MESH"
+                row_mesh.prop(
+                    entry,
+                    "use_inside_mesh_vertex_colors",
+                    text="Use Mesh Vertex Colors",
+                )
+                col.operator(
+                    GeneratePathGradientMeshOperator.bl_idname,
+                    text="Generate Curve Mesh",
+                    icon="OUTLINER_OB_CURVE",
+                )
             if entry.type == "COLOR_RAMP" or entry.type == "IMAGE":
                 col.prop(entry, "output")
                 if entry.output == "CUSTOM":
@@ -1400,6 +1581,7 @@ def register():  # pragma: no cover - executed in Blender
     bpy.utils.register_class(EmbedColorFunctionOperator)
     bpy.utils.register_class(UnembedColorFunctionOperator)
     bpy.utils.register_class(BakeColorRampOperator)
+    bpy.utils.register_class(GeneratePathGradientMeshOperator)
     bpy.utils.register_class(ConvertCollectionToMeshOperator)
     bpy.utils.register_class(BakeColorRampSplitOperator)
     bpy.utils.register_class(MergeSplitLightEffectsOperator)
@@ -1411,6 +1593,7 @@ def unregister():  # pragma: no cover - executed in Blender
     if _ensure_light_effects_initialized in bpy.app.handlers.depsgraph_update_pre:
         bpy.app.handlers.depsgraph_update_pre.remove(_ensure_light_effects_initialized)
     bpy.utils.unregister_class(ConvertCollectionToMeshOperator)
+    bpy.utils.unregister_class(GeneratePathGradientMeshOperator)
     bpy.utils.unregister_class(BakeColorRampOperator)
     bpy.utils.unregister_class(UnembedColorFunctionOperator)
     bpy.utils.unregister_class(EmbedColorFunctionOperator)
