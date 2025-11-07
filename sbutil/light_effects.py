@@ -70,6 +70,8 @@ from sbstudio.plugin.operators import (
 )
 from sbutil import path_gradient
 
+import sbstudio
+
 @contextmanager
 def use_b_mesh(mesh):  # pragma: no cover - Blender integration
     """Return a ``BMesh`` for ``mesh`` regardless of plug-in version."""
@@ -859,7 +861,7 @@ def patch_light_effect_class():
     if LightEffect is None:  # pragma: no cover - only runs inside Blender
         return
             
-    LightEffect._original_type = getattr(LightEffect, "type", None)
+    LightEffect.original_type = getattr(LightEffect, "type", None)
     LightEffect._original_apply_on_colors = getattr(LightEffect, "apply_on_colors", None)
     LightEffect._original_color_function_ref = getattr(
         LightEffect, "color_function_ref", None
@@ -867,16 +869,14 @@ def patch_light_effect_class():
     LightEffect._original_draw_color_function_config = getattr(
         LightEffect, "draw_color_function_config", None
     )
-    LightEffect._original_target = getattr(LightEffect, "target", None)
+    LightEffect.original_target = getattr(LightEffect, "target", None)
     LightEffect._original_get_spatial_effect_predicate = getattr(
         LightEffect, "_get_spatial_effect_predicate", None
     )
     LightEffect.type = PatchedLightEffect.type
     LightEffect.loop_count = PatchedLightEffect.loop_count
     LightEffect.loop_method = PatchedLightEffect.loop_method
-    LightEffect.use_inside_mesh_vertex_colors = (
-        PatchedLightEffect.use_inside_mesh_vertex_colors
-    )
+    LightEffect.use_inside_mesh_vertex_colors = PatchedLightEffect.use_inside_mesh_vertex_colors
     LightEffect.color_function_text = PatchedLightEffect.color_function_text
     LightEffect.apply_on_colors = PatchedLightEffect.apply_on_colors
     LightEffect.color_function_ref = PatchedLightEffect.color_function_ref
@@ -917,11 +917,11 @@ def patch_light_effect_class():
     ensure_all_function_entries_initialized()
 
 def unpatch_light_effect_class():
-    if LightEffect is None or not hasattr(LightEffect, "_original_type"):  # pragma: no cover
+    if LightEffect is None or not hasattr(LightEffect, "original_type"):  # pragma: no cover
         return
     bpy.utils.unregister_class(LightEffect)
-    LightEffect.type = LightEffect._original_type
-    LightEffect.__annotations__["type"] = LightEffect._original_type
+    LightEffect.type = LightEffect.original_type
+    LightEffect.__annotations__["type"] = LightEffect.original_type
     for attr in (
         "loop_count",
         "loop_method",
@@ -944,10 +944,10 @@ def unpatch_light_effect_class():
         LightEffect._original_draw_color_function_config = None
     elif hasattr(LightEffect, "draw_color_function_config"):
         delattr(LightEffect, "draw_color_function_config")
-    if getattr(LightEffect, "_original_target", None) is not None:
-        LightEffect.target = LightEffect._original_target
-        LightEffect.__annotations__["target"] = LightEffect._original_target
-        LightEffect._original_target = None
+    if getattr(LightEffect, "original_target", None) is not None:
+        LightEffect.target = LightEffect.original_target
+        LightEffect.__annotations__["target"] = LightEffect.original_target
+        LightEffect.original_target = None
     if getattr(LightEffect, "_original_get_spatial_effect_predicate", None) is not None:
         LightEffect._get_spatial_effect_predicate = (
             LightEffect._original_get_spatial_effect_predicate
@@ -958,7 +958,7 @@ def unpatch_light_effect_class():
     if hasattr(LightEffect, "target_collection"):
         delattr(LightEffect, "target_collection")
         LightEffect.__annotations__.pop("target_collection", None)
-    LightEffect._original_type = None
+    LightEffect.original_type = None
     bpy.utils.register_class(LightEffect)
 # UI patching
 # ---------------------------------------------------------------------------
@@ -1069,18 +1069,27 @@ class GeneratePathGradientMeshOperator(bpy.types.Operator):  # pragma: no cover 
     @classmethod
     def poll(cls, context):
         entry = getattr(context.scene.skybrush.light_effects, "active_entry", None)
+        if entry is None or entry.type != "COLOR_RAMP":
+            return False
+
         edit_obj = context.edit_object
-        return (
-            entry is not None
-            and entry.type == "COLOR_RAMP"
-            and edit_obj is not None
-            and edit_obj.type == "MESH"
-        )
+        if edit_obj is not None and edit_obj.type == "MESH":
+            return True
+
+        active_obj = context.active_object
+        return active_obj is not None and active_obj.type == "CURVE"
 
     def execute(self, context):
         entry = context.scene.skybrush.light_effects.active_entry
         try:
-            curve_obj = path_gradient.create_gradient_curve_from_selection()
+            edit_obj = context.edit_object
+            if edit_obj is not None and edit_obj.type == "MESH":
+                curve_obj = path_gradient.create_gradient_curve_from_selection()
+            else:
+                active_obj = context.active_object
+                if active_obj is None or active_obj.type != "CURVE":
+                    raise ValueError("Select a mesh in edit mode or a curve object.")
+                curve_obj = path_gradient.ensure_gradient_geometry(active_obj)
         except Exception as exc:  # pragma: no cover - Blender UI
             self.report({'ERROR'}, str(exc))
             return {'CANCELLED'}
@@ -1563,15 +1572,21 @@ class PatchedLightEffectsPanel(Panel):  # pragma: no cover - Blender UI code
             if effect_type_supports_randomization(entry.type):
                 col.prop(entry, "randomness", slider=True)
 
+def patched_object_has_mesh_data(self, obj) -> bool:
+    return True
+
 def patch_light_effects_panel():
     LightEffectsPanel._original_draw = LightEffectsPanel.draw
     LightEffectsPanel.draw = PatchedLightEffectsPanel.draw
+    sbstudio.plugin.model.light_effects._original_object_has_mesh_data = sbstudio.plugin.model.light_effects.object_has_mesh_data
+    sbstudio.plugin.model.light_effects.object_has_mesh_data = patched_object_has_mesh_data
 
 
 def unpatch_light_effects_panel():
     LightEffectsPanel.draw = LightEffectsPanel._original_draw
     LightEffectsPanel._original_draw = None
-
+    sbstudio.plugin.model.light_effects.object_has_mesh_data = sbstudio.plugin.model.light_effects._original_object_has_mesh_data
+    sbstudio.plugin.model.light_effects._original_object_has_mesh_data = None
 
 # ---------------------------------------------------------------------------
 # Public API

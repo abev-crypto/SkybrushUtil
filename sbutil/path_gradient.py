@@ -16,32 +16,35 @@ def create_curve_segment_cylinder_gn():
     interface = ng.interface
 
     # INPUTS
-    s_geom = interface.new_socket("Geometry", 'INPUT', 'NodeSocketGeometry')
+    s_geom = interface.new_socket(name="Geometry", in_out='INPUT', socket_type='NodeSocketGeometry')
 
-    s_start = interface.new_socket("Segment Start", 'INPUT', 'NodeSocketFloat')
-    s_start.default_value = 0.3
+    s_start = interface.new_socket(name="Segment Start", in_out='INPUT', socket_type='NodeSocketFloat')
+    s_start.default_value = 0.0
     s_start.min_value = 0.0
     s_start.max_value = 1.0
 
-    s_end = interface.new_socket("Segment End", 'INPUT', 'NodeSocketFloat')
-    s_end.default_value = 0.7
+    s_end = interface.new_socket(name="Segment End", in_out='INPUT', socket_type='NodeSocketFloat')
+    s_end.default_value = 1.0
     s_end.min_value = 0.0
     s_end.max_value = 1.0
 
-    s_radius = interface.new_socket("Radius", 'INPUT', 'NodeSocketFloat')
-    s_radius.default_value = 0.05
+    s_radius = interface.new_socket(name="Radius", in_out='INPUT', socket_type='NodeSocketFloat')
+    s_radius.default_value = 1.0
     s_radius.min_value = 0.0
 
-    s_count = interface.new_socket("Sample Count", 'INPUT', 'NodeSocketInt')
+    s_count = interface.new_socket(name="Sample Count", in_out='INPUT', socket_type='NodeSocketInt')
     s_count.default_value = 64
     s_count.min_value = 2
 
     # ★ 追加：絶対長さで頂点カラーを書くかどうか
-    s_abs = interface.new_socket("Use Absolute Length", 'INPUT', 'NodeSocketBool')
+    s_abs = interface.new_socket(name="Use Absolute Length", in_out='INPUT', socket_type='NodeSocketBool')
     s_abs.default_value = False  # デフォルトは従来通り 0〜1 グラデ
 
+    s_cap = interface.new_socket(name="Fill Caps", in_out='INPUT', socket_type='NodeSocketBool')
+    s_cap.default_value = True  # ★追加：フタを付けるか
+
     # OUTPUTS
-    interface.new_socket("Geometry", 'OUTPUT', 'NodeSocketGeometry')
+    interface.new_socket(name="Geometry",  in_out='OUTPUT', socket_type='NodeSocketGeometry')
 
     nodes = ng.nodes
     links = ng.links
@@ -77,7 +80,7 @@ def create_curve_segment_cylinder_gn():
     math_mul.operation = 'MULTIPLY'
 
     # 正規化 or 絶対長さ の切り替え
-    switch = nodes.new('FunctionNodeSwitch')
+    switch = nodes.new('GeometryNodeSwitch')
     switch.location = (-100, -300)
     switch.input_type = 'FLOAT'
 
@@ -101,6 +104,9 @@ def create_curve_segment_cylinder_gn():
     curve_to_mesh.location = (350, 0)
 
     circle.inputs["Resolution"].default_value = 16
+
+    realize = nodes.new('GeometryNodeRealizeInstances')
+    realize.location = (700, 0)
 
     # ----------------------------------------------------------
     # 接続
@@ -153,9 +159,11 @@ def create_curve_segment_cylinder_gn():
 
     # Circle → Curve to Mesh（Profile Curve）
     l(circle.outputs['Curve'], curve_to_mesh.inputs['Profile Curve'])
-
+    l(group_in.outputs['Fill Caps'], curve_to_mesh.inputs['Fill Caps'])
     # Curve to Mesh → Group Output
-    l(curve_to_mesh.outputs['Mesh'], group_out.inputs['Geometry'])
+    l(curve_to_mesh.outputs['Mesh'], realize.inputs['Geometry'])
+
+    l(realize.outputs['Geometry'], group_out.inputs['Geometry'])
 
     return ng
 
@@ -254,10 +262,17 @@ def sort_vtx_and_create_curve():
     return sorted_obj, curve_obj
 
 
+def ensure_gradient_geometry(curve_obj):
+    """Ensure that ``curve_obj`` has the gradient geometry nodes modifier."""
+
+    if curve_obj is None or curve_obj.type != 'CURVE':
+        raise ValueError("A curve object is required.")
+    node_group = create_curve_segment_cylinder_gn()
+    add_modifier_to_object(curve_obj, node_group)
+    return curve_obj
+
 def create_gradient_curve_from_selection():
     """Create a curve with the geometry nodes modifier from the current selection."""
 
     _sorted_obj, curve_obj = sort_vtx_and_create_curve()
-    node_group = create_curve_segment_cylinder_gn()
-    add_modifier_to_object(curve_obj, node_group)
-    return curve_obj
+    return ensure_gradient_geometry(curve_obj)
