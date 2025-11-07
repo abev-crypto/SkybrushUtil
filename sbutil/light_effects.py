@@ -9,7 +9,6 @@ plug‑in is not available, the module simply does nothing.
 import bpy
 import bmesh
 from bpy.props import (
-    BoolProperty,
     EnumProperty,
     FloatProperty,
     FloatVectorProperty,
@@ -71,6 +70,8 @@ from sbstudio.plugin.operators import (
 from sbutil import path_gradient
 
 import sbstudio
+
+OUTPUT_VERTEX_COLOR = "MESH_VERTEX_COLOR"
 
 @contextmanager
 def use_b_mesh(mesh):  # pragma: no cover - Blender integration
@@ -496,14 +497,6 @@ class PatchedLightEffect(PropertyGroup):
         items=[("FORWARD", "Forward", ""), ("REVERSE", "Reverse", ""), ("PINGPONG", "Ping-Pong", "")],
         default="FORWARD",
     )
-    use_inside_mesh_vertex_colors = BoolProperty(
-        name="Sample Position from Mesh Colors",
-        description=(
-            "When targeting drones inside a mesh, use the mesh vertex colors as"
-            " the sampling position for the Color Ramp"
-        ),
-        default=False,
-    )
     color_function_text = PointerProperty(
         name="Color Function Text", type=bpy.types.Text
     )
@@ -572,6 +565,18 @@ class PatchedLightEffect(PropertyGroup):
                 common_output = 1.0
             elif output_type == "TEMPORAL":
                 common_output = time_fraction
+            elif output_type == OUTPUT_VERTEX_COLOR:
+                outputs = None
+                if (
+                    self.type == "COLOR_RAMP"
+                    and self.target == "INSIDE_MESH"
+                    and getattr(self, "mesh", None)
+                ):
+                    sampled = sample_vertex_color_factors(self.mesh, positions)
+                    if sampled is not None:
+                        outputs = sampled
+                if outputs is None:
+                    outputs = [None] * num_positions
             elif output_type_supports_mapping_mode(output_type):
                 proportional = mapping_mode == "PROPORTIONAL"
                 if output_type == "DISTANCE":
@@ -741,27 +746,9 @@ class PatchedLightEffect(PropertyGroup):
                     else:
                         setattr(module, name.upper(), value)
         new_color = [0.0] * 4
-        mesh_outputs = None
-        if (
-            self.type == "COLOR_RAMP"
-            and self.target == "INSIDE_MESH"
-            and getattr(self, "use_inside_mesh_vertex_colors", False)
-            and getattr(self, "mesh", None)
-        ):
-            mesh_outputs = sample_vertex_color_factors(self.mesh, positions)
         outputs_x, common_output_x = get_output_based_on_output_type(
             self.output, self.output_mapping_mode, self.output_function
         )
-        if mesh_outputs is not None:
-            if common_output_x is not None:
-                outputs_x = [common_output_x] * num_positions
-                common_output_x = None
-            if outputs_x is None:
-                outputs_x = mesh_outputs
-            else:
-                for i, value in enumerate(mesh_outputs):
-                    if value is not None:
-                        outputs_x[i] = value
         if color_image is not None:
             outputs_y, common_output_y = get_output_based_on_output_type(
                 self.output_y, self.output_mapping_mode_y, self.output_function_y
@@ -876,13 +863,13 @@ def patch_light_effect_class():
     LightEffect.type = PatchedLightEffect.type
     LightEffect.loop_count = PatchedLightEffect.loop_count
     LightEffect.loop_method = PatchedLightEffect.loop_method
-    LightEffect.use_inside_mesh_vertex_colors = PatchedLightEffect.use_inside_mesh_vertex_colors
     LightEffect.color_function_text = PatchedLightEffect.color_function_text
     LightEffect.apply_on_colors = PatchedLightEffect.apply_on_colors
     LightEffect.color_function_ref = PatchedLightEffect.color_function_ref
     LightEffect.draw_color_function_config = (
         PatchedLightEffect.draw_color_function_config
     )
+    LightEffect.original_output = getattr(LightEffect, "output", None)
     LightEffect.target = EnumProperty(
         name="Target",
         description=(
@@ -901,19 +888,27 @@ def patch_light_effect_class():
     )
     LightEffect.target_collection = PointerProperty(
         name="Collection", type=bpy.types.Collection
-        )
+    )
     LightEffect._get_spatial_effect_predicate = (
         PatchedLightEffect._get_spatial_effect_predicate
     )
     LightEffect.__annotations__["type"] = LightEffect.type
     LightEffect.__annotations__["loop_count"] = LightEffect.loop_count
     LightEffect.__annotations__["loop_method"] = LightEffect.loop_method
-    LightEffect.__annotations__["use_inside_mesh_vertex_colors"] = (
-        LightEffect.use_inside_mesh_vertex_colors
-    )
     LightEffect.__annotations__["color_function_text"] = LightEffect.color_function_text
     LightEffect.__annotations__["target"] = LightEffect.target
     LightEffect.__annotations__["target_collection"] = LightEffect.target_collection
+    output_prop = getattr(LightEffect, "original_output", None)
+    if output_prop is not None and hasattr(output_prop, "keywords"):
+        keywords = dict(output_prop.keywords)
+        items = list(keywords.get("items", ()))
+        existing_ids = {item[0] for item in items}
+        if OUTPUT_VERTEX_COLOR not in existing_ids:
+            items.append((OUTPUT_VERTEX_COLOR, "Mesh vertex color", "", 14))
+            keywords["items"] = items
+            LightEffect.output = EnumProperty(**keywords)
+            LightEffect.__annotations__["output"] = LightEffect.output
+
     ensure_all_function_entries_initialized()
 
 def unpatch_light_effect_class():
@@ -925,12 +920,15 @@ def unpatch_light_effect_class():
     for attr in (
         "loop_count",
         "loop_method",
-        "use_inside_mesh_vertex_colors",
         "color_function_text",
     ):
         if hasattr(LightEffect, attr):
             delattr(LightEffect, attr)
             LightEffect.__annotations__.pop(attr, None)
+    if getattr(LightEffect, "original_output", None) is not None:
+        LightEffect.output = LightEffect.original_output
+        LightEffect.__annotations__["output"] = LightEffect.original_output
+        LightEffect.original_output = None
     if getattr(LightEffect, "_original_apply_on_colors", None) is not None:
         LightEffect.apply_on_colors = LightEffect._original_apply_on_colors
         LightEffect._original_apply_on_colors = None
@@ -1096,8 +1094,11 @@ class GeneratePathGradientMeshOperator(bpy.types.Operator):  # pragma: no cover 
 
         entry.mesh = curve_obj
         entry.target = "INSIDE_MESH"
-        if hasattr(entry, "use_inside_mesh_vertex_colors"):
-            entry.use_inside_mesh_vertex_colors = True
+        if hasattr(entry, "output"):
+            try:
+                entry.output = OUTPUT_VERTEX_COLOR
+            except Exception:
+                pass
 
         self.report({'INFO'}, f"Generated curve mesh '{curve_obj.name}'")
         return {'FINISHED'}
@@ -1531,14 +1532,6 @@ class PatchedLightEffectsPanel(Panel):  # pragma: no cover - Blender UI code
                     )
                 else:
                     row2.operator(BakeColorRampSplitOperator.bl_idname, text="Bake (Split)")
-                col.separator()
-                row_mesh = col.row()
-                row_mesh.enabled = entry.target == "INSIDE_MESH"
-                row_mesh.prop(
-                    entry,
-                    "use_inside_mesh_vertex_colors",
-                    text="Use Mesh Vertex Colors",
-                )
                 col.operator(
                     GeneratePathGradientMeshOperator.bl_idname,
                     text="Generate Curve Mesh",
