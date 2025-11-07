@@ -180,7 +180,7 @@ def sample_vertex_color_factors(mesh_obj, positions: Sequence[Coordinate3D]) -> 
         eval_mesh.calc_loop_triangles()
         if not eval_mesh.loop_triangles:
             return None
-        tree = BVHTree.FromMesh(eval_mesh, epsilon=0.0)
+        tree = _build_bvh_tree(eval_mesh)
         if tree is None:
             return None
         inv_world = mesh_obj.matrix_world.inverted()
@@ -216,6 +216,25 @@ def sample_vertex_color_factors(mesh_obj, positions: Sequence[Coordinate3D]) -> 
         return outputs
     finally:
         eval_obj.to_mesh_clear()
+
+
+def _build_bvh_tree(mesh):  # pragma: no cover - Blender integration
+    """Construct a BVH tree for ``mesh`` compatible with multiple Blender versions."""
+
+    from_mesh = getattr(BVHTree, "FromMesh", None)
+    if from_mesh is not None:
+        return from_mesh(mesh, epsilon=0.0)
+
+    from_bmesh = getattr(BVHTree, "FromBMesh", None)
+    if from_bmesh is not None:
+        bm = bmesh.new()
+        try:
+            bm.from_mesh(mesh)
+            return from_bmesh(bm, 0.0)
+        finally:
+            bm.free()
+
+    return None
 def _get_object_property(obj, prop_type):
     """Return dynamic property of ``obj`` based on ``prop_type``."""
     if prop_type == "POS":
