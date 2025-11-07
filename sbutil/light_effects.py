@@ -870,6 +870,27 @@ def patch_light_effect_class():
         PatchedLightEffect.draw_color_function_config
     )
     LightEffect.original_output = getattr(LightEffect, "output", None)
+    LightEffect.output = EnumProperty(
+        name="Output X",
+        description="Output function that determines the value that is passed through the color ramp or image horizontal (X) axis to obtain the color to assign to a drone",
+        items=[
+            ("FIRST_COLOR", "First color", "", 1),
+            ("LAST_COLOR", "Last color", "", 2),
+            ("INDEXED_BY_DRONES", "Indexed by drones", "", 3),
+            ("INDEXED_BY_FORMATION", "Indexed by formation", "", 13),
+            ("GRADIENT_XYZ", "Gradient (XYZ)", "", 4),
+            ("GRADIENT_XZY", "Gradient (XZY)", "", 5),
+            ("GRADIENT_YXZ", "Gradient (YXZ)", "", 6),
+            ("GRADIENT_YZX", "Gradient (YZX)", "", 7),
+            ("GRADIENT_ZXY", "Gradient (ZXY)", "", 8),
+            ("GRADIENT_ZYX", "Gradient (ZYX)", "", 9),
+            ("TEMPORAL", "Temporal", "", 10),
+            ("DISTANCE", "Distance from mesh", "", 11),
+            ("CUSTOM", "Custom expression", "", 12),
+            (OUTPUT_VERTEX_COLOR, "Mesh vertex color", "", 14)
+        ],
+        default="LAST_COLOR",
+    )
     LightEffect.target = EnumProperty(
         name="Target",
         description=(
@@ -898,17 +919,6 @@ def patch_light_effect_class():
     LightEffect.__annotations__["color_function_text"] = LightEffect.color_function_text
     LightEffect.__annotations__["target"] = LightEffect.target
     LightEffect.__annotations__["target_collection"] = LightEffect.target_collection
-    output_prop = getattr(LightEffect, "original_output", None)
-    if output_prop is not None and hasattr(output_prop, "keywords"):
-        keywords = dict(output_prop.keywords)
-        items = list(keywords.get("items", ()))
-        existing_ids = {item[0] for item in items}
-        if OUTPUT_VERTEX_COLOR not in existing_ids:
-            items.append((OUTPUT_VERTEX_COLOR, "Mesh vertex color", "", 14))
-            keywords["items"] = items
-            LightEffect.output = EnumProperty(**keywords)
-            LightEffect.__annotations__["output"] = LightEffect.output
-
     ensure_all_function_entries_initialized()
 
 def unpatch_light_effect_class():
