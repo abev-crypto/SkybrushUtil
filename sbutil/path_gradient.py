@@ -29,7 +29,7 @@ def create_curve_segment_cylinder_gn():
     s_end.max_value = 1.0
 
     s_radius = interface.new_socket(name="Radius", in_out='INPUT', socket_type='NodeSocketFloat')
-    s_radius.default_value = 1.0
+    s_radius.default_value = 0.5
     s_radius.min_value = 0.0
 
     s_count = interface.new_socket(name="Sample Count", in_out='INPUT', socket_type='NodeSocketInt')
@@ -109,7 +109,7 @@ def create_curve_segment_cylinder_gn():
     curve_to_mesh = nodes.new('GeometryNodeCurveToMesh')
     curve_to_mesh.location = (350, 0)
 
-    circle.inputs["Resolution"].default_value = 4
+    circle.inputs["Resolution"].default_value = 3
 
     realize = nodes.new('GeometryNodeRealizeInstances')
     realize.location = (700, 0)
@@ -153,9 +153,9 @@ def create_curve_segment_cylinder_gn():
     l(group_in.outputs['Color Offset'], math_add.inputs[1])
 
     # Switch 出力 → Combine Color (R,G,B 全て同じ値)
-    l(math_add.outputs['Output'], comb_color.inputs['Red'])
-    l(math_add.outputs['Output'], comb_color.inputs['Green'])
-    l(math_add.outputs['Output'], comb_color.inputs['Blue'])
+    l(math_add.outputs['Value'], comb_color.inputs['Red'])
+    l(math_add.outputs['Value'], comb_color.inputs['Green'])
+    l(math_add.outputs['Value'], comb_color.inputs['Blue'])
 
     # Combine Color → Store Named Attribute
     l(comb_color.outputs['Color'], store_attr.inputs['Value'])
