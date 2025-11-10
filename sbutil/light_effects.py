@@ -211,7 +211,7 @@ def sample_vertex_color_factors(mesh_obj, positions: Sequence[Coordinate3D]) -> 
                 c0 = color_layer.data[loops[0]].color
                 c1 = color_layer.data[loops[1]].color
                 c2 = color_layer.data[loops[2]].color
-            value = (c0[0] * w0 + c1[0] * w1 + c2[0] * w2) % 1.0
+            value = (c0[0] * w0 + c1[0] * w1 + c2[0] * w2)
             outputs.append(float(value))
         return outputs
     finally:
@@ -230,7 +230,7 @@ def _build_bvh_tree(mesh):  # pragma: no cover - Blender integration
         bm = bmesh.new()
         try:
             bm.from_mesh(mesh)
-            return from_bmesh(bm, 0.0)
+            return from_bmesh(bm)
         finally:
             bm.free()
 

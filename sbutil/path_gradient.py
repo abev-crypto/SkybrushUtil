@@ -36,6 +36,8 @@ def create_curve_segment_cylinder_gn():
     s_count.default_value = 64
     s_count.min_value = 2
 
+    s_offset = interface.new_socket(name="Color Offset", in_out='INPUT', socket_type='NodeSocketFloat')
+
     # ★ 追加：絶対長さで頂点カラーを書くかどうか
     s_abs = interface.new_socket(name="Use Absolute Length", in_out='INPUT', socket_type='NodeSocketBool')
     s_abs.default_value = False  # デフォルトは従来通り 0〜1 グラデ
@@ -79,6 +81,10 @@ def create_curve_segment_cylinder_gn():
     math_mul.location = (-300, -300)
     math_mul.operation = 'MULTIPLY'
 
+    math_add = nodes.new('ShaderNodeMath')
+    math_add.location = (-300, -400)
+    math_add.operation = 'ADD'
+
     # 正規化 or 絶対長さ の切り替え
     switch = nodes.new('GeometryNodeSwitch')
     switch.location = (-100, -300)
@@ -103,7 +109,7 @@ def create_curve_segment_cylinder_gn():
     curve_to_mesh = nodes.new('GeometryNodeCurveToMesh')
     curve_to_mesh.location = (350, 0)
 
-    circle.inputs["Resolution"].default_value = 16
+    circle.inputs["Resolution"].default_value = 4
 
     realize = nodes.new('GeometryNodeRealizeInstances')
     realize.location = (700, 0)
@@ -143,10 +149,13 @@ def create_curve_segment_cylinder_gn():
     # Switch True（ON時） = 絶対長さ[m] = Factor * Length
     l(math_mul.outputs['Value'], switch.inputs['True'])
 
+    l(switch.outputs['Output'], math_add.inputs[0])
+    l(group_in.outputs['Color Offset'], math_add.inputs[1])
+
     # Switch 出力 → Combine Color (R,G,B 全て同じ値)
-    l(switch.outputs['Output'], comb_color.inputs['Red'])
-    l(switch.outputs['Output'], comb_color.inputs['Green'])
-    l(switch.outputs['Output'], comb_color.inputs['Blue'])
+    l(math_add.outputs['Output'], comb_color.inputs['Red'])
+    l(math_add.outputs['Output'], comb_color.inputs['Green'])
+    l(math_add.outputs['Output'], comb_color.inputs['Blue'])
 
     # Combine Color → Store Named Attribute
     l(comb_color.outputs['Color'], store_attr.inputs['Value'])
