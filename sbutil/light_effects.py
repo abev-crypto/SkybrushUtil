@@ -1326,32 +1326,86 @@ class CreateSampleUVMeshOperator(bpy.types.Operator):  # pragma: no cover - Blen
                 self.divisions = stored
         return self.execute(context)
 
-    def _get_reference_object(self, context):
+    def _get_reference_objects(self, context):
+        selected = [obj for obj in getattr(context, "selected_objects", []) if obj]
+        if selected:
+            return selected
         active_obj = getattr(context, "active_object", None)
-        if active_obj is not None:
-            return active_obj
-        selected = getattr(context, "selected_objects", [])
-        return selected[0] if selected else None
+        return [active_obj] if active_obj is not None else []
 
-    def _compute_bounds(self, obj):
-        dims = Vector(getattr(obj, "dimensions", (1.0, 1.0, 1.0)))
-        dims = Vector((max(float(d), 1e-4) for d in dims))
-        bbox = getattr(obj, "bound_box", None)
-        center_world = obj.matrix_world.translation
-        if bbox:
+    def _compute_bounds(self, objects):
+        if not objects:
+            return Vector((1.0, 1.0, 1.0)), Matrix.Identity(4)
+
+        if len(objects) == 1:
+            obj = objects[0]
+            dims = Vector(getattr(obj, "dimensions", (1.0, 1.0, 1.0)))
+            dims = Vector((max(float(d), 1e-4) for d in dims))
+            bbox = getattr(obj, "bound_box", None)
+            center_world = obj.matrix_world.translation
+            if bbox:
+                try:
+                    corners = [Vector(corner) for corner in bbox]
+                    if corners:
+                        center_local = sum(corners, Vector()) / float(len(corners))
+                        center_world = obj.matrix_world @ center_local
+                except Exception:
+                    pass
+            rotation = obj.matrix_world.to_3x3()
             try:
-                corners = [Vector(corner) for corner in bbox]
-                if corners:
-                    center_local = sum(corners, Vector()) / float(len(corners))
-                    center_world = obj.matrix_world @ center_local
+                rotation = rotation.normalized()
             except Exception:
-                pass
-        rotation = obj.matrix_world.to_3x3()
-        try:
-            rotation = rotation.normalized()
-        except Exception:
-            rotation = Matrix.Identity(3)
-        transform = Matrix.Translation(center_world) @ rotation.to_4x4()
+                rotation = Matrix.Identity(3)
+            transform = Matrix.Translation(center_world) @ rotation.to_4x4()
+            return dims, transform
+
+        min_corner = Vector((float("inf"), float("inf"), float("inf")))
+        max_corner = Vector((float("-inf"), float("-inf"), float("-inf")))
+        have_corner = False
+
+        for obj in objects:
+            bbox = getattr(obj, "bound_box", None)
+            corners = []
+            if bbox:
+                try:
+                    corners = [obj.matrix_world @ Vector(corner) for corner in bbox]
+                except Exception:
+                    corners = []
+            if not corners:
+                dims = Vector(getattr(obj, "dimensions", (1.0, 1.0, 1.0)))
+                dims = Vector((max(float(d), 1e-4) for d in dims))
+                hx, hy, hz = (dims.x * 0.5, dims.y * 0.5, dims.z * 0.5)
+                local_corners = [
+                    Vector((sx * hx, sy * hy, sz * hz))
+                    for sx in (-1.0, 1.0)
+                    for sy in (-1.0, 1.0)
+                    for sz in (-1.0, 1.0)
+                ]
+                corners = [obj.matrix_world @ corner for corner in local_corners]
+
+            for corner in corners:
+                have_corner = True
+                for i in range(3):
+                    min_corner[i] = min(min_corner[i], corner[i])
+                    max_corner[i] = max(max_corner[i], corner[i])
+
+        if not have_corner:
+            obj = objects[0]
+            dims = Vector(getattr(obj, "dimensions", (1.0, 1.0, 1.0)))
+            dims = Vector((max(float(d), 1e-4) for d in dims))
+            center_world = obj.matrix_world.translation
+            rotation = obj.matrix_world.to_3x3()
+            try:
+                rotation = rotation.normalized()
+            except Exception:
+                rotation = Matrix.Identity(3)
+            transform = Matrix.Translation(center_world) @ rotation.to_4x4()
+            return dims, transform
+
+        center_world = (min_corner + max_corner) * 0.5
+        dims = max_corner - min_corner
+        dims = Vector((max(float(d), 1e-4) for d in dims))
+        transform = Matrix.Translation(center_world)
         return dims, transform
 
     def _build_cube_mesh(self, dims):
@@ -1477,12 +1531,12 @@ class CreateSampleUVMeshOperator(bpy.types.Operator):  # pragma: no cover - Blen
 
     def execute(self, context):
         entry = context.scene.skybrush.light_effects.active_entry
-        ref_obj = self._get_reference_object(context)
-        if ref_obj is None:
-            self.report({'WARNING'}, "Select an object to define the mesh bounds.")
+        ref_objs = self._get_reference_objects(context)
+        if not ref_objs:
+            self.report({'WARNING'}, "Select one or more objects to define the mesh bounds.")
             return {'CANCELLED'}
 
-        dims, transform = self._compute_bounds(ref_obj)
+        dims, transform = self._compute_bounds(ref_objs)
         mesh = self._build_cube_mesh(dims)
 
         obj_name = pick_unique_name(f"{entry.name}_uv_mesh", bpy.data.objects)
