@@ -255,61 +255,74 @@ def sample_uv_factors(
         return None
 
     depsgraph = bpy.context.evaluated_depsgraph_get()
-    eval_obj = mesh_obj.evaluated_get(depsgraph)
-    eval_mesh = eval_obj.to_mesh(preserve_all_data_layers=True)
     try:
-        uv_layer = _get_uv_layer(eval_mesh)
-        if uv_layer is None:
-            return None
-        domain = getattr(uv_layer, "domain", "CORNER")
-        if domain not in {"POINT", "CORNER"}:
-            return None
-        eval_mesh.calc_loop_triangles()
-        if not eval_mesh.loop_triangles:
-            return None
-        tree = _build_bvh_tree(eval_mesh)
-        if tree is None:
-            return None
-        inv_world = mesh_obj.matrix_world.inverted()
-        outputs: list[Optional[float]] = []
-        data = getattr(uv_layer, "data", None)
-        if data is None:
-            return None
-        for pos in positions:
-            co = Vector(pos) if not isinstance(pos, Vector) else pos.copy()
-            local = inv_world @ co
-            nearest = tree.find_nearest(local)
-            if nearest is None:
-                outputs.append(None)
-                continue
-            location, _normal, tri_index, _dist = nearest
-            if tri_index is None:
-                outputs.append(None)
-                continue
-            tri = eval_mesh.loop_triangles[tri_index]
-            verts = tri.vertices
-            loops = tri.loops
-            v0 = eval_mesh.vertices[verts[0]].co
-            v1 = eval_mesh.vertices[verts[1]].co
-            v2 = eval_mesh.vertices[verts[2]].co
-            w0, w1, w2 = _barycentric_weights(location, v0, v1, v2)
-            if domain == "POINT":
-                uv0 = data[verts[0]].vector
-                uv1 = data[verts[1]].vector
-                uv2 = data[verts[2]].vector
-            else:
-                uv0 = data[loops[0]].uv if hasattr(data[loops[0]], "uv") else data[loops[0]].vector
-                uv1 = data[loops[1]].uv if hasattr(data[loops[1]], "uv") else data[loops[1]].vector
-                uv2 = data[loops[2]].uv if hasattr(data[loops[2]], "uv") else data[loops[2]].vector
-            value = (
-                float(uv0[axis]) * w0
-                + float(uv1[axis]) * w1
-                + float(uv2[axis]) * w2
-            )
-            outputs.append(value)
-        return outputs
-    finally:
-        eval_obj.to_mesh_clear()
+        eval_obj = mesh_obj.evaluated_get(depsgraph)
+    except ReferenceError:
+        # オブジェクトが既に消えているなど
+        return [None] * len(positions)
+
+    if eval_obj.type != "MESH":
+        return [None] * len(positions)
+    
+    eval_mesh = eval_obj.to_mesh(
+        preserve_all_data_layers=True,
+        depsgraph=depsgraph,
+    )
+
+    # ★ ここで None チェックを入れる
+    if eval_mesh is None:
+        # デバッグ用ログを出しておくと原因追いやすい
+        print(
+            "[sample_uv_factors] to_mesh() returned None:",
+            mesh_obj.name,
+            "mode:", mesh_obj.mode,
+            "GN modifiers:", [m.type for m in mesh_obj.modifiers],
+        )
+        return [None] * len(positions)
+    uv_layer = _get_uv_layer(eval_mesh)
+    domain = getattr(uv_layer, "domain", "CORNER")
+    eval_mesh.calc_loop_triangles()
+    tree = _build_bvh_tree(eval_mesh)
+    inv_world = mesh_obj.matrix_world.inverted()
+    outputs: list[Optional[float]] = []
+    data = getattr(uv_layer, "data", None)
+
+    
+    for pos in positions:
+        co = Vector(pos) if not isinstance(pos, Vector) else pos.copy()
+        local = inv_world @ co
+        nearest = tree.find_nearest(local)
+        if nearest is None:
+            outputs.append(None)
+            continue
+        location, _normal, tri_index, _dist = nearest
+        if tri_index is None:
+            outputs.append(None)
+            continue
+        tri = eval_mesh.loop_triangles[tri_index]
+        verts = tri.vertices
+        loops = tri.loops
+        v0 = eval_mesh.vertices[verts[0]].co
+        v1 = eval_mesh.vertices[verts[1]].co
+        v2 = eval_mesh.vertices[verts[2]].co
+        w0, w1, w2 = _barycentric_weights(location, v0, v1, v2)
+        if domain == "POINT":
+            uv0 = data[verts[0]].vector
+            uv1 = data[verts[1]].vector
+            uv2 = data[verts[2]].vector
+        else:
+            uv0 = data[loops[0]].uv if hasattr(data[loops[0]], "uv") else data[loops[0]].vector
+            uv1 = data[loops[1]].uv if hasattr(data[loops[1]], "uv") else data[loops[1]].vector
+            uv2 = data[loops[2]].uv if hasattr(data[loops[2]], "uv") else data[loops[2]].vector
+        value = (
+            float(uv0[axis]) * w0
+            + float(uv1[axis]) * w1
+            + float(uv2[axis]) * w2
+        )
+        outputs.append(value)
+    eval_obj.to_mesh_clear()
+    return outputs
+        
 
 
 def _build_bvh_tree(mesh):  # pragma: no cover - Blender integration
