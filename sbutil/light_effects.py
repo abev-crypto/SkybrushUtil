@@ -1285,6 +1285,188 @@ class GeneratePathGradientMeshOperator(bpy.types.Operator):  # pragma: no cover 
         return {'FINISHED'}
 
 
+class CreateSampleUVMeshOperator(bpy.types.Operator):  # pragma: no cover - Blender UI
+    bl_idname = "skybrush.create_sample_uv_mesh"
+    bl_label = "Create UV Sampling Mesh"
+    bl_description = (
+        "Create a cube mesh sized to the selected object for UV sampling"
+        " and assign it to the active light effect"
+    )
+
+    divisions: IntProperty(
+        name="Subdivisions",
+        description="Number of geometry node subdivisions along each axis",
+        default=10,
+        min=1,
+    )
+
+    @classmethod
+    def poll(cls, context):
+        scene = getattr(context, "scene", None)
+        if scene is None:
+            return False
+        skybrush = getattr(scene, "skybrush", None)
+        if skybrush is None:
+            return False
+        light_effects = getattr(skybrush, "light_effects", None)
+        if not light_effects:
+            return False
+        return getattr(light_effects, "active_entry", None) is not None
+
+    def invoke(self, context, event):  # pragma: no cover - Blender UI
+        entry = getattr(context.scene.skybrush.light_effects, "active_entry", None)
+        if entry is not None:
+            stored = None
+            for key in ("sample_uv_divisions", "uv_sample_divisions", "_uv_sample_divisions"):
+                value = entry.get(key) if hasattr(entry, "get") else None
+                if isinstance(value, (int, float)):
+                    stored = int(value)
+                    break
+            if stored is not None and stored > 0:
+                self.divisions = stored
+        return self.execute(context)
+
+    def _get_reference_object(self, context):
+        active_obj = getattr(context, "active_object", None)
+        if active_obj is not None:
+            return active_obj
+        selected = getattr(context, "selected_objects", [])
+        return selected[0] if selected else None
+
+    def _compute_bounds(self, obj):
+        dims = Vector(getattr(obj, "dimensions", (1.0, 1.0, 1.0)))
+        dims = Vector((max(float(d), 1e-4) for d in dims))
+        bbox = getattr(obj, "bound_box", None)
+        center_world = obj.matrix_world.translation
+        if bbox:
+            try:
+                corners = [Vector(corner) for corner in bbox]
+                if corners:
+                    center_local = sum(corners, Vector()) / float(len(corners))
+                    center_world = obj.matrix_world @ center_local
+            except Exception:
+                pass
+        rotation = obj.matrix_world.to_3x3()
+        try:
+            rotation = rotation.normalized()
+        except Exception:
+            rotation = Matrix.Identity(3)
+        transform = Matrix.Translation(center_world) @ rotation.to_4x4()
+        return dims, transform
+
+    def _build_cube_mesh(self, dims):
+        hx, hy, hz = (dims.x * 0.5, dims.y * 0.5, dims.z * 0.5)
+        verts = [
+            (-hx, -hy, -hz),
+            (hx, -hy, -hz),
+            (hx, hy, -hz),
+            (-hx, hy, -hz),
+            (-hx, -hy, hz),
+            (hx, -hy, hz),
+            (hx, hy, hz),
+            (-hx, hy, hz),
+        ]
+        faces = [
+            (0, 1, 2, 3),
+            (4, 5, 6, 7),
+            (0, 4, 5, 1),
+            (1, 5, 6, 2),
+            (2, 6, 7, 3),
+            (3, 7, 4, 0),
+        ]
+        bm = bmesh.new()
+        try:
+            bm_verts = [bm.verts.new(Vector(co)) for co in verts]
+            bm.verts.ensure_lookup_table()
+            for face in faces:
+                try:
+                    bm.faces.new([bm_verts[i] for i in face])
+                except ValueError:
+                    pass
+            bm.faces.ensure_lookup_table()
+
+            uv_layer = bm.loops.layers.uv.new("UVMap")
+            areas = {
+                0: dims.y * dims.z,
+                1: dims.x * dims.z,
+                2: dims.x * dims.y,
+            }
+            axis = max(areas, key=areas.get)
+            axis_to_uv = {0: (1, 2), 1: (0, 2), 2: (0, 1)}
+            u_axis, v_axis = axis_to_uv[axis]
+            mins = [-hx, -hy, -hz]
+            maxs = [hx, hy, hz]
+            ranges = [maxs[i] - mins[i] if maxs[i] - mins[i] > 1e-6 else 1.0 for i in range(3)]
+            for face in bm.faces:
+                for loop in face.loops:
+                    co = loop.vert.co
+                    u = (co[u_axis] - mins[u_axis]) / ranges[u_axis]
+                    v = (co[v_axis] - mins[v_axis]) / ranges[v_axis]
+                    loop[uv_layer].uv = (u, v)
+
+            mesh_name = pick_unique_name("SampleUVMesh", bpy.data.meshes)
+            mesh = bpy.data.meshes.new(mesh_name)
+            bm.to_mesh(mesh)
+            mesh.update()
+        finally:
+            bm.free()
+        return mesh
+
+    def _ensure_geometry_nodes(self, obj, divisions):
+        group_name = pick_unique_name("SampleUVSubdivide", bpy.data.node_groups)
+        node_group = bpy.data.node_groups.new(group_name, "GeometryNodeTree")
+        node_group.inputs.new("NodeSocketGeometry", "Geometry")
+        node_group.inputs.new("NodeSocketInt", "Divisions")
+        node_group.outputs.new("NodeSocketGeometry", "Geometry")
+        group_input = node_group.nodes.new("NodeGroupInput")
+        group_output = node_group.nodes.new("NodeGroupOutput")
+        subdivide = node_group.nodes.new("GeometryNodeSubdivideMesh")
+        group_input.location = (-200, 0)
+        subdivide.location = (0, 0)
+        group_output.location = (200, 0)
+        node_group.links.new(group_input.outputs["Geometry"], subdivide.inputs["Mesh"])
+        node_group.links.new(group_input.outputs["Divisions"], subdivide.inputs["Level"])
+        node_group.links.new(subdivide.outputs["Mesh"], group_output.inputs["Geometry"])
+        node_group.inputs["Divisions"].default_value = max(int(divisions), 1)
+        modifier = obj.modifiers.new(name="Sample UV Subdivide", type='NODES')
+        modifier.node_group = node_group
+        identifier = node_group.inputs["Divisions"].identifier
+        modifier[identifier] = max(int(divisions), 1)
+
+    def execute(self, context):
+        entry = context.scene.skybrush.light_effects.active_entry
+        ref_obj = self._get_reference_object(context)
+        if ref_obj is None:
+            self.report({'WARNING'}, "Select an object to define the mesh bounds.")
+            return {'CANCELLED'}
+
+        dims, transform = self._compute_bounds(ref_obj)
+        mesh = self._build_cube_mesh(dims)
+
+        obj_name = pick_unique_name(f"{entry.name}_uv_mesh", bpy.data.objects)
+        mesh_obj = bpy.data.objects.new(obj_name, mesh)
+        mesh_obj.matrix_world = transform
+        if hasattr(mesh_obj, "display_type"):
+            mesh_obj.display_type = 'BOUNDS'
+        elif hasattr(mesh_obj, "display"):
+            mesh_obj.display = 'BOUNDS'
+
+        scene = context.scene
+        scene.collection.objects.link(mesh_obj)
+
+        self._ensure_geometry_nodes(mesh_obj, self.divisions)
+
+        entry.mesh = mesh_obj
+        if hasattr(entry, "__setitem__"):
+            try:
+                entry["sample_uv_divisions"] = int(self.divisions)
+            except Exception:
+                pass
+
+        self.report({'INFO'}, f"Created UV sampling mesh '{mesh_obj.name}'")
+        return {'FINISHED'}
+
+
 class BakeColorRampSplitOperator(bpy.types.Operator):  # pragma: no cover - Blender UI
     bl_idname = "skybrush.bake_color_ramp_split"
     bl_label = "Bake (Split)"
@@ -1701,6 +1883,11 @@ class PatchedLightEffectsPanel(Panel):  # pragma: no cover - Blender UI code
             col.prop(entry, "fade_out_duration")
             col.separator()
             col.prop(entry, "mesh")
+            col.operator(
+                CreateSampleUVMeshOperator.bl_idname,
+                text="Create UV Sampling Mesh",
+                icon="MESH_CUBE",
+            )
             col.separator()
             if entry.type == "COLOR_RAMP":
                 col.prop(entry, "loop_count")
@@ -1771,6 +1958,7 @@ def register():  # pragma: no cover - executed in Blender
     bpy.utils.register_class(UnembedColorFunctionOperator)
     bpy.utils.register_class(BakeColorRampOperator)
     bpy.utils.register_class(GeneratePathGradientMeshOperator)
+    bpy.utils.register_class(CreateSampleUVMeshOperator)
     bpy.utils.register_class(ConvertCollectionToMeshOperator)
     bpy.utils.register_class(BakeColorRampSplitOperator)
     bpy.utils.register_class(MergeSplitLightEffectsOperator)
@@ -1782,6 +1970,7 @@ def unregister():  # pragma: no cover - executed in Blender
     if _ensure_light_effects_initialized in bpy.app.handlers.depsgraph_update_pre:
         bpy.app.handlers.depsgraph_update_pre.remove(_ensure_light_effects_initialized)
     bpy.utils.unregister_class(ConvertCollectionToMeshOperator)
+    bpy.utils.unregister_class(CreateSampleUVMeshOperator)
     bpy.utils.unregister_class(GeneratePathGradientMeshOperator)
     bpy.utils.unregister_class(BakeColorRampOperator)
     bpy.utils.unregister_class(UnembedColorFunctionOperator)
