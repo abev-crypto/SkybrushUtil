@@ -1296,7 +1296,7 @@ class CreateSampleUVMeshOperator(bpy.types.Operator):  # pragma: no cover - Blen
     divisions: IntProperty(
         name="Subdivisions",
         description="Number of geometry node subdivisions along each axis",
-        default=10,
+        default=3,
         min=1,
     )
 
@@ -1415,23 +1415,65 @@ class CreateSampleUVMeshOperator(bpy.types.Operator):  # pragma: no cover - Blen
     def _ensure_geometry_nodes(self, obj, divisions):
         group_name = pick_unique_name("SampleUVSubdivide", bpy.data.node_groups)
         node_group = bpy.data.node_groups.new(group_name, "GeometryNodeTree")
-        node_group.inputs.new("NodeSocketGeometry", "Geometry")
-        node_group.inputs.new("NodeSocketInt", "Divisions")
-        node_group.outputs.new("NodeSocketGeometry", "Geometry")
-        group_input = node_group.nodes.new("NodeGroupInput")
-        group_output = node_group.nodes.new("NodeGroupOutput")
-        subdivide = node_group.nodes.new("GeometryNodeSubdivideMesh")
+        node_group.is_modifier = True  # Geometry Nodes モディファイア用フラグ
+
+        # =========================
+        # インターフェース定義 (4.0+)
+        # =========================
+        interface = node_group.interface
+
+        # 入力: Geometry
+        interface.new_socket(
+            name="Geometry",
+            in_out="INPUT",
+            socket_type="NodeSocketGeometry",
+        )
+
+        # 入力: Divisions (int)
+        div_value = max(int(divisions), 1)
+        div_socket = interface.new_socket(
+            name="Divisions",
+            in_out="INPUT",
+            socket_type="NodeSocketInt",
+        )
+        div_socket.min_value = 1
+        div_socket.default_value = div_value
+
+        # 出力: Geometry
+        interface.new_socket(
+            name="Geometry",
+            in_out="OUTPUT",
+            socket_type="NodeSocketGeometry",
+        )
+
+        # =========================
+        # ノード本体
+        # =========================
+        nodes = node_group.nodes
+        links = node_group.links
+
+        group_input = nodes.new("NodeGroupInput")
+        group_output = nodes.new("NodeGroupOutput")
+        subdivide = nodes.new("GeometryNodeSubdivideMesh")
+
         group_input.location = (-200, 0)
         subdivide.location = (0, 0)
         group_output.location = (200, 0)
-        node_group.links.new(group_input.outputs["Geometry"], subdivide.inputs["Mesh"])
-        node_group.links.new(group_input.outputs["Divisions"], subdivide.inputs["Level"])
-        node_group.links.new(subdivide.outputs["Mesh"], group_output.inputs["Geometry"])
-        node_group.inputs["Divisions"].default_value = max(int(divisions), 1)
+
+        links.new(group_input.outputs["Geometry"], subdivide.inputs["Mesh"])
+        links.new(group_input.outputs["Divisions"], subdivide.inputs["Level"])
+        links.new(subdivide.outputs["Mesh"], group_output.inputs["Geometry"])
+
+        # =========================
+        # モディファイアにアサイン
+        # =========================
         modifier = obj.modifiers.new(name="Sample UV Subdivide", type='NODES')
         modifier.node_group = node_group
-        identifier = node_group.inputs["Divisions"].identifier
-        modifier[identifier] = max(int(divisions), 1)
+
+        # interface で作ったソケットから identifier を取って
+        # モディファイア側の値をセット
+        identifier = div_socket.identifier
+        modifier[identifier] = div_value
 
     def execute(self, context):
         entry = context.scene.skybrush.light_effects.active_entry
