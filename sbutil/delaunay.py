@@ -1,17 +1,35 @@
 import bpy
-import bmesh
 from mathutils import Vector
 from mathutils.geometry import delaunay_2d_cdt
 
 # 現在フレームの評価済みワールド座標（アニメ/制約/親子反映）
-def get_selected_evaluated_world_positions(include_hidden=False):
+def get_evaluated_world_positions(objects, include_hidden: bool = False):
+    """Return evaluated world positions of ``objects`` at the current frame."""
+
     scene = bpy.context.scene
     scene.frame_set(scene.frame_current)
     depsgraph = bpy.context.evaluated_depsgraph_get()
-    objs = bpy.context.selected_objects
-    if not include_hidden:
-        objs = [o for o in objs if not o.hide_get()]
-    return [o.evaluated_get(depsgraph).matrix_world.translation.copy() for o in objs]
+    positions: list[Vector] = []
+    for obj in objects:
+        if obj is None:
+            continue
+        try:
+            hidden = obj.hide_get()
+        except Exception:
+            hidden = False
+        if hidden and not include_hidden:
+            continue
+        try:
+            eval_obj = obj.evaluated_get(depsgraph)
+            positions.append(eval_obj.matrix_world.translation.copy())
+        except Exception:
+            continue
+    return positions
+
+
+def get_selected_evaluated_world_positions(include_hidden=False):
+    objects = bpy.context.selected_objects
+    return get_evaluated_world_positions(objects, include_hidden=include_hidden)
 
 def build_planar_mesh_from_points(points):
     if len(points) < 3:
@@ -86,5 +104,7 @@ def create_hull_plane_from_current_positions_y_thickness(thickness_default=0.2, 
     print("✅ 2D Delaunay で平面生成 → +Y 厚み（Centered対応）を作成しました。")
     return obj
 
-# 実行例
-create_hull_plane_from_current_positions_y_thickness(thickness_default=0.2, centered_default=True)
+if __name__ == "__main__":  # pragma: no cover - manual testing helper
+    create_hull_plane_from_current_positions_y_thickness(
+        thickness_default=0.2, centered_default=True
+    )
