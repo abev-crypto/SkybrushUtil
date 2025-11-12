@@ -1190,7 +1190,12 @@ class PatchedLightEffect(PropertyGroup):
                 total_delay = per_delay * mesh_pairs
 
         total_duration = max(base_duration + total_delay, 1)
-        self.duration = total_duration
+
+        # Avoid writing to ``self.duration`` here as it may run in contexts where
+        # ID property updates are not allowed (e.g. while drawing the UI).
+        # The effective duration is still derived on demand via
+        # ``calculate_effective_sequence_span``.
+        return total_duration
 
     def ensure_sequence_delay_entries(
         self, count: int | None = None, *, update_total: bool = True
@@ -2063,23 +2068,7 @@ class GeneratePathGradientMeshOperator(bpy.types.Operator):  # pragma: no cover 
     @classmethod
     def poll(cls, context):
         entry = getattr(context.scene.skybrush.light_effects, "active_entry", None)
-        if entry is None or entry.type != "COLOR_RAMP":
-            return False
-
-        edit_obj = context.edit_object
-        if edit_obj is not None and edit_obj.type == "MESH":
-            return True
-
-        selected = [
-            obj
-            for obj in getattr(context, "selected_objects", [])
-            if obj is not None
-        ]
-        if len(selected) >= 2:
-            return True
-
-        active_obj = context.active_object
-        return active_obj is not None and active_obj.type == "CURVE"
+        return entry is not None and entry.type == "COLOR_RAMP"
 
     def execute(self, context):
         global _selection_tracker_active
