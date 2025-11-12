@@ -63,90 +63,25 @@ def create_hull_plane_from_current_positions_y_thickness(thickness_default=0.2, 
     bpy.context.view_layer.objects.active = obj
     obj.select_set(True)
 
-    # === 4) Geometry Nodes（Extrude + Centered） ===
-    mod = obj.modifiers.new("YThickness", 'NODES')
-    ng = bpy.data.node_groups.new("YThickness_FromTriangulated", 'GeometryNodeTree')
-    mod.node_group = ng
+    # （法線は既に+Y揃え済みだが、念のため）
+    obj.data.flip_normals()
+    if sum(p.normal.y for p in obj.data.polygons) < 0:
+        obj.data.flip_normals()
 
-    # 4.3+ のインターフェイスで I/O を定義
-    ng.interface.new_socket(
-        name="Geometry", in_out='INPUT',
-        socket_type='NodeSocketGeometry', description="Input Geometry"
-    )
-    ng.interface.new_socket(
-        name="Thickness", in_out='INPUT',
-        socket_type='NodeSocketFloat', description="Extrude thickness (+Y)"
-    )
-    ng.interface.new_socket(
-        name="Centered", in_out='INPUT',
-        socket_type='NodeSocketBool', description="Center the thickness (±Thickness/2)"
-    )
-    ng.interface.new_socket(
-        name="Geometry", in_out='OUTPUT',
-        socket_type='NodeSocketGeometry', description="Output Geometry"
-    )
+    # === 4) Solidifyモディファイアで ± センター厚み＆フタ ===
+    solid = obj.modifiers.new("SolidifyY", type='SOLIDIFY')
+    solid.thickness = float(thickness_default)  # 例: 0.2（総厚み）
+    solid.offset = 0.0                          # 中心±（=センター）
+    solid.use_rim = True                        # フタ有効
+    solid.use_even_offset = True                # 均一厚み
 
-    nodes = ng.nodes; links = ng.links
-    nodes.clear()
-
-    n_in = nodes.new("NodeGroupInput")
-    n_out = nodes.new("NodeGroupOutput")
-
-    n_extrude = nodes.new("GeometryNodeExtrudeMesh")     # Faces を押し出し
-    n_setpos_top = nodes.new("GeometryNodeSetPosition")  # 押し出しで出来た Top だけ +Y
-    n_vec_top = nodes.new("ShaderNodeCombineXYZ")        # (0, Thickness, 0)
-
-    # Centered: 全体を -Thickness*0.5*Centered だけ Y に戻す
-    n_setpos_center = nodes.new("GeometryNodeSetPosition")  # 全頂点
-    n_half = nodes.new("ShaderNodeMath"); n_half.operation = 'MULTIPLY'     # Thickness * 0.5
-    n_center_mul = nodes.new("ShaderNodeMath"); n_center_mul.operation = 'MULTIPLY'  # * Centered
-    n_neg = nodes.new("ShaderNodeMath"); n_neg.operation = 'MULTIPLY'       # * (-1)
-    n_vec_center = nodes.new("ShaderNodeCombineXYZ")      # (0, -Thickness*0.5*Centered, 0)
-
-    # 位置
-    n_in.location = (-800, 0)
-    n_extrude.location = (-560, 0)
-    n_setpos_top.location = (-300, 0)
-    n_vec_top.location = (-320, -180)
-    n_half.location = (-80, -180)
-    n_center_mul.location = (120, -180)
-    n_neg.location = (320, -180)
-    n_vec_center.location = (520, -180)
-    n_setpos_center.location = (60, 0)
-    n_out.location = (260, 0)
-
-    # 設定
-    n_extrude.inputs["Offset Scale"].default_value = 0.0       # 位置移動は後段で
-    n_extrude.inputs["Individual"].default_value = False
-
-    # 入力→押し出し→Top移動
-    links.new(n_in.outputs[0], n_extrude.inputs["Mesh"])
-    links.new(n_extrude.outputs["Mesh"], n_setpos_top.inputs["Geometry"])
-    links.new(n_extrude.outputs["Top"], n_setpos_top.inputs["Selection"])
-
-    # Top を (0, Thickness, 0) へ
-    links.new(n_in.outputs[1], n_vec_top.inputs["Y"])                  # Thickness
-    links.new(n_vec_top.outputs["Vector"], n_setpos_top.inputs["Offset"])
-
-    # Centered: -Thickness * 0.5 * Centered
-    n_half.inputs[1].default_value = 0.5
-    n_neg.inputs[1].default_value = -1.0
-    links.new(n_in.outputs[1], n_half.inputs[0])                       # Thickness * 0.5
-    links.new(n_half.outputs["Value"], n_center_mul.inputs[0])
-    links.new(n_in.outputs[2], n_center_mul.inputs[1])                 # * Centered (0/1)
-    links.new(n_center_mul.outputs["Value"], n_neg.inputs[0])          # * (-1)
-    links.new(n_neg.outputs["Value"], n_vec_center.inputs["Y"])        # (0, neg, 0)
-
-    # 全体オフセット適用
-    links.new(n_setpos_top.outputs["Geometry"], n_setpos_center.inputs["Geometry"])
-    links.new(n_vec_center.outputs["Vector"], n_setpos_center.inputs["Offset"])
-
-    # 出力
-    links.new(n_setpos_center.outputs["Geometry"], n_out.inputs[0])
-
-    # モディファイア側の初期値（UI）
-    mod["Input_2"] = float(thickness_default)  # Thickness
-    mod["Input_3"] = bool(centered_default)    # Centered
+    # ある環境では追加で有効（あればON）
+    for attr in ("use_quality_normals", "nonmanifold_boundary_mode"):
+        if hasattr(solid, attr):
+            try:
+                setattr(solid, attr, True if isinstance(getattr(solid, attr), bool) else getattr(solid, attr))
+            except Exception:
+                pass
 
     print("✅ 2D Delaunay で平面生成 → +Y 厚み（Centered対応）を作成しました。")
     return obj
