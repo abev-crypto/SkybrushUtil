@@ -9,6 +9,8 @@ plug‑in is not available, the module simply does nothing.
 import bpy
 import bmesh
 from bpy.props import (
+    BoolProperty,
+    CollectionProperty,
     EnumProperty,
     FloatProperty,
     FloatVectorProperty,
@@ -607,6 +609,11 @@ def ensure_all_function_entries_initialized() -> None:
 def _ensure_light_effects_initialized(_dummy=None):  # pragma: no cover - Blender UI
     ensure_all_function_entries_initialized()
 
+
+class SequenceDelayEntry(PropertyGroup):
+    delay = IntProperty(name="Delay", default=0, min=0)
+
+
 class PatchedLightEffect(PropertyGroup):
     type = EnumProperty(
         name="Effect Type",
@@ -626,6 +633,64 @@ class PatchedLightEffect(PropertyGroup):
     color_function_text = PointerProperty(
         name="Color Function Text", type=bpy.types.Text
     )
+    sequence_mode = BoolProperty(
+        name="Sequence Mode",
+        description="Enable sequential playback across multiple mask meshes",
+        default=False,
+    )
+    sequence_mask_collection = PointerProperty(
+        name="Mask Collection",
+        description="Collection that stores meshes participating in the sequence",
+        type=bpy.types.Collection,
+    )
+    sequence_delay = IntProperty(
+        name="Delay",
+        description="Delay between the start frames of consecutive sequence entries",
+        default=0,
+        min=0,
+    )
+    sequence_manual_delay = BoolProperty(
+        name="Manual Delay",
+        description="Allow specifying individual delays between each pair of sequence entries",
+        default=False,
+    )
+    sequence_delays = CollectionProperty(
+        name="Sequence Delays",
+        description="Per-pair delays between sequence entries when manual delay is enabled",
+        type=SequenceDelayEntry,
+    )
+
+    def ensure_sequence_delay_entries(self, count: int | None = None) -> None:
+        meshes = self.get_sequence_meshes()
+        desired = max(len(meshes) - 1, 0) if count is None else max(count, 0)
+        current = len(self.sequence_delays)
+        if current < desired:
+            for _ in range(desired - current):
+                item = self.sequence_delays.add()
+                item.delay = max(self.sequence_delay, 0)
+        elif current > desired:
+            for _ in range(current - desired):
+                self.sequence_delays.remove(len(self.sequence_delays) - 1)
+
+    def get_sequence_meshes(self) -> list[bpy.types.Object]:
+        collection = getattr(self, "sequence_mask_collection", None)
+        if not collection:
+            return []
+        meshes = [
+            obj
+            for obj in getattr(collection, "objects", [])
+            if getattr(obj, "type", "") == "MESH"
+        ]
+        meshes.sort(key=lambda obj: obj.name)
+        return meshes
+
+    def get_sequence_delays(self) -> list[int]:
+        meshes = self.get_sequence_meshes()
+        desired = max(len(meshes) - 1, 0)
+        self.ensure_sequence_delay_entries(desired)
+        if self.sequence_manual_delay:
+            return [entry.delay for entry in self.sequence_delays[:desired]]
+        return [self.sequence_delay for _ in range(desired)]
     @property
     def color_function_ref(self) -> Optional[Callable]:
         if self.type != "FUNCTION":
@@ -675,311 +740,358 @@ class PatchedLightEffect(PropertyGroup):
         random_seq: RandomSequence,
     ) -> None:
         ensure_color_function_initialized(self)
-        def get_output_based_on_output_type(
-            output_type: str,
-            mapping_mode: str,
-            output_function,
-        ) -> tuple[Optional[list[Optional[float]]], Optional[float]]:
-            
-            outputs: Optional[list[Optional[float]]] = None
-            common_output: Optional[float] = None
-            order: Optional[list[int]] = None
 
-            if output_type == "FIRST_COLOR":
-                common_output = 0.0
-            elif output_type == "LAST_COLOR":
-                common_output = 1.0
-            elif output_type == "TEMPORAL":
-                common_output = time_fraction
-            elif output_type == OUTPUT_VERTEX_COLOR:
-                outputs = None
-                if (
-                    self.type == "COLOR_RAMP"
-                    and self.target == "INSIDE_MESH"
-                    and getattr(self, "mesh", None)
-                ):
-                    sampled = sample_vertex_color_factors(self.mesh, positions)
-                    if sampled is not None:
-                        outputs = sampled
-                if outputs is None:
-                    outputs = [None] * num_positions
-            elif output_type in {OUTPUT_MESH_UV_U, OUTPUT_MESH_UV_V}:
-                outputs = None
-                if (
-                    self.target == "INSIDE_MESH"
-                    and getattr(self, "mesh", None)
-                ):
-                    axis = 0 if output_type == OUTPUT_MESH_UV_U else 1
-                    sampled = sample_uv_factors(self.mesh, positions, axis)
-                    if sampled is not None:
-                        outputs = sampled
-                if outputs is None:
-                    outputs = [None] * num_positions
-            elif output_type_supports_mapping_mode(output_type):
-                proportional = mapping_mode == "PROPORTIONAL"
-                if output_type == "DISTANCE":
-                    if self.mesh:
-                        position_of_mesh = get_position_of_object(self.mesh)
-                        sort_key = lambda idx: distance_sq_of(positions[idx], position_of_mesh)
+        def apply_single_mode() -> None:
+            def get_output_based_on_output_type(
+                output_type: str,
+                mapping_mode: str,
+                output_function,
+            ) -> tuple[Optional[list[Optional[float]]], Optional[float]]:
+
+                outputs: Optional[list[Optional[float]]] = None
+                common_output: Optional[float] = None
+                order: Optional[list[int]] = None
+
+                if output_type == "FIRST_COLOR":
+                    common_output = 0.0
+                elif output_type == "LAST_COLOR":
+                    common_output = 1.0
+                elif output_type == "TEMPORAL":
+                    common_output = time_fraction
+                elif output_type == OUTPUT_VERTEX_COLOR:
+                    outputs = None
+                    if (
+                        self.type == "COLOR_RAMP"
+                        and self.target == "INSIDE_MESH"
+                        and getattr(self, "mesh", None)
+                    ):
+                        sampled = sample_vertex_color_factors(self.mesh, positions)
+                        if sampled is not None:
+                            outputs = sampled
+                    if outputs is None:
+                        outputs = [None] * num_positions
+                elif output_type in {OUTPUT_MESH_UV_U, OUTPUT_MESH_UV_V}:
+                    outputs = None
+                    if (
+                        self.target == "INSIDE_MESH"
+                        and getattr(self, "mesh", None)
+                    ):
+                        axis = 0 if output_type == OUTPUT_MESH_UV_U else 1
+                        sampled = sample_uv_factors(self.mesh, positions, axis)
+                        if sampled is not None:
+                            outputs = sampled
+                    if outputs is None:
+                        outputs = [None] * num_positions
+                elif output_type_supports_mapping_mode(output_type):
+                    proportional = mapping_mode == "PROPORTIONAL"
+                    if output_type == "DISTANCE":
+                        if self.mesh:
+                            position_of_mesh = get_position_of_object(self.mesh)
+                            sort_key = lambda idx: distance_sq_of(positions[idx], position_of_mesh)
+                        else:
+                            sort_key = None
                     else:
-                        sort_key = None
-                else:
-                    query_axes = (
-                        OUTPUT_TYPE_TO_AXIS_SORT_KEY.get(output_type)
-                        or OUTPUT_TYPE_TO_AXIS_SORT_KEY["default"]
-                    )
-                    if proportional:
-                        sort_key = lambda idx: query_axes(positions[idx])[0]
-                    else:
-                        sort_key = lambda idx: query_axes(positions[idx])
-                outputs = [1.0] * num_positions
-                order = list(range(num_positions))
-                if num_positions > 1:
-                    if proportional and sort_key is not None:
-                        evaluated_sort_keys = [sort_key(i) for i in order]
-                        min_value, max_value = (min(evaluated_sort_keys), max(evaluated_sort_keys))
-                        diff = max_value - min_value
-                        if diff > 0:
-                            outputs = [(value - min_value) / diff for value in evaluated_sort_keys]
-                    else:
-                        if sort_key is not None:
-                            order.sort(key=sort_key)
-                        assert outputs is not None
-                        for u, v in enumerate(order):
-                            outputs[v] = u / (num_positions - 1)
-            elif output_type == "INDEXED_BY_DRONES":
-                if num_positions > 1:
-                    np_m1 = num_positions - 1
-                    outputs = [i / np_m1 for i in range(num_positions)]
-                else:
-                    outputs = [0.0]
-            elif output_type == "INDEXED_BY_FORMATION":
-                if mapping is not None:
-                    assert num_positions == len(mapping)
-                    if None in mapping:
-                        sorted_valid_mapping = sorted(
-                            x for x in mapping if x is not None
+                        query_axes = (
+                            OUTPUT_TYPE_TO_AXIS_SORT_KEY.get(output_type)
+                            or OUTPUT_TYPE_TO_AXIS_SORT_KEY["default"]
                         )
-                        np_m1 = max(len(sorted_valid_mapping) - 1, 1)
-                        outputs = [
-                            None if x is None else sorted_valid_mapping.index(x) / np_m1
-                            for x in mapping
-                        ]
+                        if proportional:
+                            sort_key = lambda idx: query_axes(positions[idx])[0]
+                        else:
+                            sort_key = lambda idx: query_axes(positions[idx])
+                    outputs = [1.0] * num_positions
+                    order = list(range(num_positions))
+                    if num_positions > 1:
+                        if proportional and sort_key is not None:
+                            evaluated_sort_keys = [sort_key(i) for i in order]
+                            min_value, max_value = (min(evaluated_sort_keys), max(evaluated_sort_keys))
+                            diff = max_value - min_value
+                            if diff > 0:
+                                outputs = [(value - min_value) / diff for value in evaluated_sort_keys]
+                        else:
+                            if sort_key is not None:
+                                order.sort(key=sort_key)
+                            assert outputs is not None
+                            for u, v in enumerate(order):
+                                outputs[v] = u / (num_positions - 1)
+                elif output_type == "INDEXED_BY_DRONES":
+                    if num_positions > 1:
+                        np_m1 = num_positions - 1
+                        outputs = [i / np_m1 for i in range(num_positions)]
                     else:
-                        np_m1 = max(num_positions - 1, 1)
-                        outputs = [None if x is None else x / np_m1 for x in mapping]
-                else:
-                    outputs = [None] * num_positions  
-            elif output_type == "GROUP":
-                outputs = [output_function(idx, 0, 0) for idx in range(num_positions)]
-            elif output_type == "CUSTOM":
-                module = get_state(self).get("module")
-                if module is None:
-                    path = output_function.path
-                    module = (
-                        load_module(abspath(path))
-                        if path and path.lower().endswith(".py")
-                        else None
-                    )
-                if self.output_function.name and module:
-                    fn_name = self.output_function.name
-                    if getattr(self, "color_function_text", None):
-                        ctx = module.__dict__
-                        outputs = []
-                        for index in range(num_positions):
-                            formation_index = (
-                                mapping[index] if mapping is not None else None
+                        outputs = [0.0]
+                elif output_type == "INDEXED_BY_FORMATION":
+                    if mapping is not None:
+                        assert num_positions == len(mapping)
+                        if None in mapping:
+                            sorted_valid_mapping = sorted(
+                                x for x in mapping if x is not None
                             )
-                            ctx.update(
-                                frame=frame,
-                                time_fraction=time_fraction,
-                                drone_index=index,
-                                formation_index=formation_index,
-                                position=positions[index],
-                                drone_count=num_positions,
-                            )
-                            outputs.append(
-                                eval(
-                                    f"{fn_name}(frame=frame, time_fraction=time_fraction, drone_index=drone_index, formation_index=formation_index, position=position, drone_count=drone_count)",
-                                    ctx,
-                                )
-                            )
+                            np_m1 = max(len(sorted_valid_mapping) - 1, 1)
+                            outputs = [
+                                None if x is None else sorted_valid_mapping.index(x) / np_m1
+                                for x in mapping
+                            ]
+                        else:
+                            np_m1 = max(num_positions - 1, 1)
+                            outputs = [None if x is None else x / np_m1 for x in mapping]
                     else:
-                        fn = getattr(module, fn_name)
-                        outputs = [
-                            fn(
-                                frame=frame,
-                                time_fraction=time_fraction,
-                                drone_index=index,
-                                formation_index=(
+                        outputs = [None] * num_positions
+                elif output_type == "GROUP":
+                    outputs = [output_function(idx, 0, 0) for idx in range(num_positions)]
+                elif output_type == "CUSTOM":
+                    module = get_state(self).get("module")
+                    if module is None:
+                        path = output_function.path
+                        module = (
+                            load_module(abspath(path))
+                            if path and path.lower().endswith(".py")
+                            else None
+                        )
+                    if self.output_function.name and module:
+                        fn_name = self.output_function.name
+                        if getattr(self, "color_function_text", None):
+                            ctx = module.__dict__
+                            outputs = []
+                            for index in range(num_positions):
+                                formation_index = (
                                     mapping[index] if mapping is not None else None
-                                ),
-                                position=positions[index],
-                                drone_count=num_positions,
-                            )
-                            for index in range(num_positions)
-                        ]
+                                )
+                                ctx.update(
+                                    frame=frame,
+                                    time_fraction=time_fraction,
+                                    drone_index=index,
+                                    formation_index=formation_index,
+                                    position=positions[index],
+                                    drone_count=num_positions,
+                                )
+                                outputs.append(
+                                    eval(
+                                        f"{fn_name}(frame=frame, time_fraction=time_fraction, drone_index=drone_index, formation_index=formation_index, position=position, drone_count=drone_count)",
+                                        ctx,
+                                    )
+                                )
+                        else:
+                            fn = getattr(module, fn_name)
+                            outputs = [
+                                fn(
+                                    frame=frame,
+                                    time_fraction=time_fraction,
+                                    drone_index=index,
+                                    formation_index=(
+                                        mapping[index] if mapping is not None else None
+                                    ),
+                                    position=positions[index],
+                                    drone_count=num_positions,
+                                )
+                                for index in range(num_positions)
+                            ]
+                    else:
+                        common_output = 1.0
                 else:
                     common_output = 1.0
-            else:
-                common_output = 1.0
-            return outputs, common_output
-        if not self.enabled or not self.contains_frame(frame):
-            return
-        time_fraction = (frame - self.frame_start) / max(self.duration - 1, 1)
-        num_positions = len(positions)
-        color_ramp = self.color_ramp
-        color_image = self.color_image
-        color_function_ref = self.color_function_ref
-        function_name = getattr(getattr(self, "color_function", None), "name", "")
-        if (
-            self.type == "FUNCTION"
-            and not getattr(self, "color_function_text", None)
-            and not getattr(getattr(self, "color_function", None), "name", "")
-        ):
-            return
-        st = get_state(self)
-        module = st.get("module", None)
-        if module is not None:
-            schema = st.get("config_schema", {})
-            if getattr(self, "color_function_text", None):
-                ctx = module.__dict__
-                for name, meta in schema.items():
-                    if meta.get("type") == "OBJECT":
-                        continue
-                    value = self.get(name)
-                    obj_attr = meta.get("object_ref_attr")
-                    if obj_attr:
-                        obj_name = self.get(obj_attr)
-                        if obj_name:
-                            obj = bpy.data.objects.get(obj_name)
-                            if obj is not None:
-                                obj_val = _get_object_property(
-                                    obj, meta.get("object_ref_type", "POS")
-                                )
-                                if obj_val is not None:
-                                    value = obj_val
-                    if isinstance(value, Iterable):
-                        ctx[name.upper()] = tuple(value)
-                    else:
-                        ctx[name.upper()] = value
-            elif color_function_ref is not None:
-                for name, meta in schema.items():
-                    if meta.get("type") == "OBJECT":
-                        continue
-                    value = self.get(name)
-                    obj_attr = meta.get("object_ref_attr")
-                    if obj_attr:
-                        obj_name = self.get(obj_attr)
-                        if obj_name:
-                            obj = bpy.data.objects.get(obj_name)
-                            if obj is not None:
-                                obj_val = _get_object_property(
-                                    obj, meta.get("object_ref_type", "POS")
-                                )
-                                if obj_val is not None:
-                                    value = obj_val
-                    if isinstance(value, Iterable):
-                        setattr(module, name.upper(), tuple(value))
-                    else:
-                        setattr(module, name.upper(), value)
-        new_color = [0.0] * 4
-        outputs_x, common_output_x = get_output_based_on_output_type(
-            self.output, self.output_mapping_mode, self.output_function
-        )
-        if color_image is not None:
-            outputs_y, common_output_y = get_output_based_on_output_type(
-                self.output_y, self.output_mapping_mode_y, self.output_function_y
+                return outputs, common_output
+
+            if not self.enabled or not self.contains_frame(frame):
+                return
+
+            time_fraction = (frame - self.frame_start) / max(self.duration - 1, 1)
+            num_positions = len(positions)
+            color_ramp = self.color_ramp
+            color_image = self.color_image
+            color_function_ref = self.color_function_ref
+            if (
+                self.type == "FUNCTION"
+                and not getattr(self, "color_function_text", None)
+                and not getattr(getattr(self, "color_function", None), "name", "")
+            ):
+                return
+            st = get_state(self)
+            module = st.get("module", None)
+            if module is not None:
+                schema = st.get("config_schema", {})
+                if getattr(self, "color_function_text", None):
+                    ctx = module.__dict__
+                    for name, meta in schema.items():
+                        if meta.get("type") == "OBJECT":
+                            continue
+                        value = self.get(name)
+                        obj_attr = meta.get("object_ref_attr")
+                        if obj_attr:
+                            obj_name = self.get(obj_attr)
+                            if obj_name:
+                                obj = bpy.data.objects.get(obj_name)
+                                if obj is not None:
+                                    obj_val = _get_object_property(
+                                        obj, meta.get("object_ref_type", "POS")
+                                    )
+                                    if obj_val is not None:
+                                        value = obj_val
+                        if isinstance(value, Iterable):
+                            ctx[name.upper()] = tuple(value)
+                        else:
+                            ctx[name.upper()] = value
+                elif color_function_ref is not None:
+                    for name, meta in schema.items():
+                        if meta.get("type") == "OBJECT":
+                            continue
+                        value = self.get(name)
+                        obj_attr = meta.get("object_ref_attr")
+                        if obj_attr:
+                            obj_name = self.get(obj_attr)
+                            if obj_name:
+                                obj = bpy.data.objects.get(obj_name)
+                                if obj is not None:
+                                    obj_val = _get_object_property(
+                                        obj, meta.get("object_ref_type", "POS")
+                                    )
+                                    if obj_val is not None:
+                                        value = obj_val
+                        if isinstance(value, Iterable):
+                            setattr(module, name.upper(), tuple(value))
+                        else:
+                            setattr(module, name.upper(), value)
+            new_color = [0.0] * 4
+            outputs_x, common_output_x = get_output_based_on_output_type(
+                self.output, self.output_mapping_mode, self.output_function
             )
-        condition = self._get_spatial_effect_predicate()
-        for index, position in enumerate(positions):
-            color = colors[index]
-            if common_output_x is not None:
-                output_x = common_output_x
-            else:
-                assert outputs_x is not None
-                if outputs_x[index] is None:
-                    continue
-                output_x = outputs_x[index]
-            assert isinstance(output_x, float)
             if color_image is not None:
-                if common_output_y is not None:
-                    output_y = common_output_y
-                else:
-                    assert outputs_y is not None
-                    if outputs_y[index] is None:
-                        continue
-                    output_y = outputs_y[index]
-                assert isinstance(output_y, float)
-            if self.randomness != 0:
-                offset_x = (random_seq.get_float(index) - 0.5) * self.randomness
-                output_x = (offset_x + output_x) % 1.0
-                if color_image is not None:
-                    offset_y = (random_seq.get_float(index) - 0.5) * self.randomness
-                    output_y = (offset_y + output_y) % 1.0
-            alpha = max(
-                min(self._evaluate_influence_at(position, frame, condition), 1.0), 0.0
-            )
-            if getattr(self, "color_function_text", None):
-                ctx = st.get("module", ModuleType("_dummy")).__dict__
-                ctx.update(
-                    frame=frame,
-                    time_fraction=time_fraction,
-                    drone_index=index,
-                    formation_index=(mapping[index] if mapping is not None else None),
-                    position=position,
-                    drone_count=num_positions,
+                outputs_y, common_output_y = get_output_based_on_output_type(
+                    self.output_y, self.output_mapping_mode_y, self.output_function_y
                 )
-                try:
-                    new_color[:] = eval(
-                        f"color_function(frame=frame, time_fraction=time_fraction, drone_index=drone_index, formation_index=formation_index, position=position, drone_count=drone_count)",
-                        ctx,
-                    )
-                except Exception as exc:
-                    raise RuntimeError("ERROR_COLOR_FUNCTION") from exc
-            elif color_function_ref is not None:
-                try:
-                    new_color[:] = color_function_ref(
+            condition = self._get_spatial_effect_predicate()
+            for index, position in enumerate(positions):
+                color = colors[index]
+                if common_output_x is not None:
+                    output_x = common_output_x
+                else:
+                    assert outputs_x is not None
+                    if outputs_x[index] is None:
+                        continue
+                    output_x = outputs_x[index]
+                assert isinstance(output_x, float)
+                if color_image is not None:
+                    if common_output_y is not None:
+                        output_y = common_output_y
+                    else:
+                        assert outputs_y is not None
+                        if outputs_y[index] is None:
+                            continue
+                        output_y = outputs_y[index]
+                    assert isinstance(output_y, float)
+                if self.randomness != 0:
+                    offset_x = (random_seq.get_float(index) - 0.5) * self.randomness
+                    output_x = (offset_x + output_x) % 1.0
+                    if color_image is not None:
+                        offset_y = (random_seq.get_float(index) - 0.5) * self.randomness
+                        output_y = (offset_y + output_y) % 1.0
+                alpha = max(
+                    min(self._evaluate_influence_at(position, frame, condition), 1.0), 0.0
+                )
+                if getattr(self, "color_function_text", None):
+                    ctx = st.get("module", ModuleType("_dummy")).__dict__
+                    ctx.update(
                         frame=frame,
                         time_fraction=time_fraction,
                         drone_index=index,
-                        formation_index=(
-                            mapping[index] if mapping is not None else None
-                        ),
+                        formation_index=(mapping[index] if mapping is not None else None),
                         position=position,
                         drone_count=num_positions,
                     )
-                except Exception as exc:
-                    raise RuntimeError("ERROR_COLOR_FUNCTION") from exc
-            elif color_image is not None:
-                width, height = color_image.size
-                pixels = self.get_image_pixels()
-                x = int((width - 1) * output_x)
-                y = int((height - 1) * output_y)
-                offset = (x + y * width) * 4
-                pixel_color = pixels[offset : offset + 4]
-                if len(pixel_color) == len(new_color):
-                    new_color[:] = convert_from_srgb_to_linear(pixel_color)
-            elif color_ramp:
-                loops = max(self.loop_count, 1)
-                if loops > 1 or self.loop_method != "FORWARD":
-                    t = output_x * loops
-                    idx = min(int(t), loops - 1)
-                    pos = t - idx
-                    if self.loop_method == "PINGPONG":
-                        forward = idx % 2 == 0
-                    elif self.loop_method == "REVERSE":
-                        forward = False
-                    else:
-                        forward = True
-                    if not forward:
-                        pos = 1.0 - pos
-                    output_x = pos
-                new_color[:] = color_ramp.evaluate(output_x)
-            else:
-                new_color[:] = (1.0, 1.0, 1.0, 1.0)
-            new_color[3] *= alpha
-            blend_in_place(new_color, color, BlendMode[self.blend_mode])
+                    try:
+                        new_color[:] = eval(
+                            f"color_function(frame=frame, time_fraction=time_fraction, drone_index=drone_index, formation_index=formation_index, position=position, drone_count=drone_count)",
+                            ctx,
+                        )
+                    except Exception as exc:
+                        raise RuntimeError("ERROR_COLOR_FUNCTION") from exc
+                elif color_function_ref is not None:
+                    try:
+                        new_color[:] = color_function_ref(
+                            frame=frame,
+                            time_fraction=time_fraction,
+                            drone_index=index,
+                            formation_index=(
+                                mapping[index] if mapping is not None else None
+                            ),
+                            position=position,
+                            drone_count=num_positions,
+                        )
+                    except Exception as exc:
+                        raise RuntimeError("ERROR_COLOR_FUNCTION") from exc
+                elif color_image is not None:
+                    width, height = color_image.size
+                    pixels = self.get_image_pixels()
+                    x = int((width - 1) * output_x)
+                    y = int((height - 1) * output_y)
+                    offset = (y * width + x) * 4
+                    new_color[:] = pixels[offset : offset + 4]
+                elif color_ramp:
+                    loops = max(self.loop_count, 1)
+                    if loops > 1 or self.loop_method != "FORWARD":
+                        t = output_x * loops
+                        idx = min(int(t), loops - 1)
+                        pos = t - idx
+                        if self.loop_method == "PINGPONG":
+                            forward = idx % 2 == 0
+                        elif self.loop_method == "REVERSE":
+                            forward = False
+                        else:
+                            forward = True
+                        if not forward:
+                            pos = 1.0 - pos
+                        output_x = pos
+                    new_color[:] = color_ramp.evaluate(output_x)
+                else:
+                    new_color[:] = (1.0, 1.0, 1.0, 1.0)
+                new_color[3] *= alpha
+                blend_in_place(new_color, color, BlendMode[self.blend_mode])
+
+        if not self.sequence_mode:
+            apply_single_mode()
+            return
+
+        meshes = self.get_sequence_meshes()
+        if not meshes:
+            apply_single_mode()
+            return
+
+        delays = self.get_sequence_delays()
+        original_start = self.frame_start
+        original_duration = self.duration
+        original_mesh = getattr(self, "mesh", None)
+        has_frame_end = hasattr(self, "frame_end")
+        original_end = getattr(self, "frame_end", None) if has_frame_end else None
+        chunk_start = original_start
+        duration_span = max(original_duration - 1, 0)
+        total_end = (
+            original_end
+            if has_frame_end and original_end is not None
+            else original_start + duration_span
+        )
+        for index, mesh in enumerate(meshes):
+            if index > 0:
+                delay = (
+                    delays[index - 1]
+                    if index - 1 < len(delays)
+                    else self.sequence_delay
+                )
+                chunk_start += max(delay, 0)
+            chunk_end = chunk_start + duration_span
+            total_end = max(total_end, chunk_end)
+            if frame < chunk_start or frame > chunk_end:
+                continue
+            self.frame_start = chunk_start
+            self.duration = original_duration
+            if has_frame_end:
+                self.frame_end = chunk_end
+            self.mesh = mesh
+            apply_single_mode()
+        self.frame_start = original_start
+        self.duration = original_duration
+        self.mesh = original_mesh
+        if has_frame_end:
+            self.frame_end = total_end
 
 def patch_light_effect_class():
     """Inject loop properties into ``LightEffect`` using monkey patching."""
@@ -1002,6 +1114,16 @@ def patch_light_effect_class():
     LightEffect.loop_count = PatchedLightEffect.loop_count
     LightEffect.loop_method = PatchedLightEffect.loop_method
     LightEffect.color_function_text = PatchedLightEffect.color_function_text
+    LightEffect.sequence_mode = PatchedLightEffect.sequence_mode
+    LightEffect.sequence_mask_collection = PatchedLightEffect.sequence_mask_collection
+    LightEffect.sequence_delay = PatchedLightEffect.sequence_delay
+    LightEffect.sequence_manual_delay = PatchedLightEffect.sequence_manual_delay
+    LightEffect.sequence_delays = PatchedLightEffect.sequence_delays
+    LightEffect.ensure_sequence_delay_entries = (
+        PatchedLightEffect.ensure_sequence_delay_entries
+    )
+    LightEffect.get_sequence_meshes = PatchedLightEffect.get_sequence_meshes
+    LightEffect.get_sequence_delays = PatchedLightEffect.get_sequence_delays
     LightEffect.apply_on_colors = PatchedLightEffect.apply_on_colors
     LightEffect.color_function_ref = PatchedLightEffect.color_function_ref
     LightEffect.draw_color_function_config = (
@@ -1079,6 +1201,15 @@ def patch_light_effect_class():
     LightEffect.__annotations__["loop_count"] = LightEffect.loop_count
     LightEffect.__annotations__["loop_method"] = LightEffect.loop_method
     LightEffect.__annotations__["color_function_text"] = LightEffect.color_function_text
+    LightEffect.__annotations__["sequence_mode"] = LightEffect.sequence_mode
+    LightEffect.__annotations__["sequence_mask_collection"] = (
+        LightEffect.sequence_mask_collection
+    )
+    LightEffect.__annotations__["sequence_delay"] = LightEffect.sequence_delay
+    LightEffect.__annotations__["sequence_manual_delay"] = (
+        LightEffect.sequence_manual_delay
+    )
+    LightEffect.__annotations__["sequence_delays"] = LightEffect.sequence_delays
     LightEffect.__annotations__["output"] = LightEffect.output
     LightEffect.__annotations__["output_y"] = LightEffect.output_y
     LightEffect.__annotations__["target"] = LightEffect.target
@@ -1095,6 +1226,14 @@ def unpatch_light_effect_class():
         "loop_count",
         "loop_method",
         "color_function_text",
+        "sequence_mode",
+        "sequence_mask_collection",
+        "sequence_delay",
+        "sequence_manual_delay",
+        "sequence_delays",
+        "ensure_sequence_delay_entries",
+        "get_sequence_meshes",
+        "get_sequence_delays",
     ):
         if hasattr(LightEffect, attr):
             delattr(LightEffect, attr)
@@ -1973,17 +2112,31 @@ class PatchedLightEffectsPanel(Panel):  # pragma: no cover - Blender UI code
             col = layout.column()
             col.prop(entry, "frame_start")
             col.prop(entry, "duration")
-            col.prop(entry, "frame_end")
+            if not getattr(entry, "sequence_mode", False):
+                col.prop(entry, "frame_end")
             col.separator()
             col.prop(entry, "fade_in_duration")
             col.prop(entry, "fade_out_duration")
             col.separator()
-            col.prop(entry, "mesh")
-            col.operator(
-                CreateSampleUVMeshOperator.bl_idname,
-                text="Create UV Sampling Mesh",
-                icon="MESH_CUBE",
-            )
+            col.prop(entry, "sequence_mode")
+            if getattr(entry, "sequence_mode", False):
+                col.prop(entry, "sequence_mask_collection", text="Mask Collection")
+                col.prop(entry, "sequence_delay")
+                col.prop(entry, "sequence_manual_delay")
+                meshes = entry.get_sequence_meshes()
+                entry.ensure_sequence_delay_entries(len(meshes) - 1)
+                if entry.sequence_manual_delay and len(meshes) > 1:
+                    for idx in range(len(meshes) - 1):
+                        delay_entry = entry.sequence_delays[idx]
+                        text = f"{meshes[idx].name} → {meshes[idx + 1].name}"
+                        col.prop(delay_entry, "delay", text=text)
+            else:
+                col.prop(entry, "mesh")
+                col.operator(
+                    CreateSampleUVMeshOperator.bl_idname,
+                    text="Create UV Sampling Mesh",
+                    icon="MESH_CUBE",
+                )
             col.separator()
             if entry.type == "COLOR_RAMP":
                 col.prop(entry, "loop_count")
@@ -2050,6 +2203,7 @@ def unpatch_light_effects_panel():
 # ---------------------------------------------------------------------------
 
 def register():  # pragma: no cover - executed in Blender
+    bpy.utils.register_class(SequenceDelayEntry)
     bpy.utils.register_class(EmbedColorFunctionOperator)
     bpy.utils.register_class(UnembedColorFunctionOperator)
     bpy.utils.register_class(BakeColorRampOperator)
@@ -2073,4 +2227,5 @@ def unregister():  # pragma: no cover - executed in Blender
     bpy.utils.unregister_class(EmbedColorFunctionOperator)
     bpy.utils.unregister_class(BakeColorRampSplitOperator)
     bpy.utils.unregister_class(MergeSplitLightEffectsOperator)
+    bpy.utils.unregister_class(SequenceDelayEntry)
 
