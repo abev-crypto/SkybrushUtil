@@ -19,9 +19,10 @@ from bpy.props import (
     StringProperty,
 )
 from bpy.types import Operator, Panel, PropertyGroup
-from os.path import abspath, basename, join
+from os.path import basename, join
 
 from bpy.app.handlers import persistent
+from bpy.app import timers
 
 from collections.abc import Callable, Iterable, Sequence
 from functools import partial
@@ -50,6 +51,7 @@ from sbstudio.plugin.utils.color_ramp import update_color_ramp_from
 from sbstudio.plugin.utils.evaluator import get_position_of_object
 from sbstudio.plugin.utils.image import convert_from_srgb_to_linear
 from sbstudio.utils import constant, distance_sq_of, load_module, negate
+from bpy.path import abspath as bpy_abspath
 from types import ModuleType
 from contextlib import contextmanager
 
@@ -113,6 +115,43 @@ def use_b_mesh(mesh):  # pragma: no cover - Blender integration
         bm.free()
 
 _state: dict[int, dict] = {}
+_delayed_id_property_updates: set[tuple[int, str]] = set()
+
+
+def _schedule_id_property_update(pg, name: str, value):
+    """Schedule ``pg[name] = value`` once writing to ID properties is allowed."""
+
+    key = (pg.as_pointer(), name)
+    if key in _delayed_id_property_updates:
+        return
+
+    def _apply():
+        try:
+            current = pg.get(name, None)
+            if name in pg.keys() and _as_dict(current) == _as_dict(value):
+                _delayed_id_property_updates.discard(key)
+                return None
+            pg[name] = value
+        except (AttributeError, RuntimeError):
+            return 0.1
+        _delayed_id_property_updates.discard(key)
+        return None
+
+    _delayed_id_property_updates.add(key)
+    timers.register(_apply, first_interval=0.0)
+
+
+def _set_id_property(pg, name: str, value) -> None:
+    """Safely assign ``value`` to ``pg[name]`` with context-aware fallbacks."""
+
+    if name in pg.keys():
+        current = pg.get(name, None)
+        if _as_dict(current) == _as_dict(value):
+            return
+    try:
+        pg[name] = value
+    except (AttributeError, RuntimeError):
+        _schedule_id_property_update(pg, name, _as_dict(value))
 
 
 def _as_dict(value):
@@ -573,13 +612,13 @@ def _find_dynamic_color_ramp_owner(item):
 def _update_dynamic_array_item(self, _context):
     entry, array = _find_dynamic_array_owner(self)
     if entry is not None and array is not None and array.name:
-        entry[array.name] = array.to_storage_list()
+        _set_id_property(entry, array.name, array.to_storage_list())
 
 
 def _update_dynamic_color_ramp_point(self, _context):
     entry, ramp = _find_dynamic_color_ramp_owner(self)
     if entry is not None and ramp is not None and ramp.name:
-        entry[ramp.name] = ramp.to_storage_list()
+        _set_id_property(entry, ramp.name, ramp.to_storage_list())
 
 
 def _find_sequence_delay_owner(item):
@@ -685,7 +724,7 @@ def initialize_color_function(pg) -> None:
         if text_hash != st.get("text_hash"):
             reset_state()
             st["text_hash"] = text_hash
-            pg["_text_hash"] = text_hash
+            _set_id_property(pg, "_text_hash", text_hash)
         if "module" not in st:
             module = ModuleType(text.name)
             exec(source, module.__dict__)
@@ -702,13 +741,13 @@ def initialize_color_function(pg) -> None:
                 value = getattr(module, name)
                 if isinstance(value, (int, float)):
                     if attr_name not in pg:
-                        pg[attr_name] = value
+                        _set_id_property(pg, attr_name, value)
                     schema[attr_name] = {"default": value}
                 elif isinstance(value, (tuple, list)):
                     if name.endswith("_COLORRAMP"):
                         points = _convert_color_ramp_points(value)
                         current = _convert_color_ramp_points(pg.get(attr_name, points))
-                        pg[attr_name] = current
+                        _set_id_property(pg, attr_name, current)
                         schema[attr_name] = {
                             "default": points,
                             "type": "COLOR_RAMP",
@@ -719,12 +758,12 @@ def initialize_color_function(pg) -> None:
                         if not meta:
                             continue
                         current = _sanitize_array_value(pg.get(attr_name, meta["default"]), meta)
-                        pg[attr_name] = current
+                        _set_id_property(pg, attr_name, current)
                         obj_type = meta.get("object_ref_type")
                         if obj_type:
                             obj_attr_name = f"{attr_name}_object"
                             if obj_attr_name not in pg:
-                                pg[obj_attr_name] = ""
+                                _set_id_property(pg, obj_attr_name, "")
                             schema[obj_attr_name] = {
                                 "default": "",
                                 "type": "OBJECT",
@@ -734,7 +773,7 @@ def initialize_color_function(pg) -> None:
                     elif all(isinstance(v, (int, float)) for v in value):
                         list_value = list(value)
                         if attr_name not in pg:
-                            pg[attr_name] = list_value
+                            _set_id_property(pg, attr_name, list_value)
                         meta = {"default": list_value}
                         if name.endswith("_COLOR"):
                             meta["subtype"] = "COLOR"
@@ -742,7 +781,7 @@ def initialize_color_function(pg) -> None:
                             meta["subtype"] = "XYZ"
                             obj_attr_name = f"{attr_name}_object"
                             if obj_attr_name not in pg:
-                                pg[obj_attr_name] = ""
+                                _set_id_property(pg, obj_attr_name, "")
                             schema[obj_attr_name] = {
                                 "default": "",
                                 "type": "OBJECT",
@@ -753,7 +792,7 @@ def initialize_color_function(pg) -> None:
                             meta["subtype"] = "EULER"
                             obj_attr_name = f"{attr_name}_object"
                             if obj_attr_name not in pg:
-                                pg[obj_attr_name] = ""
+                                _set_id_property(pg, obj_attr_name, "")
                             schema[obj_attr_name] = {
                                 "default": "",
                                 "type": "OBJECT",
@@ -764,7 +803,7 @@ def initialize_color_function(pg) -> None:
                             meta["subtype"] = "XYZ"
                             obj_attr_name = f"{attr_name}_object"
                             if obj_attr_name not in pg:
-                                pg[obj_attr_name] = ""
+                                _set_id_property(pg, obj_attr_name, "")
                             schema[obj_attr_name] = {
                                 "default": "",
                                 "type": "OBJECT",
@@ -775,7 +814,7 @@ def initialize_color_function(pg) -> None:
                             meta["subtype"] = "COLOR"
                             obj_attr_name = f"{attr_name}_object"
                             if obj_attr_name not in pg:
-                                pg[obj_attr_name] = ""
+                                _set_id_property(pg, obj_attr_name, "")
                             schema[obj_attr_name] = {
                                 "default": "",
                                 "type": "OBJECT",
@@ -784,25 +823,25 @@ def initialize_color_function(pg) -> None:
                             meta["object_ref_type"] = "MAT"
                         schema[attr_name] = meta
             st["config_schema"] = schema
-            pg["_config_schema"] = schema
+            _set_id_property(pg, "_config_schema", schema)
             # Restore cached property values when possible, but only update
             # when the value actually differs from the current one.
             for name, value in cached_values.items():
                 if name in schema and pg.get(name) != value:
-                    pg[name] = value
+                    _set_id_property(pg, name, value)
         return
 
     if not pg.color_function or not pg.color_function.path:
         return
 
-    ap = abspath(pg.color_function.path)
+    ap = bpy_abspath(pg.color_function.path)
     if not ap.lower().endswith(".py"):
         reset_state()
         return
     if ap != st.get("absolute_path", ""):
         reset_state()
         st["absolute_path"] = ap
-        pg["_absolute_path"] = ap
+        _set_id_property(pg, "_absolute_path", ap)
     if "module" not in st:
         st["module"] = load_module(ap)
     module = st["module"]
@@ -817,13 +856,13 @@ def initialize_color_function(pg) -> None:
             value = getattr(module, name)
             if isinstance(value, (int, float)):
                 if attr_name not in pg:
-                    pg[attr_name] = value
+                    _set_id_property(pg, attr_name, value)
                 schema[attr_name] = {"default": value}
             elif isinstance(value, (tuple, list)):
                 if name.endswith("_COLORRAMP"):
                     points = _convert_color_ramp_points(value)
                     current = _convert_color_ramp_points(pg.get(attr_name, points))
-                    pg[attr_name] = current
+                    _set_id_property(pg, attr_name, current)
                     schema[attr_name] = {
                         "default": points,
                         "type": "COLOR_RAMP",
@@ -834,12 +873,12 @@ def initialize_color_function(pg) -> None:
                     if not meta:
                         continue
                     current = _sanitize_array_value(pg.get(attr_name, meta["default"]), meta)
-                    pg[attr_name] = current
+                    _set_id_property(pg, attr_name, current)
                     obj_type = meta.get("object_ref_type")
                     if obj_type:
                         obj_attr_name = f"{attr_name}_object"
                         if obj_attr_name not in pg:
-                            pg[obj_attr_name] = ""
+                            _set_id_property(pg, obj_attr_name, "")
                         schema[obj_attr_name] = {
                             "default": "",
                             "type": "OBJECT",
@@ -849,7 +888,7 @@ def initialize_color_function(pg) -> None:
                 elif all(isinstance(v, (int, float)) for v in value):
                     list_value = list(value)
                     if attr_name not in pg:
-                        pg[attr_name] = list_value
+                        _set_id_property(pg, attr_name, list_value)
                     meta = {"default": list_value}
                     if name.endswith("_COLOR"):
                         meta["subtype"] = "COLOR"
@@ -857,7 +896,7 @@ def initialize_color_function(pg) -> None:
                         meta["subtype"] = "XYZ"
                         obj_attr_name = f"{attr_name}_object"
                         if obj_attr_name not in pg:
-                            pg[obj_attr_name] = ""
+                            _set_id_property(pg, obj_attr_name, "")
                         schema[obj_attr_name] = {
                             "default": "",
                             "type": "OBJECT",
@@ -868,7 +907,7 @@ def initialize_color_function(pg) -> None:
                         meta["subtype"] = "EULER"
                         obj_attr_name = f"{attr_name}_object"
                         if obj_attr_name not in pg:
-                            pg[obj_attr_name] = ""
+                            _set_id_property(pg, obj_attr_name, "")
                         schema[obj_attr_name] = {
                             "default": "",
                             "type": "OBJECT",
@@ -879,7 +918,7 @@ def initialize_color_function(pg) -> None:
                         meta["subtype"] = "XYZ"
                         obj_attr_name = f"{attr_name}_object"
                         if obj_attr_name not in pg:
-                            pg[obj_attr_name] = ""
+                            _set_id_property(pg, obj_attr_name, "")
                         schema[obj_attr_name] = {
                             "default": "",
                             "type": "OBJECT",
@@ -890,7 +929,7 @@ def initialize_color_function(pg) -> None:
                         meta["subtype"] = "COLOR"
                         obj_attr_name = f"{attr_name}_object"
                         if obj_attr_name not in pg:
-                            pg[obj_attr_name] = ""
+                            _set_id_property(pg, obj_attr_name, "")
                         schema[obj_attr_name] = {
                             "default": "",
                             "type": "OBJECT",
@@ -899,10 +938,10 @@ def initialize_color_function(pg) -> None:
                         meta["object_ref_type"] = "MAT"
                     schema[attr_name] = meta
         st["config_schema"] = schema
-        pg["_config_schema"] = schema
+        _set_id_property(pg, "_config_schema", schema)
         for name, value in cached_values.items():
             if name in schema and pg.get(name) != value:
-                pg[name] = value
+                _set_id_property(pg, name, value)
 
 
 def ensure_color_function_initialized(pg) -> None:
@@ -1248,7 +1287,7 @@ class PatchedLightEffect(PropertyGroup):
             array = self.dynamic_arrays.add()
             array.name = name
         array.set_from_python(self.get(name, meta.get("default", [])), meta)
-        self[name] = array.to_storage_list()
+        _set_id_property(self, name, array.to_storage_list())
         return array
 
     def get_dynamic_array_value(self, name: str, meta: dict | None = None):
@@ -1270,7 +1309,7 @@ class PatchedLightEffect(PropertyGroup):
             ramp = self.dynamic_color_ramps.add()
             ramp.name = name
         ramp.set_from_python(self.get(name, meta.get("default", [])))
-        self[name] = ramp.to_storage_list()
+        _set_id_property(self, name, ramp.to_storage_list())
         return ramp
 
     def get_dynamic_color_ramp_value(self, name: str, meta: dict | None = None):
@@ -1428,7 +1467,7 @@ class PatchedLightEffect(PropertyGroup):
                     if module is None:
                         path = output_function.path
                         module = (
-                            load_module(abspath(path))
+                            load_module(bpy_abspath(path))
                             if path and path.lower().endswith(".py")
                             else None
                         )
@@ -1978,7 +2017,7 @@ class EmbedColorFunctionOperator(bpy.types.Operator):  # pragma: no cover - Blen
 
     def execute(self, context):
         entry = context.scene.skybrush.light_effects.active_entry
-        path = abspath(entry.color_function.path)
+        path = bpy_abspath(entry.color_function.path)
         with open(path, "r", encoding="utf-8") as fh:
             content = fh.read()
         name = pick_unique_name(basename(path), bpy.data.texts)
@@ -2007,7 +2046,7 @@ class UnembedColorFunctionOperator(bpy.types.Operator):  # pragma: no cover
         path = self.filepath or entry.color_function.path
         if not path:
             path = join(bpy.app.tempdir, basename(entry.color_function_text.name))
-        path = abspath(path)
+        path = bpy_abspath(path)
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(entry.color_function_text.as_string())
         entry.color_function.path = path
@@ -2804,21 +2843,23 @@ def ensure_schema(pg, schema):
     for name, meta in schema.items():
         if meta.get("type") == "ARRAY":
             if name not in pg:
-                pg[name] = list(meta.get("default", []))
+                _set_id_property(pg, name, list(meta.get("default", [])))
             else:
-                pg[name] = _sanitize_array_value(pg.get(name), meta)
+                _set_id_property(pg, name, _sanitize_array_value(pg.get(name), meta))
             pg.ensure_dynamic_array(name, meta)
             continue
         if meta.get("type") == "COLOR_RAMP":
             if name not in pg:
-                pg[name] = _convert_color_ramp_points(meta.get("default", []))
+                _set_id_property(
+                    pg, name, _convert_color_ramp_points(meta.get("default", []))
+                )
             else:
-                pg[name] = _convert_color_ramp_points(pg.get(name))
+                _set_id_property(pg, name, _convert_color_ramp_points(pg.get(name)))
             pg.ensure_dynamic_color_ramp(name, meta)
             continue
         if name not in pg:
             default = meta.get("default") if hasattr(meta, "get") else meta["default"]
-            pg[name] = default
+            _set_id_property(pg, name, default)
         ui = pg.id_properties_ui(name)
         ui_kwargs = {}
         for k_src, k_dst in [
