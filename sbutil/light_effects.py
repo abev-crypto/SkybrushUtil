@@ -327,8 +327,251 @@ def _get_object_property(obj, prop_type):
             diff = getattr(mat, "diffuse_color", None)
             if diff is not None:
                 color = tuple(diff[:4])
-        return color
-    return None
+    return color
+
+
+def _normalize_float_sequence(values, length, fill_value=0.0):
+    result = [float(v) for v in values]
+    if len(result) < length:
+        result.extend([fill_value] * (length - len(result)))
+    return result[:length]
+
+
+def _default_item_for_type(item_type):
+    if item_type == "FLOAT":
+        return 0.0
+    if item_type in {"VECTOR", "EULER"}:
+        return [0.0, 0.0, 0.0]
+    if item_type == "SCALE":
+        return [1.0, 1.0, 1.0]
+    if item_type == "COLOR":
+        return [1.0, 1.0, 1.0, 1.0]
+    if item_type == "COLOR_RGB":
+        return [1.0, 1.0, 1.0]
+    return 0.0
+
+
+def _determine_array_meta(name, value):
+    if not isinstance(value, (tuple, list)):
+        return None
+    base_name = name[:-6]
+    raw_items = list(value)
+    converted: list[float | list[float]] = []
+    for item in raw_items:
+        if isinstance(item, (int, float)):
+            converted.append(float(item))
+            continue
+        if isinstance(item, (tuple, list)) and all(isinstance(v, (int, float)) for v in item):
+            converted.append([float(v) for v in item])
+            continue
+        return None
+    item_type = "FLOAT"
+    item_length = 1
+    if converted and isinstance(converted[0], list):
+        item_length = len(converted[0])
+    suffix_type = None
+    for suffix in ("_COLOR", "_POS", "_ROT", "_SCL", "_MAT"):
+        if base_name.endswith(suffix):
+            suffix_type = suffix
+            break
+    if suffix_type in {"_COLOR", "_MAT"}:
+        if item_length >= 4:
+            item_type = "COLOR"
+            item_length = 4
+            converted = [
+                _normalize_float_sequence(it, 4, 1.0)  # type: ignore[arg-type]
+                for it in converted  # type: ignore[arg-type]
+            ]
+        else:
+            item_type = "COLOR_RGB"
+            item_length = 3
+            converted = [
+                _normalize_float_sequence(it, 3, 1.0)  # type: ignore[arg-type]
+                for it in converted  # type: ignore[arg-type]
+            ]
+    elif suffix_type == "_POS":
+        item_type = "VECTOR"
+        item_length = 3
+        converted = [
+            _normalize_float_sequence(it, 3, 0.0)  # type: ignore[arg-type]
+            for it in converted  # type: ignore[arg-type]
+        ]
+    elif suffix_type == "_ROT":
+        item_type = "EULER"
+        item_length = 3
+        converted = [
+            _normalize_float_sequence(it, 3, 0.0)  # type: ignore[arg-type]
+            for it in converted  # type: ignore[arg-type]
+        ]
+    elif suffix_type == "_SCL":
+        item_type = "SCALE"
+        item_length = 3
+        converted = [
+            _normalize_float_sequence(it, 3, 1.0)  # type: ignore[arg-type]
+            for it in converted  # type: ignore[arg-type]
+        ]
+    else:
+        if converted and isinstance(converted[0], list):
+            if item_length == 4:
+                item_type = "COLOR"
+                converted = [
+                    _normalize_float_sequence(it, 4, 1.0)  # type: ignore[arg-type]
+                    for it in converted  # type: ignore[arg-type]
+                ]
+            elif item_length == 3:
+                item_type = "VECTOR"
+                converted = [
+                    _normalize_float_sequence(it, 3, 0.0)  # type: ignore[arg-type]
+                    for it in converted  # type: ignore[arg-type]
+                ]
+            else:
+                return None
+        else:
+            item_type = "FLOAT"
+            item_length = 1
+    default_item = (
+        converted[0] if converted else _default_item_for_type(item_type)
+    )
+    object_ref_type = None
+    if suffix_type == "_POS":
+        object_ref_type = "POS"
+    elif suffix_type == "_ROT":
+        object_ref_type = "ROT"
+    elif suffix_type == "_SCL":
+        object_ref_type = "SCL"
+    elif suffix_type == "_MAT":
+        object_ref_type = "MAT"
+    meta = {
+        "default": converted,
+        "type": "ARRAY",
+        "item_type": item_type,
+        "item_length": item_length,
+        "item_default": default_item,
+    }
+    if object_ref_type:
+        meta["object_ref_type"] = object_ref_type
+    return meta
+
+
+def _sanitize_array_value(value, meta):
+    data = _as_dict(value)
+    if not isinstance(data, list):
+        data = []
+    item_type = meta.get("item_type", "FLOAT")
+    item_length = int(meta.get("item_length", 1))
+    sanitized: list[float | list[float]] = []
+    if item_type == "FLOAT":
+        for item in data:
+            try:
+                sanitized.append(float(item))
+            except Exception:
+                continue
+        return sanitized
+    fill = 0.0
+    target_length = item_length
+    if item_type == "SCALE":
+        fill = 1.0
+    if item_type == "COLOR":
+        fill = 1.0
+        target_length = 4
+    elif item_type == "COLOR_RGB":
+        fill = 1.0
+        target_length = 3
+    for item in data:
+        seq = item if isinstance(item, (list, tuple)) else [item]
+        sanitized.append(_normalize_float_sequence(seq, target_length, fill))
+    return sanitized
+
+
+def _convert_color_ramp_points(value):
+    if not isinstance(value, (tuple, list)):
+        return []
+    points = []
+    for item in value:
+        if isinstance(item, dict):
+            pos = float(item.get("position", 0.0))
+            color = item.get("color", (1.0, 1.0, 1.0, 1.0))
+        elif isinstance(item, (tuple, list)):
+            if not item:
+                continue
+            pos = float(item[0])
+            if len(item) == 2 and isinstance(item[1], (tuple, list)):
+                color = item[1]
+            else:
+                color = item[1:5]
+        else:
+            continue
+        color_seq = _normalize_float_sequence(color, 4, 1.0)
+        pos = max(0.0, min(1.0, pos))
+        points.append({"position": pos, "color": color_seq})
+    points.sort(key=lambda item: item["position"])
+    if not points:
+        points = [
+            {"position": 0.0, "color": [0.0, 0.0, 0.0, 1.0]},
+            {"position": 1.0, "color": [1.0, 1.0, 1.0, 1.0]},
+        ]
+    return points
+
+
+def _default_color_ramp_point(points):
+    if not points:
+        return {"position": 0.5, "color": [1.0, 1.0, 1.0, 1.0]}
+    if len(points) == 1:
+        pos = min(points[0]["position"] + 0.1, 1.0)
+        return {"position": pos, "color": list(points[0]["color"])}
+    first = points[0]
+    last = points[-1]
+    pos = (first["position"] + last["position"]) * 0.5
+    color = [
+        (first["color"][i] + last["color"][i]) * 0.5 for i in range(4)
+    ]
+    return {"position": max(0.0, min(1.0, pos)), "color": color}
+
+
+def _find_dynamic_array_owner(item):
+    owner = getattr(item, "id_data", None)
+    if owner is None:
+        return None, None
+    skybrush = getattr(owner, "skybrush", None)
+    light_effects = getattr(getattr(skybrush, "light_effects", None), "entries", [])
+    for entry in light_effects:
+        arrays = getattr(entry, "dynamic_arrays", None)
+        if not arrays:
+            continue
+        for array in arrays:
+            for value in array.values:
+                if value.as_pointer() == item.as_pointer():
+                    return entry, array
+    return None, None
+
+
+def _find_dynamic_color_ramp_owner(item):
+    owner = getattr(item, "id_data", None)
+    if owner is None:
+        return None, None
+    skybrush = getattr(owner, "skybrush", None)
+    light_effects = getattr(getattr(skybrush, "light_effects", None), "entries", [])
+    for entry in light_effects:
+        ramps = getattr(entry, "dynamic_color_ramps", None)
+        if not ramps:
+            continue
+        for ramp in ramps:
+            for point in ramp.points:
+                if point.as_pointer() == item.as_pointer():
+                    return entry, ramp
+    return None, None
+
+
+def _update_dynamic_array_item(self, _context):
+    entry, array = _find_dynamic_array_owner(self)
+    if entry is not None and array is not None and array.name:
+        entry[array.name] = array.to_storage_list()
+
+
+def _update_dynamic_color_ramp_point(self, _context):
+    entry, ramp = _find_dynamic_color_ramp_owner(self)
+    if entry is not None and ramp is not None and ramp.name:
+        entry[ramp.name] = ramp.to_storage_list()
 
 
 def initialize_color_function(pg) -> None:
@@ -361,6 +604,10 @@ def initialize_color_function(pg) -> None:
         if "_config_schema" in pg:
             del pg["_config_schema"]
         st.clear()
+        if hasattr(pg, "dynamic_arrays"):
+            pg.dynamic_arrays.clear()
+        if hasattr(pg, "dynamic_color_ramps"):
+            pg.dynamic_color_ramps.clear()
 
     if getattr(pg, "color_function_text", None):
         text = pg.color_function_text
@@ -388,16 +635,154 @@ def initialize_color_function(pg) -> None:
                     if attr_name not in pg:
                         pg[attr_name] = value
                     schema[attr_name] = {"default": value}
-                elif (
-                    isinstance(value, (tuple, list))
-                    and all(isinstance(v, (int, float)) for v in value)
-                ):
+                elif isinstance(value, (tuple, list)):
+                    if name.endswith("_COLORRAMP"):
+                        points = _convert_color_ramp_points(value)
+                        current = _convert_color_ramp_points(pg.get(attr_name, points))
+                        pg[attr_name] = current
+                        schema[attr_name] = {
+                            "default": points,
+                            "type": "COLOR_RAMP",
+                            "default_point": _default_color_ramp_point(points),
+                        }
+                    elif name.endswith("_ARRAY"):
+                        meta = _determine_array_meta(name, value)
+                        if not meta:
+                            continue
+                        current = _sanitize_array_value(pg.get(attr_name, meta["default"]), meta)
+                        pg[attr_name] = current
+                        obj_type = meta.get("object_ref_type")
+                        if obj_type:
+                            obj_attr_name = f"{attr_name}_object"
+                            if obj_attr_name not in pg:
+                                pg[obj_attr_name] = ""
+                            schema[obj_attr_name] = {
+                                "default": "",
+                                "type": "OBJECT",
+                            }
+                            meta["object_ref_attr"] = obj_attr_name
+                        schema[attr_name] = meta
+                    elif all(isinstance(v, (int, float)) for v in value):
+                        list_value = list(value)
+                        if attr_name not in pg:
+                            pg[attr_name] = list_value
+                        meta = {"default": list_value}
+                        if name.endswith("_COLOR"):
+                            meta["subtype"] = "COLOR"
+                        elif name.endswith("_POS"):
+                            meta["subtype"] = "XYZ"
+                            obj_attr_name = f"{attr_name}_object"
+                            if obj_attr_name not in pg:
+                                pg[obj_attr_name] = ""
+                            schema[obj_attr_name] = {
+                                "default": "",
+                                "type": "OBJECT",
+                            }
+                            meta["object_ref_attr"] = obj_attr_name
+                            meta["object_ref_type"] = "POS"
+                        elif name.endswith("_ROT"):
+                            meta["subtype"] = "EULER"
+                            obj_attr_name = f"{attr_name}_object"
+                            if obj_attr_name not in pg:
+                                pg[obj_attr_name] = ""
+                            schema[obj_attr_name] = {
+                                "default": "",
+                                "type": "OBJECT",
+                            }
+                            meta["object_ref_attr"] = obj_attr_name
+                            meta["object_ref_type"] = "ROT"
+                        elif name.endswith("_SCL"):
+                            meta["subtype"] = "XYZ"
+                            obj_attr_name = f"{attr_name}_object"
+                            if obj_attr_name not in pg:
+                                pg[obj_attr_name] = ""
+                            schema[obj_attr_name] = {
+                                "default": "",
+                                "type": "OBJECT",
+                            }
+                            meta["object_ref_attr"] = obj_attr_name
+                            meta["object_ref_type"] = "SCL"
+                        elif name.endswith("_MAT"):
+                            meta["subtype"] = "COLOR"
+                            obj_attr_name = f"{attr_name}_object"
+                            if obj_attr_name not in pg:
+                                pg[obj_attr_name] = ""
+                            schema[obj_attr_name] = {
+                                "default": "",
+                                "type": "OBJECT",
+                            }
+                            meta["object_ref_attr"] = obj_attr_name
+                            meta["object_ref_type"] = "MAT"
+                        schema[attr_name] = meta
+            st["config_schema"] = schema
+            pg["_config_schema"] = schema
+            # Restore cached property values when possible, but only update
+            # when the value actually differs from the current one.
+            for name, value in cached_values.items():
+                if name in schema and pg.get(name) != value:
+                    pg[name] = value
+        return
+
+    if not pg.color_function or not pg.color_function.path:
+        return
+
+    ap = abspath(pg.color_function.path)
+    if not ap.lower().endswith(".py"):
+        reset_state()
+        return
+    if ap != st.get("absolute_path", ""):
+        reset_state()
+        st["absolute_path"] = ap
+        pg["_absolute_path"] = ap
+    if "module" not in st:
+        st["module"] = load_module(ap)
+    module = st["module"]
+    if "config_schema" not in st:
+        schema: dict[str, dict] = {}
+        for name in dir(module):
+            if not name.isupper():
+                continue
+            attr_name = name.lower()
+            if attr_name in reserved:
+                continue
+            value = getattr(module, name)
+            if isinstance(value, (int, float)):
+                if attr_name not in pg:
+                    pg[attr_name] = value
+                schema[attr_name] = {"default": value}
+            elif isinstance(value, (tuple, list)):
+                if name.endswith("_COLORRAMP"):
+                    points = _convert_color_ramp_points(value)
+                    current = _convert_color_ramp_points(pg.get(attr_name, points))
+                    pg[attr_name] = current
+                    schema[attr_name] = {
+                        "default": points,
+                        "type": "COLOR_RAMP",
+                        "default_point": _default_color_ramp_point(points),
+                    }
+                elif name.endswith("_ARRAY"):
+                    meta = _determine_array_meta(name, value)
+                    if not meta:
+                        continue
+                    current = _sanitize_array_value(pg.get(attr_name, meta["default"]), meta)
+                    pg[attr_name] = current
+                    obj_type = meta.get("object_ref_type")
+                    if obj_type:
+                        obj_attr_name = f"{attr_name}_object"
+                        if obj_attr_name not in pg:
+                            pg[obj_attr_name] = ""
+                        schema[obj_attr_name] = {
+                            "default": "",
+                            "type": "OBJECT",
+                        }
+                        meta["object_ref_attr"] = obj_attr_name
+                    schema[attr_name] = meta
+                elif all(isinstance(v, (int, float)) for v in value):
                     list_value = list(value)
                     if attr_name not in pg:
                         pg[attr_name] = list_value
                     meta = {"default": list_value}
                     if name.endswith("_COLOR"):
-                        # Suffix indicates that the value should be shown as a color
                         meta["subtype"] = "COLOR"
                     elif name.endswith("_POS"):
                         meta["subtype"] = "XYZ"
@@ -444,98 +829,6 @@ def initialize_color_function(pg) -> None:
                         meta["object_ref_attr"] = obj_attr_name
                         meta["object_ref_type"] = "MAT"
                     schema[attr_name] = meta
-            st["config_schema"] = schema
-            pg["_config_schema"] = schema
-            # Restore cached property values when possible, but only update
-            # when the value actually differs from the current one.
-            for name, value in cached_values.items():
-                if name in schema and pg.get(name) != value:
-                    pg[name] = value
-        return
-
-    if not pg.color_function or not pg.color_function.path:
-        return
-
-    ap = abspath(pg.color_function.path)
-    if not ap.lower().endswith(".py"):
-        reset_state()
-        return
-    if ap != st.get("absolute_path", ""):
-        reset_state()
-        st["absolute_path"] = ap
-        pg["_absolute_path"] = ap
-    if "module" not in st:
-        st["module"] = load_module(ap)
-    module = st["module"]
-    if "config_schema" not in st:
-        schema: dict[str, dict] = {}
-        for name in dir(module):
-            if not name.isupper():
-                continue
-            attr_name = name.lower()
-            if attr_name in reserved:
-                continue
-            value = getattr(module, name)
-            if isinstance(value, (int, float)):
-                if attr_name not in pg:
-                    pg[attr_name] = value
-                schema[attr_name] = {"default": value}
-            elif (
-                isinstance(value, (tuple, list))
-                and all(isinstance(v, (int, float)) for v in value)
-            ):
-                list_value = list(value)
-                if attr_name not in pg:
-                    pg[attr_name] = list_value
-                meta = {"default": list_value}
-                if name.endswith("_COLOR"):
-                    # Suffix indicates that the value should be shown as a color
-                    meta["subtype"] = "COLOR"
-                elif name.endswith("_POS"):
-                    meta["subtype"] = "XYZ"
-                    obj_attr_name = f"{attr_name}_object"
-                    if obj_attr_name not in pg:
-                        pg[obj_attr_name] = ""
-                    schema[obj_attr_name] = {
-                        "default": "",
-                        "type": "OBJECT",
-                    }
-                    meta["object_ref_attr"] = obj_attr_name
-                    meta["object_ref_type"] = "POS"
-                elif name.endswith("_ROT"):
-                    meta["subtype"] = "EULER"
-                    obj_attr_name = f"{attr_name}_object"
-                    if obj_attr_name not in pg:
-                        pg[obj_attr_name] = ""
-                    schema[obj_attr_name] = {
-                        "default": "",
-                        "type": "OBJECT",
-                    }
-                    meta["object_ref_attr"] = obj_attr_name
-                    meta["object_ref_type"] = "ROT"
-                elif name.endswith("_SCL"):
-                    meta["subtype"] = "XYZ"
-                    obj_attr_name = f"{attr_name}_object"
-                    if obj_attr_name not in pg:
-                        pg[obj_attr_name] = ""
-                    schema[obj_attr_name] = {
-                        "default": "",
-                        "type": "OBJECT",
-                    }
-                    meta["object_ref_attr"] = obj_attr_name
-                    meta["object_ref_type"] = "SCL"
-                elif name.endswith("_MAT"):
-                    meta["subtype"] = "COLOR"
-                    obj_attr_name = f"{attr_name}_object"
-                    if obj_attr_name not in pg:
-                        pg[obj_attr_name] = ""
-                    schema[obj_attr_name] = {
-                        "default": "",
-                        "type": "OBJECT",
-                    }
-                    meta["object_ref_attr"] = obj_attr_name
-                    meta["object_ref_type"] = "MAT"
-                schema[attr_name] = meta
         st["config_schema"] = schema
         pg["_config_schema"] = schema
         for name, value in cached_values.items():
@@ -565,6 +858,172 @@ def _ensure_light_effects_initialized(_dummy=None):  # pragma: no cover - Blende
 class SequenceDelayEntry(PropertyGroup):
     delay = IntProperty(name="Delay", default=0, min=0)
 
+
+class DynamicArrayValue(PropertyGroup):
+    value_float: FloatProperty(name="Value", default=0.0, update=_update_dynamic_array_item)
+    vector: FloatVectorProperty(
+        name="Vector",
+        size=3,
+        subtype="XYZ",
+        default=(0.0, 0.0, 0.0),
+        update=_update_dynamic_array_item,
+    )
+    rotation: FloatVectorProperty(
+        name="Rotation",
+        size=3,
+        subtype="EULER",
+        default=(0.0, 0.0, 0.0),
+        update=_update_dynamic_array_item,
+    )
+    scale: FloatVectorProperty(
+        name="Scale",
+        size=3,
+        subtype="XYZ",
+        default=(1.0, 1.0, 1.0),
+        update=_update_dynamic_array_item,
+    )
+    color: FloatVectorProperty(
+        name="Color",
+        size=4,
+        subtype="COLOR",
+        min=0.0,
+        max=1.0,
+        default=(1.0, 1.0, 1.0, 1.0),
+        update=_update_dynamic_array_item,
+    )
+    color_rgb: FloatVectorProperty(
+        name="Color",
+        size=3,
+        subtype="COLOR",
+        min=0.0,
+        max=1.0,
+        default=(1.0, 1.0, 1.0),
+        update=_update_dynamic_array_item,
+    )
+
+    def set_value(self, item_type: str, value, item_length: int) -> None:
+        if item_type == "FLOAT":
+            try:
+                self.value_float = float(value if not isinstance(value, (list, tuple)) else value[0])
+            except Exception:
+                self.value_float = 0.0
+            return
+        seq = value if isinstance(value, (list, tuple)) else [value]
+        if item_type == "VECTOR":
+            self.vector = _normalize_float_sequence(seq, 3, 0.0)
+        elif item_type == "EULER":
+            self.rotation = _normalize_float_sequence(seq, 3, 0.0)
+        elif item_type == "SCALE":
+            self.scale = _normalize_float_sequence(seq, 3, 1.0)
+        elif item_type == "COLOR":
+            self.color = _normalize_float_sequence(seq, 4, 1.0)
+        elif item_type == "COLOR_RGB":
+            self.color_rgb = _normalize_float_sequence(seq, 3, 1.0)
+        else:
+            self.value_float = float(seq[0]) if seq else 0.0
+
+    def to_storage(self, item_type: str, item_length: int):
+        if item_type == "FLOAT":
+            return float(self.value_float)
+        if item_type == "VECTOR":
+            return list(self.vector)[:item_length]
+        if item_type == "EULER":
+            return list(self.rotation)[:item_length]
+        if item_type == "SCALE":
+            return list(self.scale)[:item_length]
+        if item_type == "COLOR":
+            return list(self.color)[:4]
+        if item_type == "COLOR_RGB":
+            return list(self.color_rgb)[:3]
+        return float(self.value_float)
+
+    def to_script(self, item_type: str, item_length: int):
+        value = self.to_storage(item_type, item_length)
+        if isinstance(value, list):
+            return tuple(float(v) for v in value)
+        return float(value)
+
+
+class DynamicArrayProperty(PropertyGroup):
+    name: StringProperty(name="Name", default="")
+    item_type: StringProperty(name="Item Type", default="FLOAT")
+    item_length: IntProperty(name="Item Length", default=1, min=1, max=4)
+    values: CollectionProperty(type=DynamicArrayValue)
+
+    def set_from_python(self, data, meta):
+        self.item_type = meta.get("item_type", "FLOAT")
+        self.item_length = int(meta.get("item_length", 1))
+        sanitized = _sanitize_array_value(data, meta)
+        self.values.clear()
+        for item in sanitized:
+            arr_item = self.values.add()
+            arr_item.set_value(self.item_type, item, self.item_length)
+
+    def append_default(self, meta):
+        default_value = meta.get("item_default", _default_item_for_type(self.item_type))
+        arr_item = self.values.add()
+        arr_item.set_value(self.item_type, default_value, self.item_length)
+        return arr_item
+
+    def to_storage_list(self):
+        return [item.to_storage(self.item_type, self.item_length) for item in self.values]
+
+    def to_script_value(self):
+        return [item.to_script(self.item_type, self.item_length) for item in self.values]
+
+
+class DynamicColorRampPoint(PropertyGroup):
+    position: FloatProperty(
+        name="Position", min=0.0, max=1.0, default=0.0, update=_update_dynamic_color_ramp_point
+    )
+    color: FloatVectorProperty(
+        name="Color",
+        size=4,
+        subtype="COLOR",
+        min=0.0,
+        max=1.0,
+        default=(1.0, 1.0, 1.0, 1.0),
+        update=_update_dynamic_color_ramp_point,
+    )
+
+
+class DynamicColorRamp(PropertyGroup):
+    name: StringProperty(name="Name", default="")
+    points: CollectionProperty(type=DynamicColorRampPoint)
+
+    def set_from_python(self, data):
+        points = _convert_color_ramp_points(data)
+        self.points.clear()
+        for entry in points:
+            point = self.points.add()
+            point.position = entry["position"]
+            point.color = entry["color"]
+
+    def append_point(self, position: float, color):
+        data = self.to_storage_list()
+        data.append(
+            {
+                "position": max(0.0, min(1.0, float(position))),
+                "color": _normalize_float_sequence(color, 4, 1.0),
+            }
+        )
+        self.set_from_python(data)
+
+    def remove_point(self, index: int) -> None:
+        if 0 <= index < len(self.points):
+            self.points.remove(index)
+
+    def to_storage_list(self):
+        return [
+            {"position": point.position, "color": list(point.color)}
+            for point in self.points
+        ]
+
+    def to_script_value(self):
+        return [
+            (float(point.position), tuple(point.color))
+            for point in self.points
+        ]
 
 class PatchedLightEffect(PropertyGroup):
     type = EnumProperty(
@@ -611,6 +1070,16 @@ class PatchedLightEffect(PropertyGroup):
         description="Per-pair delays between sequence entries when manual delay is enabled",
         type=SequenceDelayEntry,
     )
+    dynamic_arrays = CollectionProperty(
+        name="Dynamic Arrays",
+        description="Storage for dynamic custom function arrays",
+        type=DynamicArrayProperty,
+    )
+    dynamic_color_ramps = CollectionProperty(
+        name="Dynamic Color Ramps",
+        description="Storage for dynamic color ramp parameters",
+        type=DynamicColorRamp,
+    )
 
     def ensure_sequence_delay_entries(self, count: int | None = None) -> None:
         meshes = self.get_sequence_meshes()
@@ -643,6 +1112,51 @@ class PatchedLightEffect(PropertyGroup):
         if self.sequence_manual_delay:
             return [entry.delay for entry in self.sequence_delays[:desired]]
         return [self.sequence_delay for _ in range(desired)]
+
+    def _get_dynamic_array(self, name: str) -> DynamicArrayProperty | None:
+        for array in self.dynamic_arrays:
+            if array.name == name:
+                return array
+        return None
+
+    def ensure_dynamic_array(self, name: str, meta: dict | None = None) -> DynamicArrayProperty:
+        meta = meta or get_state(self).get("config_schema", {}).get(name, {})
+        if hasattr(meta, "items") and not isinstance(meta, dict):
+            meta = _as_dict(meta)
+        array = self._get_dynamic_array(name)
+        if array is None:
+            array = self.dynamic_arrays.add()
+            array.name = name
+        array.set_from_python(self.get(name, meta.get("default", [])), meta)
+        self[name] = array.to_storage_list()
+        return array
+
+    def get_dynamic_array_value(self, name: str, meta: dict | None = None):
+        array = self.ensure_dynamic_array(name, meta)
+        return array.to_script_value()
+
+    def _get_dynamic_color_ramp(self, name: str) -> DynamicColorRamp | None:
+        for ramp in self.dynamic_color_ramps:
+            if ramp.name == name:
+                return ramp
+        return None
+
+    def ensure_dynamic_color_ramp(self, name: str, meta: dict | None = None) -> DynamicColorRamp:
+        meta = meta or get_state(self).get("config_schema", {}).get(name, {})
+        if hasattr(meta, "items") and not isinstance(meta, dict):
+            meta = _as_dict(meta)
+        ramp = self._get_dynamic_color_ramp(name)
+        if ramp is None:
+            ramp = self.dynamic_color_ramps.add()
+            ramp.name = name
+        ramp.set_from_python(self.get(name, meta.get("default", [])))
+        self[name] = ramp.to_storage_list()
+        return ramp
+
+    def get_dynamic_color_ramp_value(self, name: str, meta: dict | None = None):
+        ramp = self.ensure_dynamic_color_ramp(name, meta)
+        return ramp.to_script_value()
+
     @property
     def color_function_ref(self) -> Optional[Callable]:
         if self.type != "FUNCTION":
@@ -867,7 +1381,13 @@ class PatchedLightEffect(PropertyGroup):
                     for name, meta in schema.items():
                         if meta.get("type") == "OBJECT":
                             continue
-                        value = self.get(name)
+                        meta_type = meta.get("type")
+                        if meta_type == "ARRAY":
+                            value = self.get_dynamic_array_value(name, meta)
+                        elif meta_type == "COLOR_RAMP":
+                            value = self.get_dynamic_color_ramp_value(name, meta)
+                        else:
+                            value = self.get(name)
                         obj_attr = meta.get("object_ref_attr")
                         if obj_attr:
                             obj_name = self.get(obj_attr)
@@ -879,7 +1399,7 @@ class PatchedLightEffect(PropertyGroup):
                                     )
                                     if obj_val is not None:
                                         value = obj_val
-                        if isinstance(value, Iterable):
+                        if isinstance(value, Iterable) and not isinstance(value, (str, bytes)):
                             ctx[name.upper()] = tuple(value)
                         else:
                             ctx[name.upper()] = value
@@ -887,7 +1407,13 @@ class PatchedLightEffect(PropertyGroup):
                     for name, meta in schema.items():
                         if meta.get("type") == "OBJECT":
                             continue
-                        value = self.get(name)
+                        meta_type = meta.get("type")
+                        if meta_type == "ARRAY":
+                            value = self.get_dynamic_array_value(name, meta)
+                        elif meta_type == "COLOR_RAMP":
+                            value = self.get_dynamic_color_ramp_value(name, meta)
+                        else:
+                            value = self.get(name)
                         obj_attr = meta.get("object_ref_attr")
                         if obj_attr:
                             obj_name = self.get(obj_attr)
@@ -899,7 +1425,7 @@ class PatchedLightEffect(PropertyGroup):
                                     )
                                     if obj_val is not None:
                                         value = obj_val
-                        if isinstance(value, Iterable):
+                        if isinstance(value, Iterable) and not isinstance(value, (str, bytes)):
                             setattr(module, name.upper(), tuple(value))
                         else:
                             setattr(module, name.upper(), value)
@@ -1899,6 +2425,20 @@ def dyn_keys(pg):
 
 def ensure_schema(pg, schema):
     for name, meta in schema.items():
+        if meta.get("type") == "ARRAY":
+            if name not in pg:
+                pg[name] = list(meta.get("default", []))
+            else:
+                pg[name] = _sanitize_array_value(pg.get(name), meta)
+            pg.ensure_dynamic_array(name, meta)
+            continue
+        if meta.get("type") == "COLOR_RAMP":
+            if name not in pg:
+                pg[name] = _convert_color_ramp_points(meta.get("default", []))
+            else:
+                pg[name] = _convert_color_ramp_points(pg.get(name))
+            pg.ensure_dynamic_color_ramp(name, meta)
+            continue
         if name not in pg:
             default = meta.get("default") if hasattr(meta, "get") else meta["default"]
             pg[name] = default
@@ -1918,13 +2458,187 @@ def ensure_schema(pg, schema):
         if ui_kwargs:
             ui.update(**ui_kwargs)
 
+
+def draw_dynamic_array(pg, layout, name: str, meta: dict) -> None:
+    array = pg.ensure_dynamic_array(name, meta)
+    box = layout.box()
+    header = box.row(align=True)
+    header.label(text=name.upper())
+    add_op = header.operator(
+        "skybrush.dynamic_array_item_add", text="", icon="ADD"
+    )
+    add_op.property_name = name
+    if not array.values:
+        box.label(text="No values", icon="INFO")
+        return
+    for idx, item in enumerate(array.values):
+        row = box.row(align=True)
+        label = f"{idx}"
+        if array.item_type == "FLOAT":
+            row.prop(item, "value_float", text=label)
+        elif array.item_type == "VECTOR":
+            row.prop(item, "vector", text=label)
+        elif array.item_type == "EULER":
+            row.prop(item, "rotation", text=label)
+        elif array.item_type == "SCALE":
+            row.prop(item, "scale", text=label)
+        elif array.item_type == "COLOR":
+            row.prop(item, "color", text="")
+        elif array.item_type == "COLOR_RGB":
+            row.prop(item, "color_rgb", text="")
+        else:
+            row.prop(item, "value_float", text=label)
+        remove = row.operator(
+            "skybrush.dynamic_array_item_remove", text="", icon="X"
+        )
+        remove.property_name = name
+        remove.index = idx
+
+
+def draw_dynamic_color_ramp(pg, layout, name: str, meta: dict) -> None:
+    ramp = pg.ensure_dynamic_color_ramp(name, meta)
+    box = layout.box()
+    header = box.row(align=True)
+    header.label(text=name.upper())
+    add_op = header.operator(
+        "skybrush.dynamic_color_ramp_point_add", text="", icon="ADD"
+    )
+    add_op.property_name = name
+    if not ramp.points:
+        box.label(text="No points", icon="INFO")
+        return
+    for idx, point in enumerate(ramp.points):
+        row = box.row(align=True)
+        row.prop(point, "position", text=f"{idx}")
+        row.prop(point, "color", text="")
+        remove = row.operator(
+            "skybrush.dynamic_color_ramp_point_remove", text="", icon="X"
+        )
+        remove.property_name = name
+        remove.index = idx
+
+
 def draw_dynamic(pg, layout, schema):
     """Draw ID properties from ``pg`` on ``layout``."""
     for name, meta in schema.items():
-        if meta.get("type") == "OBJECT":
+        if meta.get("type") == "ARRAY":
+            draw_dynamic_array(pg, layout, name, meta)
+        elif meta.get("type") == "COLOR_RAMP":
+            draw_dynamic_color_ramp(pg, layout, name, meta)
+        elif meta.get("type") == "OBJECT":
             layout.prop_search(pg, f'["{name}"]', bpy.data, "objects", text=name.upper())
         else:
             layout.prop(pg, f'["{name}"]', text=name.upper())
+
+
+class AddDynamicArrayItemOperator(Operator):  # pragma: no cover - Blender UI
+    bl_idname = "skybrush.dynamic_array_item_add"
+    bl_label = "Add Array Item"
+
+    property_name: StringProperty(name="Property Name", default="")
+
+    @classmethod
+    def poll(cls, context):
+        entry = getattr(context.scene.skybrush.light_effects, "active_entry", None)
+        return entry is not None and entry.type == "FUNCTION"
+
+    def execute(self, context):
+        entry = context.scene.skybrush.light_effects.active_entry
+        schema = get_state(entry).get("config_schema", {})
+        meta = schema.get(self.property_name) or _as_dict(
+            entry.get("_config_schema", {})
+        ).get(self.property_name, {})
+        if hasattr(meta, "items") and not isinstance(meta, dict):
+            meta = _as_dict(meta)
+        array = entry.ensure_dynamic_array(self.property_name, meta)
+        array.append_default(meta)
+        entry[self.property_name] = array.to_storage_list()
+        return {'FINISHED'}
+
+
+class RemoveDynamicArrayItemOperator(Operator):  # pragma: no cover - Blender UI
+    bl_idname = "skybrush.dynamic_array_item_remove"
+    bl_label = "Remove Array Item"
+
+    property_name: StringProperty(name="Property Name", default="")
+    index: IntProperty(name="Index", default=0, min=0)
+
+    @classmethod
+    def poll(cls, context):
+        entry = getattr(context.scene.skybrush.light_effects, "active_entry", None)
+        return entry is not None and entry.type == "FUNCTION"
+
+    def execute(self, context):
+        entry = context.scene.skybrush.light_effects.active_entry
+        schema = get_state(entry).get("config_schema", {})
+        meta = schema.get(self.property_name) or _as_dict(
+            entry.get("_config_schema", {})
+        ).get(self.property_name, {})
+        if hasattr(meta, "items") and not isinstance(meta, dict):
+            meta = _as_dict(meta)
+        array = entry.ensure_dynamic_array(self.property_name, meta)
+        if 0 <= self.index < len(array.values):
+            array.values.remove(self.index)
+            entry[self.property_name] = array.to_storage_list()
+            return {'FINISHED'}
+        return {'CANCELLED'}
+
+
+class AddDynamicColorRampPointOperator(Operator):  # pragma: no cover - Blender UI
+    bl_idname = "skybrush.dynamic_color_ramp_point_add"
+    bl_label = "Add Color Ramp Point"
+
+    property_name: StringProperty(name="Property Name", default="")
+
+    @classmethod
+    def poll(cls, context):
+        entry = getattr(context.scene.skybrush.light_effects, "active_entry", None)
+        return entry is not None and entry.type == "FUNCTION"
+
+    def execute(self, context):
+        entry = context.scene.skybrush.light_effects.active_entry
+        schema = get_state(entry).get("config_schema", {})
+        meta = schema.get(self.property_name) or _as_dict(
+            entry.get("_config_schema", {})
+        ).get(self.property_name, {})
+        if hasattr(meta, "items") and not isinstance(meta, dict):
+            meta = _as_dict(meta)
+        ramp = entry.ensure_dynamic_color_ramp(self.property_name, meta)
+        default_point = meta.get(
+            "default_point", {"position": 0.5, "color": [1.0, 1.0, 1.0, 1.0]}
+        )
+        ramp.append_point(default_point.get("position", 0.5), default_point.get("color", [1.0, 1.0, 1.0, 1.0]))
+        entry[self.property_name] = ramp.to_storage_list()
+        return {'FINISHED'}
+
+
+class RemoveDynamicColorRampPointOperator(Operator):  # pragma: no cover - Blender UI
+    bl_idname = "skybrush.dynamic_color_ramp_point_remove"
+    bl_label = "Remove Color Ramp Point"
+
+    property_name: StringProperty(name="Property Name", default="")
+    index: IntProperty(name="Index", default=0, min=0)
+
+    @classmethod
+    def poll(cls, context):
+        entry = getattr(context.scene.skybrush.light_effects, "active_entry", None)
+        return entry is not None and entry.type == "FUNCTION"
+
+    def execute(self, context):
+        entry = context.scene.skybrush.light_effects.active_entry
+        schema = get_state(entry).get("config_schema", {})
+        meta = schema.get(self.property_name) or _as_dict(
+            entry.get("_config_schema", {})
+        ).get(self.property_name, {})
+        if hasattr(meta, "items") and not isinstance(meta, dict):
+            meta = _as_dict(meta)
+        ramp = entry.ensure_dynamic_color_ramp(self.property_name, meta)
+        if 0 <= self.index < len(ramp.points):
+            ramp.remove_point(self.index)
+            entry[self.property_name] = ramp.to_storage_list()
+            return {'FINISHED'}
+        return {'CANCELLED'}
+
 
 class PatchedLightEffectsPanel(Panel):  # pragma: no cover - Blender UI code
     def draw(self, context):
@@ -2095,6 +2809,14 @@ def unpatch_light_effects_panel():
 
 def register():  # pragma: no cover - executed in Blender
     bpy.utils.register_class(SequenceDelayEntry)
+    bpy.utils.register_class(DynamicArrayValue)
+    bpy.utils.register_class(DynamicArrayProperty)
+    bpy.utils.register_class(DynamicColorRampPoint)
+    bpy.utils.register_class(DynamicColorRamp)
+    bpy.utils.register_class(AddDynamicArrayItemOperator)
+    bpy.utils.register_class(RemoveDynamicArrayItemOperator)
+    bpy.utils.register_class(AddDynamicColorRampPointOperator)
+    bpy.utils.register_class(RemoveDynamicColorRampPointOperator)
     bpy.utils.register_class(EmbedColorFunctionOperator)
     bpy.utils.register_class(UnembedColorFunctionOperator)
     bpy.utils.register_class(BakeColorRampOperator)
@@ -2118,5 +2840,13 @@ def unregister():  # pragma: no cover - executed in Blender
     bpy.utils.unregister_class(EmbedColorFunctionOperator)
     bpy.utils.unregister_class(BakeColorRampSplitOperator)
     bpy.utils.unregister_class(MergeSplitLightEffectsOperator)
+    bpy.utils.unregister_class(RemoveDynamicColorRampPointOperator)
+    bpy.utils.unregister_class(AddDynamicColorRampPointOperator)
+    bpy.utils.unregister_class(RemoveDynamicArrayItemOperator)
+    bpy.utils.unregister_class(AddDynamicArrayItemOperator)
+    bpy.utils.unregister_class(DynamicColorRamp)
+    bpy.utils.unregister_class(DynamicColorRampPoint)
+    bpy.utils.unregister_class(DynamicArrayProperty)
+    bpy.utils.unregister_class(DynamicArrayValue)
     bpy.utils.unregister_class(SequenceDelayEntry)
 
