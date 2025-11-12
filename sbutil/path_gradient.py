@@ -1,4 +1,7 @@
 import bpy
+from mathutils import Vector
+
+from sbstudio.plugin.utils.collections import pick_unique_name
 
 
 def create_curve_segment_cylinder_gn():
@@ -284,4 +287,37 @@ def create_gradient_curve_from_selection():
     """Create a curve with the geometry nodes modifier from the current selection."""
 
     _sorted_obj, curve_obj = sort_vtx_and_create_curve()
+    return ensure_gradient_geometry(curve_obj)
+
+
+def create_gradient_curve_from_objects(objects):
+    """Create a gradient curve that passes through ``objects`` in selection order."""
+
+    ordered = [obj for obj in objects if obj is not None]
+    if len(ordered) < 2:
+        raise ValueError("Select at least two objects to build a curve.")
+
+    coords_world = []
+    for obj in ordered:
+        try:
+            coords_world.append(obj.matrix_world.translation.copy())
+        except Exception:
+            coords_world.append(Vector((0.0, 0.0, 0.0)))
+
+    base_name = ordered[0].name if ordered else "Curve"
+    curve_name = pick_unique_name(f"{base_name}_Path", bpy.data.objects)
+    data_name = pick_unique_name(f"{base_name}_Curve", bpy.data.curves)
+
+    curve_data = bpy.data.curves.new(name=data_name, type='CURVE')
+    curve_data.dimensions = '3D'
+
+    spline = curve_data.splines.new(type='POLY')
+    spline.points.add(len(coords_world) - 1)
+
+    for i, co in enumerate(coords_world):
+        spline.points[i].co = (co.x, co.y, co.z, 1.0)
+
+    curve_obj = bpy.data.objects.new(curve_name, curve_data)
+    bpy.context.collection.objects.link(curve_obj)
+
     return ensure_gradient_geometry(curve_obj)
