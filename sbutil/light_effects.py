@@ -1542,11 +1542,6 @@ class PatchedLightEffect(PropertyGroup):
         original_end = getattr(self, "frame_end", None) if has_frame_end else None
         chunk_start = original_start
         duration_span = max(original_duration - 1, 0)
-        total_end = (
-            original_end
-            if has_frame_end and original_end is not None
-            else original_start + duration_span
-        )
         for index, mesh in enumerate(meshes):
             if index > 0:
                 delay = (
@@ -1556,20 +1551,74 @@ class PatchedLightEffect(PropertyGroup):
                 )
                 chunk_start += max(delay, 0)
             chunk_end = chunk_start + duration_span
-            total_end = max(total_end, chunk_end)
             if frame < chunk_start or frame > chunk_end:
                 continue
             self.frame_start = chunk_start
             self.duration = original_duration
-            if has_frame_end:
-                self.frame_end = chunk_end
             self.mesh = mesh
             apply_single_mode()
         self.frame_start = original_start
         self.duration = original_duration
         self.mesh = original_mesh
-        if has_frame_end:
-            self.frame_end = total_end
+        if has_frame_end and original_end is not None:
+            self.frame_end = original_end
+
+
+def calculate_effective_sequence_span(effect) -> tuple[int | None, int | None]:
+    """Return the effective ``(frame_end, duration)`` span for ``effect``.
+
+    The helper keeps the user-facing duration untouched in sequence mode while
+    still allowing export code to query the total span that includes sequence
+    delays.
+    """
+
+    frame_start = getattr(effect, "frame_start", None)
+    duration = getattr(effect, "duration", None)
+    if frame_start is None or duration is None:
+        return getattr(effect, "frame_end", None), duration
+
+    try:
+        frame_start_i = int(frame_start)
+        duration_i = max(int(duration), 0)
+    except (TypeError, ValueError):
+        return getattr(effect, "frame_end", None), duration
+
+    duration_span = max(duration_i - 1, 0)
+    has_frame_end = hasattr(effect, "frame_end")
+    original_end = getattr(effect, "frame_end", None) if has_frame_end else None
+    total_end = (
+        int(original_end)
+        if isinstance(original_end, (int, float))
+        else frame_start_i + duration_span
+    )
+
+    if not getattr(effect, "sequence_mode", False):
+        return total_end, duration_i
+
+    get_meshes = getattr(effect, "get_sequence_meshes", None)
+    get_delays = getattr(effect, "get_sequence_delays", None)
+    if get_meshes is None or get_delays is None:
+        return total_end, duration_i
+
+    meshes = list(get_meshes())
+    if len(meshes) <= 1:
+        return total_end, duration_i
+
+    delays = list(get_delays())
+    chunk_start = frame_start_i
+    total_end = max(total_end, frame_start_i + duration_span)
+    for index in range(1, len(meshes)):
+        delay = delays[index - 1] if index - 1 < len(delays) else getattr(effect, "sequence_delay", 0)
+        try:
+            delay_i = max(int(delay), 0)
+        except (TypeError, ValueError):
+            delay_i = 0
+        chunk_start += delay_i
+        chunk_end = chunk_start + duration_span
+        total_end = max(total_end, chunk_end)
+
+    total_duration = max(total_end - frame_start_i + 1, duration_i)
+    return total_end, total_duration
 
 def patch_light_effect_class():
     """Inject loop properties into ``LightEffect`` using monkey patching."""
@@ -2726,7 +2775,8 @@ class PatchedLightEffectsPanel(Panel):  # pragma: no cover - Blender UI code
             col.prop(entry, "sequence_mode")
             if getattr(entry, "sequence_mode", False):
                 col.prop(entry, "sequence_mask_collection", text="Mask Collection")
-                col.prop(entry, "sequence_delay")
+                if not entry.sequence_manual_delay:
+                    col.prop(entry, "sequence_delay")
                 col.prop(entry, "sequence_manual_delay")
                 meshes = entry.get_sequence_meshes()
                 entry.ensure_sequence_delay_entries(len(meshes) - 1)

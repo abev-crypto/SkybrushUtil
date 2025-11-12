@@ -173,7 +173,24 @@ def propertygroup_to_dict(pg):
         if hasattr(pg, extra):
             props.add(extra)
 
+    span = None
+    if hasattr(pg, "sequence_mode") and hasattr(light_effects_patch, "calculate_effective_sequence_span"):
+        try:
+            span = light_effects_patch.calculate_effective_sequence_span(pg)
+        except Exception:
+            span = None
+
+    frame_end_override = total_duration_override = None
+    if span is not None:
+        frame_end_override, total_duration_override = span
+
     for prop in props:
+        if prop == "frame_end" and frame_end_override is not None:
+            data[prop] = frame_end_override
+            continue
+        if prop == "duration" and total_duration_override is not None:
+            data[prop] = total_duration_override
+            continue
         val = getattr(pg, prop)
         data[prop] = convert_value(val)
 
