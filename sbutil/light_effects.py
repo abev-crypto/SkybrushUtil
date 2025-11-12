@@ -220,107 +220,59 @@ def sample_vertex_color_factors(mesh_obj, positions: Sequence[Coordinate3D]) -> 
         eval_obj.to_mesh_clear()
 
 
-def _get_uv_layer(mesh):
-    """Return the active UV layer of ``mesh`` if any."""
-
-    layer = None
-    uv_layers = getattr(mesh, "uv_layers", None)
-    if uv_layers:
-        layer = getattr(uv_layers, "active", None)
-        if layer is None and hasattr(uv_layers, "active_index"):
-            try:
-                layer = uv_layers[uv_layers.active_index]
-            except Exception:  # pragma: no cover - Blender API differences
-                layer = None
-        if layer is None and len(uv_layers) > 0:
-            layer = uv_layers[0]
-    if layer is None:
-        attributes = getattr(mesh, "attributes", None)
-        if attributes:
-            for attr in attributes:
-                if getattr(attr, "domain", None) == "CORNER" and getattr(attr, "data_type", None) == "FLOAT2":
-                    layer = attr
-                    break
-    return layer
-
-
 def sample_uv_factors(
     mesh_obj,
     positions: Sequence[Coordinate3D],
     axis: int,
 ) -> Optional[list[Optional[float]]]:
-    """Sample UV coordinate ``axis`` from ``mesh_obj`` at ``positions``."""
+    """Return pseudo-UV ``axis`` samples using the object's bounding box."""
 
     if mesh_obj is None or not positions:
         return None
 
-    depsgraph = bpy.context.evaluated_depsgraph_get()
+    if axis not in (0, 1):
+        return [None] * len(positions)
+
     try:
-        eval_obj = mesh_obj.evaluated_get(depsgraph)
+        matrix = mesh_obj.matrix_world.copy()
     except ReferenceError:
-        # オブジェクトが既に消えているなど
         return [None] * len(positions)
 
-    if eval_obj.type != "MESH":
-        return [None] * len(positions)
-    
-    eval_mesh = eval_obj.to_mesh(
-        preserve_all_data_layers=True,
-        depsgraph=depsgraph,
-    )
+    try:
+        inv_world = matrix.inverted()
+    except Exception:
+        inv_world = matrix.inverted_safe()
 
-    # ★ ここで None チェックを入れる
-    if eval_mesh is None:
-        # デバッグ用ログを出しておくと原因追いやすい
-        print(
-            "[sample_uv_factors] to_mesh() returned None:",
-            mesh_obj.name,
-            "mode:", mesh_obj.mode,
-            "GN modifiers:", [m.type for m in mesh_obj.modifiers],
-        )
+    corners = getattr(mesh_obj, "bound_box", None) or ()
+    local_points = [Vector(corner) for corner in corners]
+    if not local_points:
+        mesh_data = getattr(mesh_obj, "data", None)
+        if mesh_data is not None and getattr(mesh_data, "vertices", None):
+            try:
+                local_points = [vert.co.copy() for vert in mesh_data.vertices]
+            except Exception:
+                local_points = []
+
+    if not local_points:
         return [None] * len(positions)
-    uv_layer = _get_uv_layer(eval_mesh)
-    domain = getattr(uv_layer, "domain", "CORNER")
-    eval_mesh.calc_loop_triangles()
-    tree = _build_bvh_tree(eval_mesh)
-    inv_world = mesh_obj.matrix_world.inverted()
+
+    component_index = 0 if axis == 0 else 2  # U=X, V=Z
+    values = [point[component_index] for point in local_points]
+    min_val = min(values)
+    max_val = max(values)
+    range_val = max_val - min_val
+
+    if abs(range_val) < 1e-9:
+        return [0.5 for _ in positions]
+
+    inv_range = 1.0 / range_val
     outputs: list[Optional[float]] = []
-    data = getattr(uv_layer, "data", None)
-
-    
     for pos in positions:
         co = Vector(pos) if not isinstance(pos, Vector) else pos.copy()
         local = inv_world @ co
-        nearest = tree.find_nearest(local)
-        if nearest is None:
-            outputs.append(None)
-            continue
-        location, _normal, tri_index, _dist = nearest
-        if tri_index is None:
-            outputs.append(None)
-            continue
-        tri = eval_mesh.loop_triangles[tri_index]
-        verts = tri.vertices
-        loops = tri.loops
-        v0 = eval_mesh.vertices[verts[0]].co
-        v1 = eval_mesh.vertices[verts[1]].co
-        v2 = eval_mesh.vertices[verts[2]].co
-        w0, w1, w2 = _barycentric_weights(location, v0, v1, v2)
-        if domain == "POINT":
-            uv0 = data[verts[0]].vector
-            uv1 = data[verts[1]].vector
-            uv2 = data[verts[2]].vector
-        else:
-            uv0 = data[loops[0]].uv if hasattr(data[loops[0]], "uv") else data[loops[0]].vector
-            uv1 = data[loops[1]].uv if hasattr(data[loops[1]], "uv") else data[loops[1]].vector
-            uv2 = data[loops[2]].uv if hasattr(data[loops[2]], "uv") else data[loops[2]].vector
-        value = (
-            float(uv0[axis]) * w0
-            + float(uv1[axis]) * w1
-            + float(uv2[axis]) * w2
-        )
-        outputs.append(value)
-    eval_obj.to_mesh_clear()
+        value = (local[component_index] - min_val) * inv_range
+        outputs.append(max(0.0, min(1.0, float(value))))
+
     return outputs
         
 
@@ -1295,7 +1247,7 @@ class CreateSampleUVMeshOperator(bpy.types.Operator):  # pragma: no cover - Blen
 
     divisions: IntProperty(
         name="Subdivisions",
-        description="Number of geometry node subdivisions along each axis",
+        description="Legacy subdivision count stored for compatibility",
         default=3,
         min=1,
     )
@@ -1466,69 +1418,6 @@ class CreateSampleUVMeshOperator(bpy.types.Operator):  # pragma: no cover - Blen
             bm.free()
         return mesh
 
-    def _ensure_geometry_nodes(self, obj, divisions):
-        group_name = pick_unique_name("SampleUVSubdivide", bpy.data.node_groups)
-        node_group = bpy.data.node_groups.new(group_name, "GeometryNodeTree")
-        node_group.is_modifier = True  # Geometry Nodes モディファイア用フラグ
-
-        # =========================
-        # インターフェース定義 (4.0+)
-        # =========================
-        interface = node_group.interface
-
-        # 入力: Geometry
-        interface.new_socket(
-            name="Geometry",
-            in_out="INPUT",
-            socket_type="NodeSocketGeometry",
-        )
-
-        # 入力: Divisions (int)
-        div_value = max(int(divisions), 1)
-        div_socket = interface.new_socket(
-            name="Divisions",
-            in_out="INPUT",
-            socket_type="NodeSocketInt",
-        )
-        div_socket.min_value = 1
-        div_socket.default_value = div_value
-
-        # 出力: Geometry
-        interface.new_socket(
-            name="Geometry",
-            in_out="OUTPUT",
-            socket_type="NodeSocketGeometry",
-        )
-
-        # =========================
-        # ノード本体
-        # =========================
-        nodes = node_group.nodes
-        links = node_group.links
-
-        group_input = nodes.new("NodeGroupInput")
-        group_output = nodes.new("NodeGroupOutput")
-        subdivide = nodes.new("GeometryNodeSubdivideMesh")
-
-        group_input.location = (-200, 0)
-        subdivide.location = (0, 0)
-        group_output.location = (200, 0)
-
-        links.new(group_input.outputs["Geometry"], subdivide.inputs["Mesh"])
-        links.new(group_input.outputs["Divisions"], subdivide.inputs["Level"])
-        links.new(subdivide.outputs["Mesh"], group_output.inputs["Geometry"])
-
-        # =========================
-        # モディファイアにアサイン
-        # =========================
-        modifier = obj.modifiers.new(name="Sample UV Subdivide", type='NODES')
-        modifier.node_group = node_group
-
-        # interface で作ったソケットから identifier を取って
-        # モディファイア側の値をセット
-        identifier = div_socket.identifier
-        modifier[identifier] = div_value
-
     def execute(self, context):
         entry = context.scene.skybrush.light_effects.active_entry
         ref_objs = self._get_reference_objects(context)
@@ -1550,7 +1439,9 @@ class CreateSampleUVMeshOperator(bpy.types.Operator):  # pragma: no cover - Blen
         scene = context.scene
         scene.collection.objects.link(mesh_obj)
 
-        self._ensure_geometry_nodes(mesh_obj, self.divisions)
+        for modifier in list(getattr(mesh_obj, "modifiers", [])):
+            if modifier.type == 'NODES' and modifier.name == "Sample UV Subdivide":
+                mesh_obj.modifiers.remove(modifier)
 
         entry.mesh = mesh_obj
         if hasattr(entry, "__setitem__"):
