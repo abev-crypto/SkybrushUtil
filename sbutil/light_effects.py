@@ -77,6 +77,11 @@ OUTPUT_VERTEX_COLOR = "MESH_VERTEX_COLOR"
 OUTPUT_MESH_UV_U = "MESH_UV_U"
 OUTPUT_MESH_UV_V = "MESH_UV_V"
 
+
+def _mesh_object_poll(_self, obj):
+    return obj is None or getattr(obj, "type", "") == "MESH"
+
+
 @contextmanager
 def use_b_mesh(mesh):  # pragma: no cover - Blender integration
     """Return a ``BMesh`` for ``mesh`` regardless of plug-in version."""
@@ -1238,12 +1243,10 @@ class PatchedLightEffect(PropertyGroup):
                         outputs = [None] * num_positions
                 elif output_type in {OUTPUT_MESH_UV_U, OUTPUT_MESH_UV_V}:
                     outputs = None
-                    if (
-                        self.target == "INSIDE_MESH"
-                        and getattr(self, "mesh", None)
-                    ):
+                    uv_source = getattr(self, "uv_mesh", None) or getattr(self, "mesh", None)
+                    if uv_source is not None:
                         axis = 0 if output_type == OUTPUT_MESH_UV_U else 1
-                        sampled = sample_uv_factors(self.mesh, positions, axis)
+                        sampled = sample_uv_factors(uv_source, positions, axis)
                         if sampled is not None:
                             outputs = sampled
                     if outputs is None:
@@ -1718,6 +1721,12 @@ def patch_light_effect_class():
         ],
         default="ALL",
     )
+    LightEffect.original_uv_mesh = getattr(LightEffect, "uv_mesh", None)
+    LightEffect.uv_mesh = PointerProperty(
+        name="UV Mesh",
+        type=bpy.types.Object,
+        poll=_mesh_object_poll,
+    )
     LightEffect.target_collection = PointerProperty(
         name="Collection", type=bpy.types.Collection
     )
@@ -1740,6 +1749,7 @@ def patch_light_effect_class():
     LightEffect.__annotations__["output"] = LightEffect.output
     LightEffect.__annotations__["output_y"] = LightEffect.output_y
     LightEffect.__annotations__["target"] = LightEffect.target
+    LightEffect.__annotations__["uv_mesh"] = LightEffect.uv_mesh
     LightEffect.__annotations__["target_collection"] = LightEffect.target_collection
     ensure_all_function_entries_initialized()
 
@@ -1793,6 +1803,13 @@ def unpatch_light_effect_class():
         LightEffect.target = LightEffect.original_target
         LightEffect.__annotations__["target"] = LightEffect.original_target
         LightEffect.original_target = None
+    if getattr(LightEffect, "original_uv_mesh", None) is not None:
+        LightEffect.uv_mesh = LightEffect.original_uv_mesh
+        LightEffect.__annotations__["uv_mesh"] = LightEffect.original_uv_mesh
+        LightEffect.original_uv_mesh = None
+    elif hasattr(LightEffect, "uv_mesh"):
+        delattr(LightEffect, "uv_mesh")
+        LightEffect.__annotations__.pop("uv_mesh", None)
     if getattr(LightEffect, "_original_get_spatial_effect_predicate", None) is not None:
         LightEffect._get_spatial_effect_predicate = (
             LightEffect._original_get_spatial_effect_predicate
@@ -1921,6 +1938,14 @@ class GeneratePathGradientMeshOperator(bpy.types.Operator):  # pragma: no cover 
         if edit_obj is not None and edit_obj.type == "MESH":
             return True
 
+        selected = [
+            obj
+            for obj in getattr(context, "selected_objects", [])
+            if obj is not None
+        ]
+        if len(selected) >= 2:
+            return True
+
         active_obj = context.active_object
         return active_obj is not None and active_obj.type == "CURVE"
 
@@ -1931,10 +1956,20 @@ class GeneratePathGradientMeshOperator(bpy.types.Operator):  # pragma: no cover 
             if edit_obj is not None and edit_obj.type == "MESH":
                 curve_obj = path_gradient.create_gradient_curve_from_selection()
             else:
-                active_obj = context.active_object
-                if active_obj is None or active_obj.type != "CURVE":
-                    raise ValueError("Select a mesh in edit mode or a curve object.")
-                curve_obj = path_gradient.ensure_gradient_geometry(active_obj)
+                selected = [
+                    obj
+                    for obj in getattr(context, "selected_objects", [])
+                    if obj is not None
+                ]
+                if len(selected) >= 2:
+                    curve_obj = path_gradient.create_gradient_curve_from_objects(selected)
+                else:
+                    active_obj = context.active_object
+                    if active_obj is None or active_obj.type != "CURVE":
+                        raise ValueError(
+                            "Select a mesh in edit mode, multiple objects, or a curve object."
+                        )
+                    curve_obj = path_gradient.ensure_gradient_geometry(active_obj)
         except Exception as exc:  # pragma: no cover - Blender UI
             self.report({'ERROR'}, str(exc))
             return {'CANCELLED'}
@@ -1951,14 +1986,21 @@ class GeneratePathGradientMeshOperator(bpy.types.Operator):  # pragma: no cover 
         return {'FINISHED'}
 
 
-class CreateSampleUVMeshOperator(bpy.types.Operator):  # pragma: no cover - Blender UI
-    bl_idname = "skybrush.create_sample_uv_mesh"
-    bl_label = "Create UV Sampling Mesh"
-    bl_description = (
-        "Create a cube mesh sized to the selected object for UV sampling"
-        " and assign it to the active light effect"
-    )
+class CreateBoundingBoxMeshOperator(bpy.types.Operator):  # pragma: no cover - Blender UI
+    bl_idname = "skybrush.create_bb_mesh"
+    bl_label = "Create BB Mesh"
+    bl_description = "Create a bounding box mesh covering the selected objects"
 
+    assign_mode: EnumProperty(
+        name="Assignment Mode",
+        items=[
+            ("AUTO", "Auto", "Automatically assign based on the active outputs", 0),
+            ("MESH", "Target Mesh", "Assign the created mesh to the target mesh property", 1),
+            ("UV", "UV Mesh", "Assign the created mesh to the UV mesh property", 2),
+        ],
+        default="AUTO",
+        options={'HIDDEN'},
+    )
     divisions: IntProperty(
         name="Subdivisions",
         description="Legacy subdivision count stored for compatibility",
@@ -2124,7 +2166,7 @@ class CreateSampleUVMeshOperator(bpy.types.Operator):  # pragma: no cover - Blen
                     v = (co[v_axis] - mins[v_axis]) / ranges[v_axis]
                     loop[uv_layer].uv = (u, v)
 
-            mesh_name = pick_unique_name("SampleUVMesh", bpy.data.meshes)
+            mesh_name = pick_unique_name("BoundingBoxMesh", bpy.data.meshes)
             mesh = bpy.data.meshes.new(mesh_name)
             bm.to_mesh(mesh)
             mesh.update()
@@ -2142,7 +2184,7 @@ class CreateSampleUVMeshOperator(bpy.types.Operator):  # pragma: no cover - Blen
         dims, transform = self._compute_bounds(ref_objs)
         mesh = self._build_cube_mesh(dims)
 
-        obj_name = pick_unique_name(f"{entry.name}_uv_mesh", bpy.data.objects)
+        obj_name = pick_unique_name(f"{entry.name}_bb_mesh", bpy.data.objects)
         mesh_obj = bpy.data.objects.new(obj_name, mesh)
         mesh_obj.matrix_world = transform
         if hasattr(mesh_obj, "display_type"):
@@ -2157,14 +2199,36 @@ class CreateSampleUVMeshOperator(bpy.types.Operator):  # pragma: no cover - Blen
             if modifier.type == 'NODES' and modifier.name == "Sample UV Subdivide":
                 mesh_obj.modifiers.remove(modifier)
 
-        entry.mesh = mesh_obj
+        mode = getattr(self, "assign_mode", "AUTO")
+        assign_to_uv = False
+        assign_to_mesh = False
+        if mode == "UV":
+            assign_to_uv = True
+        elif mode == "MESH":
+            assign_to_mesh = True
+        else:
+            if hasattr(entry, "uv_mesh"):
+                try:
+                    assign_to_uv = (
+                        entry.output in {OUTPUT_MESH_UV_U, OUTPUT_MESH_UV_V}
+                        or entry.output_y in {OUTPUT_MESH_UV_U, OUTPUT_MESH_UV_V}
+                    )
+                except Exception:
+                    assign_to_uv = False
+        if assign_to_uv:
+            try:
+                entry.uv_mesh = mesh_obj
+            except Exception:
+                pass
+        elif assign_to_mesh and hasattr(entry, "mesh"):
+            entry.mesh = mesh_obj
         if hasattr(entry, "__setitem__"):
             try:
                 entry["sample_uv_divisions"] = int(self.divisions)
             except Exception:
                 pass
 
-        self.report({'INFO'}, f"Created UV sampling mesh '{mesh_obj.name}'")
+        self.report({'INFO'}, f"Created bounding box mesh '{mesh_obj.name}'")
         return {'FINISHED'}
 
 
@@ -2395,6 +2459,46 @@ class MergeSplitLightEffectsOperator(bpy.types.Operator):  # pragma: no cover - 
                 except Exception:
                     pass
 
+        return {'FINISHED'}
+
+
+class CreateTargetCollectionFromSelectionOperator(bpy.types.Operator):  # pragma: no cover - Blender UI
+    bl_idname = "skybrush.create_target_collection"
+    bl_label = "Create Target Collection"
+    bl_description = "Create a collection from the selected objects and assign it"
+
+    @classmethod
+    def poll(cls, context):
+        entry = getattr(context.scene.skybrush.light_effects, "active_entry", None)
+        if entry is None or entry.target != "COLLECTION":
+            return False
+        selected = getattr(context, "selected_objects", [])
+        return any(obj is not None for obj in selected)
+
+    def execute(self, context):
+        entry = context.scene.skybrush.light_effects.active_entry
+        selected = [
+            obj for obj in getattr(context, "selected_objects", []) if obj is not None
+        ]
+        if not selected:
+            self.report({'WARNING'}, "Select one or more objects to add to the new collection.")
+            return {'CANCELLED'}
+
+        base_name = f"{entry.name}_targets"
+        collection_name = pick_unique_name(base_name, bpy.data.collections)
+        new_collection = bpy.data.collections.new(collection_name)
+        context.scene.collection.children.link(new_collection)
+
+        for obj in selected:
+            if obj.name in new_collection.objects:
+                continue
+            try:
+                new_collection.objects.link(obj)
+            except RuntimeError:
+                pass
+
+        entry.target_collection = new_collection
+        self.report({'INFO'}, f"Created collection '{new_collection.name}'")
         return {'FINISHED'}
 
 
@@ -2786,12 +2890,14 @@ class PatchedLightEffectsPanel(Panel):  # pragma: no cover - Blender UI code
                         text = f"{meshes[idx].name} → {meshes[idx + 1].name}"
                         col.prop(delay_entry, "delay", text=text)
             else:
-                col.prop(entry, "mesh")
-                col.operator(
-                    CreateSampleUVMeshOperator.bl_idname,
-                    text="Create UV Sampling Mesh",
+                row_mesh = col.row(align=True)
+                row_mesh.prop(entry, "mesh")
+                op_mesh = row_mesh.operator(
+                    CreateBoundingBoxMeshOperator.bl_idname,
+                    text="",
                     icon="MESH_CUBE",
                 )
+                op_mesh.assign_mode = "MESH"
             col.separator()
             if entry.type == "COLOR_RAMP":
                 col.prop(entry, "loop_count")
@@ -2814,6 +2920,18 @@ class PatchedLightEffectsPanel(Panel):  # pragma: no cover - Blender UI code
                 if entry.output == "CUSTOM":
                     col.prop(entry.output_function, "path", text="Fn file")
                     col.prop(entry.output_function, "name", text="Fn name")
+                if (
+                    hasattr(entry, "uv_mesh")
+                    and entry.output in {OUTPUT_MESH_UV_U, OUTPUT_MESH_UV_V}
+                ):
+                    row_uv = col.row(align=True)
+                    row_uv.prop(entry, "uv_mesh")
+                    op_uv = row_uv.operator(
+                        CreateBoundingBoxMeshOperator.bl_idname,
+                        text="",
+                        icon="MESH_CUBE",
+                    )
+                    op_uv.assign_mode = "UV"
             if output_type_supports_mapping_mode(entry.output):
                 col.prop(entry, "output_mapping_mode")
             if entry.type == "IMAGE":
@@ -2821,12 +2939,30 @@ class PatchedLightEffectsPanel(Panel):  # pragma: no cover - Blender UI code
                 if entry.output_y == "CUSTOM":
                     col.prop(entry.output_function_y, "path", text="Fn file")
                     col.prop(entry.output_function_y, "name", text="Fn name")
+                if (
+                    hasattr(entry, "uv_mesh")
+                    and entry.output_y in {OUTPUT_MESH_UV_U, OUTPUT_MESH_UV_V}
+                ):
+                    row_uv_y = col.row(align=True)
+                    row_uv_y.prop(entry, "uv_mesh")
+                    op_uv_y = row_uv_y.operator(
+                        CreateBoundingBoxMeshOperator.bl_idname,
+                        text="",
+                        icon="MESH_CUBE",
+                    )
+                    op_uv_y.assign_mode = "UV"
             if output_type_supports_mapping_mode(entry.output_y):
                 col.prop(entry, "output_mapping_mode_y")
             col.prop(entry, "target")
             col.prop(entry, "invert_target")
             if entry.target == "COLLECTION":
-                col.prop(entry, "target_collection")
+                row_target = col.row(align=True)
+                row_target.prop(entry, "target_collection")
+                row_target.operator(
+                    CreateTargetCollectionFromSelectionOperator.bl_idname,
+                    text="",
+                    icon="OUTLINER_COLLECTION",
+                )
                 col.operator(
                     ConvertCollectionToMeshOperator.bl_idname,
                     text="Convert to Mesh",
@@ -2871,7 +3007,8 @@ def register():  # pragma: no cover - executed in Blender
     bpy.utils.register_class(UnembedColorFunctionOperator)
     bpy.utils.register_class(BakeColorRampOperator)
     bpy.utils.register_class(GeneratePathGradientMeshOperator)
-    bpy.utils.register_class(CreateSampleUVMeshOperator)
+    bpy.utils.register_class(CreateBoundingBoxMeshOperator)
+    bpy.utils.register_class(CreateTargetCollectionFromSelectionOperator)
     bpy.utils.register_class(ConvertCollectionToMeshOperator)
     bpy.utils.register_class(BakeColorRampSplitOperator)
     bpy.utils.register_class(MergeSplitLightEffectsOperator)
@@ -2883,7 +3020,8 @@ def unregister():  # pragma: no cover - executed in Blender
     if _ensure_light_effects_initialized in bpy.app.handlers.depsgraph_update_pre:
         bpy.app.handlers.depsgraph_update_pre.remove(_ensure_light_effects_initialized)
     bpy.utils.unregister_class(ConvertCollectionToMeshOperator)
-    bpy.utils.unregister_class(CreateSampleUVMeshOperator)
+    bpy.utils.unregister_class(CreateTargetCollectionFromSelectionOperator)
+    bpy.utils.unregister_class(CreateBoundingBoxMeshOperator)
     bpy.utils.unregister_class(GeneratePathGradientMeshOperator)
     bpy.utils.unregister_class(BakeColorRampOperator)
     bpy.utils.unregister_class(UnembedColorFunctionOperator)
