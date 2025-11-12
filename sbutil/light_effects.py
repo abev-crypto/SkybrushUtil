@@ -69,13 +69,16 @@ from sbstudio.plugin.operators import (
     MoveLightEffectUpOperator,
     RemoveLightEffectOperator,
 )
-from sbutil import path_gradient
+from sbutil import delaunay, path_gradient, selection_order
 
 import sbstudio
 
 OUTPUT_VERTEX_COLOR = "MESH_VERTEX_COLOR"
 OUTPUT_MESH_UV_U = "MESH_UV_U"
 OUTPUT_MESH_UV_V = "MESH_UV_V"
+
+
+_selection_tracker_active = False
 
 
 def _mesh_object_poll(_self, obj):
@@ -2052,8 +2055,9 @@ class GeneratePathGradientMeshOperator(bpy.types.Operator):  # pragma: no cover 
     bl_idname = "skybrush.generate_path_gradient_mesh"
     bl_label = "Generate Curve Mesh"
     bl_description = (
-        "Create a curve with Geometry Nodes from the selected vertices and"
-        " assign it to this light effect"
+        "Create a curve with Geometry Nodes from the selection."
+        " When used on multiple objects, run once to enable selection order"
+        " tracking, select objects in order, then run again to build the curve."
     )
 
     @classmethod
@@ -2078,10 +2082,15 @@ class GeneratePathGradientMeshOperator(bpy.types.Operator):  # pragma: no cover 
         return active_obj is not None and active_obj.type == "CURVE"
 
     def execute(self, context):
+        global _selection_tracker_active
+
         entry = context.scene.skybrush.light_effects.active_entry
         try:
             edit_obj = context.edit_object
             if edit_obj is not None and edit_obj.type == "MESH":
+                if _selection_tracker_active:
+                    selection_order.unregister_selection_order_tracker()
+                    _selection_tracker_active = False
                 curve_obj = path_gradient.create_gradient_curve_from_selection()
             else:
                 selected = [
@@ -2090,9 +2099,35 @@ class GeneratePathGradientMeshOperator(bpy.types.Operator):  # pragma: no cover 
                     if obj is not None
                 ]
                 if len(selected) >= 2:
-                    curve_obj = path_gradient.create_gradient_curve_from_objects(selected)
+                    if not _selection_tracker_active:
+                        selection_order.register_selection_order_tracker()
+                        _selection_tracker_active = True
+                        self.report(
+                            {'INFO'},
+                            "Selection order tracking enabled. Select objects in the"
+                            " desired order and run the operator again to create the"
+                            " curve.",
+                        )
+                        return {'FINISHED'}
+
+                    try:
+                        ordered = selection_order.get_ordered_selected_objects()
+                        if len(ordered) < 2:
+                            raise ValueError(
+                                "Select at least two objects while order tracking is"
+                                " active."
+                            )
+                        curve_obj = path_gradient.create_gradient_curve_from_objects(
+                            ordered
+                        )
+                    finally:
+                        selection_order.unregister_selection_order_tracker()
+                        _selection_tracker_active = False
                 else:
                     active_obj = context.active_object
+                    if _selection_tracker_active:
+                        selection_order.unregister_selection_order_tracker()
+                        _selection_tracker_active = False
                     if active_obj is None or active_obj.type != "CURVE":
                         raise ValueError(
                             "Select a mesh in edit mode, multiple objects, or a curve object."
@@ -2134,6 +2169,19 @@ class CreateBoundingBoxMeshOperator(bpy.types.Operator):  # pragma: no cover - B
         description="Legacy subdivision count stored for compatibility",
         default=3,
         min=1,
+    )
+    thickness: FloatProperty(
+        name="Thickness",
+        description="Total thickness applied by the solidify modifier",
+        default=0.2,
+        min=0.0,
+        options={'HIDDEN'},
+    )
+    centered: BoolProperty(
+        name="Centered Thickness",
+        description="When enabled, solidify expands equally above and below the plane",
+        default=True,
+        options={'HIDDEN'},
     )
 
     @classmethod
@@ -2244,6 +2292,46 @@ class CreateBoundingBoxMeshOperator(bpy.types.Operator):  # pragma: no cover - B
         transform = Matrix.Translation(center_world)
         return dims, transform
 
+    def _build_delaunay_object(self, entry, ref_objs):
+        positions = delaunay.get_evaluated_world_positions(ref_objs)
+        if len(positions) < 3:
+            raise ValueError("Select at least three objects for Delaunay triangulation.")
+
+        mesh = delaunay.build_planar_mesh_from_points(positions)
+        coords = [Vector(v.co) for v in mesh.vertices]
+        center = Vector((0.0, 0.0, 0.0))
+        if coords:
+            center = sum(coords, Vector((0.0, 0.0, 0.0))) / float(len(coords))
+            for vert in mesh.vertices:
+                vert.co -= center
+        mesh.update()
+
+        data_name = pick_unique_name(f"{entry.name}_Plane", bpy.data.meshes)
+        mesh.name = data_name
+        obj_name = pick_unique_name(f"{entry.name}_bb_mesh", bpy.data.objects)
+        mesh_obj = bpy.data.objects.new(obj_name, mesh)
+        mesh_obj.matrix_world = Matrix.Translation(center)
+
+        if hasattr(mesh_obj, "display_type"):
+            mesh_obj.display_type = 'SOLID'
+        elif hasattr(mesh_obj, "display"):
+            mesh_obj.display = 'SOLID'
+
+        solid = mesh_obj.modifiers.new("SolidifyY", type='SOLIDIFY')
+        solid.thickness = max(float(self.thickness), 0.0)
+        solid.offset = 0.0 if self.centered else 1.0
+        solid.use_rim = True
+        solid.use_even_offset = True
+        for attr in ("use_quality_normals", "nonmanifold_boundary_mode"):
+            if hasattr(solid, attr):
+                try:
+                    current = getattr(solid, attr)
+                    setattr(solid, attr, True if isinstance(current, bool) else current)
+                except Exception:
+                    pass
+
+        return mesh_obj
+
     def _build_cube_mesh(self, dims):
         hx, hy, hz = (dims.x * 0.5, dims.y * 0.5, dims.z * 0.5)
         verts = [
@@ -2309,16 +2397,31 @@ class CreateBoundingBoxMeshOperator(bpy.types.Operator):  # pragma: no cover - B
             self.report({'WARNING'}, "Select one or more objects to define the mesh bounds.")
             return {'CANCELLED'}
 
-        dims, transform = self._compute_bounds(ref_objs)
-        mesh = self._build_cube_mesh(dims)
+        mesh_obj = None
+        delaunay_error = None
+        delaunay_used = False
+        try:
+            mesh_obj = self._build_delaunay_object(entry, ref_objs)
+            delaunay_used = True
+        except Exception as exc:
+            delaunay_error = exc
 
-        obj_name = pick_unique_name(f"{entry.name}_bb_mesh", bpy.data.objects)
-        mesh_obj = bpy.data.objects.new(obj_name, mesh)
-        mesh_obj.matrix_world = transform
-        if hasattr(mesh_obj, "display_type"):
-            mesh_obj.display_type = 'BOUNDS'
-        elif hasattr(mesh_obj, "display"):
-            mesh_obj.display = 'BOUNDS'
+        if mesh_obj is None:
+            dims, transform = self._compute_bounds(ref_objs)
+            mesh = self._build_cube_mesh(dims)
+
+            obj_name = pick_unique_name(f"{entry.name}_bb_mesh", bpy.data.objects)
+            mesh_obj = bpy.data.objects.new(obj_name, mesh)
+            mesh_obj.matrix_world = transform
+            if hasattr(mesh_obj, "display_type"):
+                mesh_obj.display_type = 'BOUNDS'
+            elif hasattr(mesh_obj, "display"):
+                mesh_obj.display = 'BOUNDS'
+            if delaunay_error is not None:
+                self.report(
+                    {'WARNING'},
+                    f"Falling back to bounding box mesh: {delaunay_error}",
+                )
 
         scene = context.scene
         scene.collection.objects.link(mesh_obj)
@@ -2356,7 +2459,11 @@ class CreateBoundingBoxMeshOperator(bpy.types.Operator):  # pragma: no cover - B
             except Exception:
                 pass
 
-        self.report({'INFO'}, f"Created bounding box mesh '{mesh_obj.name}'")
+        if delaunay_used:
+            message = f"Created Delaunay mesh '{mesh_obj.name}'"
+        else:
+            message = f"Created bounding box mesh '{mesh_obj.name}'"
+        self.report({'INFO'}, message)
         return {'FINISHED'}
 
 
@@ -3123,6 +3230,9 @@ def unpatch_light_effects_panel():
 # ---------------------------------------------------------------------------
 
 def register():  # pragma: no cover - executed in Blender
+    global _selection_tracker_active
+    _selection_tracker_active = False
+
     bpy.utils.register_class(SequenceDelayEntry)
     bpy.utils.register_class(DynamicArrayValue)
     bpy.utils.register_class(DynamicArrayProperty)
@@ -3146,6 +3256,11 @@ def register():  # pragma: no cover - executed in Blender
 
 
 def unregister():  # pragma: no cover - executed in Blender
+    global _selection_tracker_active
+    if _selection_tracker_active:
+        selection_order.unregister_selection_order_tracker()
+        _selection_tracker_active = False
+
     if _ensure_light_effects_initialized in bpy.app.handlers.depsgraph_update_pre:
         bpy.app.handlers.depsgraph_update_pre.remove(_ensure_light_effects_initialized)
     bpy.utils.unregister_class(ConvertCollectionToMeshOperator)
