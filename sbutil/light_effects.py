@@ -579,6 +579,67 @@ def _update_dynamic_color_ramp_point(self, _context):
         entry[ramp.name] = ramp.to_storage_list()
 
 
+def _find_sequence_delay_owner(item):
+    owner = getattr(item, "id_data", None)
+    if owner is None:
+        return None
+    skybrush = getattr(owner, "skybrush", None)
+    light_effects = getattr(getattr(skybrush, "light_effects", None), "entries", [])
+    for entry in light_effects:
+        delays = getattr(entry, "sequence_delays", None)
+        if not delays:
+            continue
+        for delay_entry in delays:
+            if delay_entry.as_pointer() == item.as_pointer():
+                return entry
+    return None
+
+
+def _update_sequence_delay_entry(self, _context):
+    entry = _find_sequence_delay_owner(self)
+    if entry is not None and hasattr(entry, "update_sequence_total_duration"):
+        entry.update_sequence_total_duration()
+
+
+def _update_sequence_duration(self, _context):
+    if hasattr(self, "update_sequence_total_duration"):
+        self.update_sequence_total_duration()
+
+
+def _update_sequence_delay(self, _context):
+    if hasattr(self, "update_sequence_total_duration"):
+        self.update_sequence_total_duration()
+
+
+def _update_sequence_manual_delay(self, _context):
+    if hasattr(self, "ensure_sequence_delay_entries"):
+        self.ensure_sequence_delay_entries(update_total=False)
+    if hasattr(self, "update_sequence_total_duration"):
+        self.update_sequence_total_duration()
+
+
+def _update_sequence_mask_collection(self, _context):
+    if hasattr(self, "ensure_sequence_delay_entries"):
+        self.ensure_sequence_delay_entries(update_total=False)
+    if hasattr(self, "update_sequence_total_duration"):
+        self.update_sequence_total_duration()
+
+
+def _update_sequence_mode(self, _context):
+    if hasattr(self, "ensure_sequence_delay_entries"):
+        self.ensure_sequence_delay_entries(update_total=False)
+    if getattr(self, "sequence_mode", False) and hasattr(self, "sequence_duration"):
+        try:
+            current_duration = max(int(getattr(self, "duration", 0)), 1)
+        except (TypeError, ValueError):
+            current_duration = 1
+        existing_duration = getattr(self, "sequence_duration", 0)
+        if existing_duration <= 0 or existing_duration == DEFAULT_LIGHT_EFFECT_DURATION:
+            self.sequence_duration = current_duration
+    if hasattr(self, "update_sequence_total_duration"):
+        self.update_sequence_total_duration()
+
+
 def initialize_color_function(pg) -> None:
     """Load the color function module and create config schema.
 
@@ -861,7 +922,7 @@ def _ensure_light_effects_initialized(_dummy=None):  # pragma: no cover - Blende
 
 
 class SequenceDelayEntry(PropertyGroup):
-    delay = IntProperty(name="Delay", default=0, min=0)
+    delay: IntProperty(name="Delay", default=0, min=0, update=_update_sequence_delay_entry)
 
 
 class DynamicArrayValue(PropertyGroup):
@@ -1053,22 +1114,33 @@ class PatchedLightEffect(PropertyGroup):
         name="Sequence Mode",
         description="Enable sequential playback across multiple mask meshes",
         default=False,
+        update=_update_sequence_mode,
     )
     sequence_mask_collection = PointerProperty(
         name="Mask Collection",
         description="Collection that stores meshes participating in the sequence",
         type=bpy.types.Collection,
+        update=_update_sequence_mask_collection,
+    )
+    sequence_duration = IntProperty(
+        name="Sequence Duration",
+        description="Duration of each individual sequence entry",
+        default=DEFAULT_LIGHT_EFFECT_DURATION,
+        min=1,
+        update=_update_sequence_duration,
     )
     sequence_delay = IntProperty(
         name="Delay",
         description="Delay between the start frames of consecutive sequence entries",
         default=0,
         min=0,
+        update=_update_sequence_delay,
     )
     sequence_manual_delay = BoolProperty(
         name="Manual Delay",
         description="Allow specifying individual delays between each pair of sequence entries",
         default=False,
+        update=_update_sequence_manual_delay,
     )
     sequence_delays = CollectionProperty(
         name="Sequence Delays",
@@ -1086,7 +1158,40 @@ class PatchedLightEffect(PropertyGroup):
         type=DynamicColorRamp,
     )
 
-    def ensure_sequence_delay_entries(self, count: int | None = None) -> None:
+    def update_sequence_total_duration(self) -> None:
+        if not getattr(self, "sequence_mode", False):
+            return
+        try:
+            base_duration = max(int(getattr(self, "sequence_duration", 0)), 0)
+        except (TypeError, ValueError):
+            base_duration = 0
+        if base_duration <= 0:
+            base_duration = 1
+
+        meshes = self.get_sequence_meshes()
+        mesh_pairs = max(len(meshes) - 1, 0)
+        total_delay = 0
+        if mesh_pairs > 0:
+            if getattr(self, "sequence_manual_delay", False):
+                self.ensure_sequence_delay_entries(mesh_pairs, update_total=False)
+                for delay_entry in self.sequence_delays[:mesh_pairs]:
+                    try:
+                        total_delay += max(int(getattr(delay_entry, "delay", 0)), 0)
+                    except (TypeError, ValueError):
+                        continue
+            else:
+                try:
+                    per_delay = max(int(getattr(self, "sequence_delay", 0)), 0)
+                except (TypeError, ValueError):
+                    per_delay = 0
+                total_delay = per_delay * mesh_pairs
+
+        total_duration = max(base_duration + total_delay, 1)
+        self.duration = total_duration
+
+    def ensure_sequence_delay_entries(
+        self, count: int | None = None, *, update_total: bool = True
+    ) -> None:
         meshes = self.get_sequence_meshes()
         desired = max(len(meshes) - 1, 0) if count is None else max(count, 0)
         current = len(self.sequence_delays)
@@ -1097,6 +1202,8 @@ class PatchedLightEffect(PropertyGroup):
         elif current > desired:
             for _ in range(current - desired):
                 self.sequence_delays.remove(len(self.sequence_delays) - 1)
+        if update_total:
+            self.update_sequence_total_duration()
 
     def get_sequence_meshes(self) -> list[bpy.types.Object]:
         collection = getattr(self, "sequence_mask_collection", None)
@@ -1544,7 +1651,15 @@ class PatchedLightEffect(PropertyGroup):
         has_frame_end = hasattr(self, "frame_end")
         original_end = getattr(self, "frame_end", None) if has_frame_end else None
         chunk_start = original_start
-        duration_span = max(original_duration - 1, 0)
+        sequence_duration_value = getattr(self, "sequence_duration", original_duration)
+        try:
+            sequence_duration = max(int(sequence_duration_value), 1)
+        except (TypeError, ValueError):
+            try:
+                sequence_duration = max(int(original_duration), 1)
+            except (TypeError, ValueError):
+                sequence_duration = 1
+        duration_span = max(sequence_duration - 1, 0)
         for index, mesh in enumerate(meshes):
             if index > 0:
                 delay = (
@@ -1557,7 +1672,7 @@ class PatchedLightEffect(PropertyGroup):
             if frame < chunk_start or frame > chunk_end:
                 continue
             self.frame_start = chunk_start
-            self.duration = original_duration
+            self.duration = sequence_duration
             self.mesh = mesh
             apply_single_mode()
         self.frame_start = original_start
@@ -1587,6 +1702,12 @@ def calculate_effective_sequence_span(effect) -> tuple[int | None, int | None]:
         return getattr(effect, "frame_end", None), duration
 
     duration_span = max(duration_i - 1, 0)
+    sequence_duration_value = getattr(effect, "sequence_duration", duration_i)
+    try:
+        sequence_duration_i = max(int(sequence_duration_value), 0)
+    except (TypeError, ValueError):
+        sequence_duration_i = duration_i
+    sequence_span = max(sequence_duration_i - 1, 0)
     has_frame_end = hasattr(effect, "frame_end")
     original_end = getattr(effect, "frame_end", None) if has_frame_end else None
     total_end = (
@@ -1609,7 +1730,7 @@ def calculate_effective_sequence_span(effect) -> tuple[int | None, int | None]:
 
     delays = list(get_delays())
     chunk_start = frame_start_i
-    total_end = max(total_end, frame_start_i + duration_span)
+    total_end = max(total_end, frame_start_i + sequence_span)
     for index in range(1, len(meshes)):
         delay = delays[index - 1] if index - 1 < len(delays) else getattr(effect, "sequence_delay", 0)
         try:
@@ -1617,10 +1738,10 @@ def calculate_effective_sequence_span(effect) -> tuple[int | None, int | None]:
         except (TypeError, ValueError):
             delay_i = 0
         chunk_start += delay_i
-        chunk_end = chunk_start + duration_span
+        chunk_end = chunk_start + sequence_span
         total_end = max(total_end, chunk_end)
 
-    total_duration = max(total_end - frame_start_i + 1, duration_i)
+    total_duration = max(total_end - frame_start_i + 1, duration_i, sequence_duration_i)
     return total_end, total_duration
 
 def patch_light_effect_class():
@@ -1646,6 +1767,7 @@ def patch_light_effect_class():
     LightEffect.color_function_text = PatchedLightEffect.color_function_text
     LightEffect.sequence_mode = PatchedLightEffect.sequence_mode
     LightEffect.sequence_mask_collection = PatchedLightEffect.sequence_mask_collection
+    LightEffect.sequence_duration = PatchedLightEffect.sequence_duration
     LightEffect.sequence_delay = PatchedLightEffect.sequence_delay
     LightEffect.sequence_manual_delay = PatchedLightEffect.sequence_manual_delay
     LightEffect.sequence_delays = PatchedLightEffect.sequence_delays
@@ -1654,6 +1776,9 @@ def patch_light_effect_class():
     )
     LightEffect.get_sequence_meshes = PatchedLightEffect.get_sequence_meshes
     LightEffect.get_sequence_delays = PatchedLightEffect.get_sequence_delays
+    LightEffect.update_sequence_total_duration = (
+        PatchedLightEffect.update_sequence_total_duration
+    )
     LightEffect.apply_on_colors = PatchedLightEffect.apply_on_colors
     LightEffect.color_function_ref = PatchedLightEffect.color_function_ref
     LightEffect.draw_color_function_config = (
@@ -1741,6 +1866,7 @@ def patch_light_effect_class():
     LightEffect.__annotations__["sequence_mask_collection"] = (
         LightEffect.sequence_mask_collection
     )
+    LightEffect.__annotations__["sequence_duration"] = LightEffect.sequence_duration
     LightEffect.__annotations__["sequence_delay"] = LightEffect.sequence_delay
     LightEffect.__annotations__["sequence_manual_delay"] = (
         LightEffect.sequence_manual_delay
@@ -1765,12 +1891,14 @@ def unpatch_light_effect_class():
         "color_function_text",
         "sequence_mode",
         "sequence_mask_collection",
+        "sequence_duration",
         "sequence_delay",
         "sequence_manual_delay",
         "sequence_delays",
         "ensure_sequence_delay_entries",
         "get_sequence_meshes",
         "get_sequence_delays",
+        "update_sequence_total_duration",
     ):
         if hasattr(LightEffect, attr):
             delattr(LightEffect, attr)
@@ -2879,6 +3007,7 @@ class PatchedLightEffectsPanel(Panel):  # pragma: no cover - Blender UI code
             col.prop(entry, "sequence_mode")
             if getattr(entry, "sequence_mode", False):
                 col.prop(entry, "sequence_mask_collection", text="Mask Collection")
+                col.prop(entry, "sequence_duration")
                 if not entry.sequence_manual_delay:
                     col.prop(entry, "sequence_delay")
                 col.prop(entry, "sequence_manual_delay")
