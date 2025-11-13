@@ -2413,9 +2413,11 @@ class CreateBoundingBoxMeshOperator(bpy.types.Operator):  # pragma: no cover - B
         mesh_obj.matrix_world = Matrix.Translation(center)
 
         if hasattr(mesh_obj, "display_type"):
-            mesh_obj.display_type = 'SOLID'
+            mesh_obj.display_type = 'BOUNDS'
         elif hasattr(mesh_obj, "display"):
-            mesh_obj.display = 'SOLID'
+            mesh_obj.display = 'BOUNDS'
+        if hasattr(mesh_obj, "hide_render"):
+            mesh_obj.hide_render = True
 
         solid = mesh_obj.modifiers.new("SolidifyY", type='SOLIDIFY')
         solid.thickness = max(float(self.thickness), 0.0)
@@ -2497,39 +2499,6 @@ class CreateBoundingBoxMeshOperator(bpy.types.Operator):  # pragma: no cover - B
             self.report({'WARNING'}, "Select one or more objects to define the mesh bounds.")
             return {'CANCELLED'}
 
-        mesh_obj = None
-        delaunay_error = None
-        delaunay_used = False
-        try:
-            mesh_obj = self._build_delaunay_object(entry, ref_objs)
-            delaunay_used = True
-        except Exception as exc:
-            delaunay_error = exc
-
-        if mesh_obj is None:
-            dims, transform = self._compute_bounds(ref_objs)
-            mesh = self._build_cube_mesh(dims)
-
-            obj_name = pick_unique_name(f"{entry.name}_bb_mesh", bpy.data.objects)
-            mesh_obj = bpy.data.objects.new(obj_name, mesh)
-            mesh_obj.matrix_world = transform
-            if hasattr(mesh_obj, "display_type"):
-                mesh_obj.display_type = 'BOUNDS'
-            elif hasattr(mesh_obj, "display"):
-                mesh_obj.display = 'BOUNDS'
-            if delaunay_error is not None:
-                self.report(
-                    {'WARNING'},
-                    f"Falling back to bounding box mesh: {delaunay_error}",
-                )
-
-        scene = context.scene
-        scene.collection.objects.link(mesh_obj)
-
-        for modifier in list(getattr(mesh_obj, "modifiers", [])):
-            if modifier.type == 'NODES' and modifier.name == "Sample UV Subdivide":
-                mesh_obj.modifiers.remove(modifier)
-
         mode = getattr(self, "assign_mode", "AUTO")
         assign_to_uv = False
         assign_to_mesh = False
@@ -2546,6 +2515,49 @@ class CreateBoundingBoxMeshOperator(bpy.types.Operator):  # pragma: no cover - B
                     )
                 except Exception:
                     assign_to_uv = False
+
+        mesh_obj = None
+        delaunay_error = None
+        delaunay_used = False
+        if not assign_to_uv:
+            try:
+                mesh_obj = self._build_delaunay_object(entry, ref_objs)
+                delaunay_used = True
+            except Exception as exc:
+                delaunay_error = exc
+
+        if mesh_obj is None:
+            dims, transform = self._compute_bounds(ref_objs)
+            mesh = self._build_cube_mesh(dims)
+
+            obj_name = pick_unique_name(f"{entry.name}_bb_mesh", bpy.data.objects)
+            mesh_obj = bpy.data.objects.new(obj_name, mesh)
+            mesh_obj.matrix_world = transform
+            if hasattr(mesh_obj, "display_type"):
+                mesh_obj.display_type = 'BOUNDS'
+            elif hasattr(mesh_obj, "display"):
+                mesh_obj.display = 'BOUNDS'
+            if hasattr(mesh_obj, "hide_render"):
+                mesh_obj.hide_render = True
+            if delaunay_error is not None:
+                self.report(
+                    {'WARNING'},
+                    f"Falling back to bounding box mesh: {delaunay_error}",
+                )
+
+        scene = context.scene
+        scene.collection.objects.link(mesh_obj)
+
+        for modifier in list(getattr(mesh_obj, "modifiers", [])):
+            if modifier.type == 'NODES' and modifier.name == "Sample UV Subdivide":
+                mesh_obj.modifiers.remove(modifier)
+
+        if hasattr(mesh_obj, "display_type"):
+            mesh_obj.display_type = 'BOUNDS'
+        elif hasattr(mesh_obj, "display"):
+            mesh_obj.display = 'BOUNDS'
+        if hasattr(mesh_obj, "hide_render"):
+            mesh_obj.hide_render = True
         if assign_to_uv:
             try:
                 entry.uv_mesh = mesh_obj
