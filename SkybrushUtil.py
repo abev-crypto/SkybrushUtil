@@ -19,6 +19,7 @@ from sbstudio.plugin.operators.base import StoryboardOperator
 from sbutil import light_effects as light_effects_patch
 from sbutil import CSV2Vertex
 from sbutil import reflow_vertex
+from sbutil import drone_check_gn
 
 try:  # pragma: no cover - depends on sbstudio
     from sbstudio.plugin.operators.safety_check import RunFullProximityCheckOperator
@@ -1477,6 +1478,9 @@ class DRONE_PT_Utilities(Panel):
         )
         layout.operator("mesh.reflow_vertices", text="Reflow Vertices")
         layout.operator("mesh.repel_from_neighbors", text="Repel From Neighbors")
+        layout.separator()
+        layout.operator("drone.apply_drone_check_gn", text="Apply Drone Check GN")
+        layout.operator("drone.remove_drone_check_gn", text="Remove Drone Check GN")
 
 # -------------------------------
 # Add-on Preferences
@@ -1545,6 +1549,7 @@ def register():
     light_effects_patch.register()
     CSV2Vertex.register()
     reflow_vertex.register()
+    drone_check_gn.register()
     bpy.app.timers.register(try_patch)
     bpy.app.handlers.load_post.append(_on_load_post)
     if _auto_run_proximity_check not in bpy.app.handlers.frame_change_post:
@@ -1561,6 +1566,7 @@ def unregister():
     light_effects_patch.unregister()
     CSV2Vertex.unregister()
     reflow_vertex.unregister()
+    drone_check_gn.unregister()
 
     # ハンドラ除去（存在チェック）
     if _on_load_post in bpy.app.handlers.load_post:
