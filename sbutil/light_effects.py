@@ -83,6 +83,18 @@ OUTPUT_MESH_UV_V = "MESH_UV_V"
 _selection_tracker_active = False
 
 
+def linear_to_srgb(value: float) -> float:
+    """Convert a linear RGB channel value to sRGB."""
+
+    if value < 0.0:
+        value = 0.0
+    elif value > 1.0:
+        value = 1.0
+    if value < 0.0031308:
+        return 12.92 * value
+    return 1.055 * (value ** (1.0 / 2.4)) - 0.055
+
+
 def _mesh_object_poll(_self, obj):
     return obj is None or getattr(obj, "type", "") == "MESH"
 
@@ -1201,6 +1213,13 @@ class PatchedLightEffect(PropertyGroup):
     color_function_text = PointerProperty(
         name="Color Function Text", type=bpy.types.Text
     )
+    convert_srgb = BoolProperty(
+        name="Convert sRGB",
+        description=(
+            "Convert colors sampled from images from linear space to sRGB"
+        ),
+        default=False,
+    )
     sequence_mode = BoolProperty(
         name="Sequence Mode",
         description="Enable sequential playback across multiple mask meshes",
@@ -1733,6 +1752,9 @@ class PatchedLightEffect(PropertyGroup):
                     y = int((height - 1) * output_y)
                     offset = (y * width + x) * 4
                     new_color[:] = pixels[offset : offset + 4]
+                    if getattr(self, "convert_srgb", False):
+                        for idx in range(3):
+                            new_color[idx] = linear_to_srgb(new_color[idx])
                 elif color_ramp:
                     loops = max(self.loop_count, 1)
                     if loops > 1 or self.loop_method != "FORWARD":
@@ -1882,6 +1904,7 @@ def patch_light_effect_class():
     LightEffect.loop_count = PatchedLightEffect.loop_count
     LightEffect.loop_method = PatchedLightEffect.loop_method
     LightEffect.color_function_text = PatchedLightEffect.color_function_text
+    LightEffect.convert_srgb = PatchedLightEffect.convert_srgb
     LightEffect.sequence_mode = PatchedLightEffect.sequence_mode
     LightEffect.sequence_mask_collection = PatchedLightEffect.sequence_mask_collection
     LightEffect.sequence_duration = PatchedLightEffect.sequence_duration
@@ -1981,6 +2004,7 @@ def patch_light_effect_class():
     LightEffect.__annotations__["loop_count"] = LightEffect.loop_count
     LightEffect.__annotations__["loop_method"] = LightEffect.loop_method
     LightEffect.__annotations__["color_function_text"] = LightEffect.color_function_text
+    LightEffect.__annotations__["convert_srgb"] = LightEffect.convert_srgb
     LightEffect.__annotations__["sequence_mode"] = LightEffect.sequence_mode
     LightEffect.__annotations__["sequence_mask_collection"] = (
         LightEffect.sequence_mask_collection
@@ -2008,6 +2032,7 @@ def unpatch_light_effect_class():
         "loop_count",
         "loop_method",
         "color_function_text",
+        "convert_srgb",
         "sequence_mode",
         "sequence_mask_collection",
         "sequence_duration",
@@ -3301,6 +3326,7 @@ class PatchedLightEffectsPanel(Panel):  # pragma: no cover - Blender UI code
                         icon="MESH_CUBE",
                     )
                     op_uv_y.assign_mode = "UV"
+                col.prop(entry, "convert_srgb")
             if output_type_supports_mapping_mode(entry.output_y):
                 col.prop(entry, "output_mapping_mode_y")
             col.prop(entry, "target")
