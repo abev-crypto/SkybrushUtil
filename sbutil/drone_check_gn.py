@@ -1,6 +1,8 @@
 import bpy
 
 NODE_GROUP_NAME = "CamRing_GN"
+TARGET_COLLECTION_NAME = "Drones"
+SUPPORTED_TYPES = {'MESH', 'CURVE', 'SURFACE', 'FONT', 'POINTCLOUD'}
 
 
 def ensure_node_group():
@@ -125,15 +127,133 @@ def ensure_node_group():
     return ng
 
 
-def add_modifier_to_selected():
-    """選択オブジェクトすべてに Geometry Nodes モディファイアを追加"""
+def _iter_collection_objects(collection):
+    """コレクション配下（入れ子含む）のオブジェクトを重複なく列挙"""
+
+    seen = set()
+    stack = [collection]
+    while stack:
+        col = stack.pop()
+        for obj in col.objects:
+            if obj.name not in seen:
+                seen.add(obj.name)
+                yield obj
+        stack.extend(col.children)
+
+
+def get_target_objects():
+    """Drones コレクション配下の対象オブジェクトを返す"""
+
+    collection = bpy.data.collections.get(TARGET_COLLECTION_NAME)
+    if collection is None:
+        return []
+    return [obj for obj in _iter_collection_objects(collection) if obj.type in SUPPORTED_TYPES]
+
+
+def add_modifier_to_drones():
+    """Drones コレクション内のオブジェクトに Geometry Nodes モディファイアを追加"""
+
+    objects = get_target_objects()
+    if not objects:
+        return 0
+
     ng = ensure_node_group()
-    for obj in bpy.context.selected_objects:
-        if obj.type not in {'MESH', 'CURVE', 'SURFACE', 'FONT', 'POINTCLOUD'}:
-            continue
-        mod = obj.modifiers.new(name=NODE_GROUP_NAME, type='NODES')
-        mod.node_group = ng
+    count = 0
+    for obj in objects:
+        existing = next(
+            (
+                mod
+                for mod in obj.modifiers
+                if mod.type == 'NODES'
+                and (mod.name == NODE_GROUP_NAME or getattr(mod.node_group, "name", "") == NODE_GROUP_NAME)
+            ),
+            None,
+        )
+        if existing is None:
+            existing = obj.modifiers.new(name=NODE_GROUP_NAME, type='NODES')
+        existing.node_group = ng
+        count += 1
+    return count
+
+
+def remove_modifier_from_drones():
+    """Drones コレクション内から対象ジオメトリノードモディファイアを削除"""
+
+    objects = get_target_objects()
+    removed = 0
+    for obj in objects:
+        modifiers = [
+            mod
+            for mod in obj.modifiers
+            if mod.type == 'NODES'
+            and (mod.name == NODE_GROUP_NAME or getattr(mod.node_group, "name", "") == NODE_GROUP_NAME)
+        ]
+        for mod in modifiers:
+            obj.modifiers.remove(mod)
+            removed += 1
+
+    # 使われなくなったノードグループがあれば削除
+    if NODE_GROUP_NAME in bpy.data.node_groups:
+        node_group = bpy.data.node_groups[NODE_GROUP_NAME]
+        if not node_group.users:
+            bpy.data.node_groups.remove(node_group, do_unlink=True)
+
+    return removed
+
+
+class DRONE_OT_apply_drone_check_gn(bpy.types.Operator):
+    bl_idname = "drone.apply_drone_check_gn"
+    bl_label = "Apply Drone Check GN"
+    bl_description = "Dronesコレクション内のオブジェクトへ CamRing_GN モディファイアを追加"
+
+    def execute(self, context):
+        try:
+            count = add_modifier_to_drones()
+        except Exception as exc:  # pragma: no cover - Blender runtime error
+            self.report({'ERROR'}, str(exc))
+            return {'CANCELLED'}
+
+        if count == 0:
+            self.report({'WARNING'}, "対象オブジェクトが見つかりませんでした")
+        else:
+            self.report({'INFO'}, f"{count} 件のモディファイアを設定しました")
+        return {'FINISHED'}
+
+
+class DRONE_OT_remove_drone_check_gn(bpy.types.Operator):
+    bl_idname = "drone.remove_drone_check_gn"
+    bl_label = "Remove Drone Check GN"
+    bl_description = "Dronesコレクション内から CamRing_GN モディファイアを削除"
+
+    def execute(self, context):
+        try:
+            removed = remove_modifier_from_drones()
+        except Exception as exc:  # pragma: no cover - Blender runtime error
+            self.report({'ERROR'}, str(exc))
+            return {'CANCELLED'}
+
+        if removed == 0:
+            self.report({'WARNING'}, "削除対象のモディファイアが見つかりませんでした")
+        else:
+            self.report({'INFO'}, f"{removed} 件のモディファイアを削除しました")
+        return {'FINISHED'}
+
+
+classes = (
+    DRONE_OT_apply_drone_check_gn,
+    DRONE_OT_remove_drone_check_gn,
+)
+
+
+def register():
+    for cls in classes:
+        bpy.utils.register_class(cls)
+
+
+def unregister():
+    for cls in reversed(classes):
+        bpy.utils.unregister_class(cls)
 
 
 if __name__ == "__main__":
-    add_modifier_to_selected()
+    add_modifier_to_drones()
