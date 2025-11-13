@@ -1366,7 +1366,7 @@ class PatchedLightEffect(PropertyGroup):
     ) -> None:
         ensure_color_function_initialized(self)
 
-        def apply_single_mode() -> None:
+        def apply_single_mode(*, clamp_temporal_to_duration: bool = False) -> None:
             def get_output_based_on_output_type(
                 output_type: str,
                 mapping_mode: str,
@@ -1515,10 +1515,27 @@ class PatchedLightEffect(PropertyGroup):
                     common_output = 1.0
                 return outputs, common_output
 
-            if not self.enabled or not self.contains_frame(frame):
+            if not self.enabled:
                 return
 
-            time_fraction = (frame - self.frame_start) / max(self.duration - 1, 1)
+            effective_frame = frame
+            if clamp_temporal_to_duration:
+                start_frame = self.frame_start
+                duration_span = max(self.duration - 1, 0)
+                if duration_span <= 0:
+                    effective_frame = start_frame
+                else:
+                    end_frame = start_frame + duration_span
+                    if frame < start_frame:
+                        effective_frame = start_frame
+                    elif frame > end_frame:
+                        effective_frame = end_frame
+            elif not self.contains_frame(frame):
+                return
+
+            time_fraction = (effective_frame - self.frame_start) / max(
+                self.duration - 1, 1
+            )
             num_positions = len(positions)
             color_ramp = self.color_ramp
             color_image = self.color_image
@@ -1621,7 +1638,13 @@ class PatchedLightEffect(PropertyGroup):
                         offset_y = (random_seq.get_float(index) - 0.5) * self.randomness
                         output_y = (offset_y + output_y) % 1.0
                 alpha = max(
-                    min(self._evaluate_influence_at(position, frame, condition), 1.0), 0.0
+                    min(
+                        self._evaluate_influence_at(
+                            position, effective_frame, condition
+                        ),
+                        1.0,
+                    ),
+                    0.0,
                 )
                 if getattr(self, "color_function_text", None):
                     ctx = st.get("module", ModuleType("_dummy")).__dict__
@@ -1716,12 +1739,10 @@ class PatchedLightEffect(PropertyGroup):
                 )
                 chunk_start += max(delay, 0)
             chunk_end = chunk_start + duration_span
-            if frame < chunk_start or frame > chunk_end:
-                continue
             self.frame_start = chunk_start
             self.duration = sequence_duration
             self.mesh = mesh
-            apply_single_mode()
+            apply_single_mode(clamp_temporal_to_duration=True)
         self.frame_start = original_start
         self.duration = original_duration
         self.mesh = original_mesh
