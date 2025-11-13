@@ -1839,19 +1839,21 @@ def patch_light_effect_class():
     LightEffect.sequence_delay = PatchedLightEffect.sequence_delay
     LightEffect.sequence_manual_delay = PatchedLightEffect.sequence_manual_delay
     LightEffect.sequence_delays = PatchedLightEffect.sequence_delays
-    LightEffect.ensure_sequence_delay_entries = (
-        PatchedLightEffect.ensure_sequence_delay_entries
-    )
+    LightEffect.ensure_sequence_delay_entries = PatchedLightEffect.ensure_sequence_delay_entries
     LightEffect.get_sequence_meshes = PatchedLightEffect.get_sequence_meshes
     LightEffect.get_sequence_delays = PatchedLightEffect.get_sequence_delays
-    LightEffect.update_sequence_total_duration = (
-        PatchedLightEffect.update_sequence_total_duration
-    )
+    LightEffect.update_sequence_total_duration = PatchedLightEffect.update_sequence_total_duration
     LightEffect.apply_on_colors = PatchedLightEffect.apply_on_colors
     LightEffect.color_function_ref = PatchedLightEffect.color_function_ref
-    LightEffect.draw_color_function_config = (
-        PatchedLightEffect.draw_color_function_config
-    )
+    LightEffect.draw_color_function_config = PatchedLightEffect.draw_color_function_config
+    LightEffect._get_dynamic_array = PatchedLightEffect._get_dynamic_array
+    LightEffect.ensure_dynamic_array = PatchedLightEffect.ensure_dynamic_array
+    LightEffect.get_dynamic_array_value = PatchedLightEffect.get_dynamic_array_value
+    LightEffect._get_dynamic_color_ramp = PatchedLightEffect._get_dynamic_color_ramp
+    LightEffect.ensure_dynamic_color_ramp = PatchedLightEffect.ensure_dynamic_color_ramp
+    LightEffect.get_dynamic_color_ramp_value = PatchedLightEffect.get_dynamic_color_ramp_value
+    LightEffect.dynamic_arrays = PatchedLightEffect.dynamic_arrays
+    LightEffect.dynamic_color_ramps = PatchedLightEffect.dynamic_color_ramps
     LightEffect.original_output = getattr(LightEffect, "output", None)
     LightEffect.output = EnumProperty(
         name="Output X",
