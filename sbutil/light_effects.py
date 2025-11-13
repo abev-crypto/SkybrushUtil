@@ -116,6 +116,8 @@ def use_b_mesh(mesh):  # pragma: no cover - Blender integration
 
 _state: dict[int, dict] = {}
 _delayed_id_property_updates: set[tuple[int, str]] = set()
+_pending_dynamic_array_updates: dict[int, tuple] = {}
+_dynamic_array_timer_running = False
 
 
 def _schedule_id_property_update(pg, name: str, value):
@@ -138,6 +140,41 @@ def _schedule_id_property_update(pg, name: str, value):
         return None
 
     _delayed_id_property_updates.add(key)
+    timers.register(_apply, first_interval=0.0)
+
+
+def _schedule_dynamic_array_update(array, payload):
+    """Apply ``payload`` to ``array`` once data blocks become writable."""
+
+    global _dynamic_array_timer_running
+
+    _pending_dynamic_array_updates[array.as_pointer()] = (array,) + payload
+
+    if _dynamic_array_timer_running:
+        return
+
+    def _apply():
+        global _dynamic_array_timer_running
+        if not _pending_dynamic_array_updates:
+            _dynamic_array_timer_running = False
+            return None
+
+        for pointer, values in list(_pending_dynamic_array_updates.items()):
+            array_obj = values[0]
+            try:
+                _apply_dynamic_array_values(array_obj, *values[1:])
+            except (AttributeError, RuntimeError, ReferenceError):
+                continue
+            else:
+                _pending_dynamic_array_updates.pop(pointer, None)
+
+        if _pending_dynamic_array_updates:
+            return 0.1
+
+        _dynamic_array_timer_running = False
+        return None
+
+    _dynamic_array_timer_running = True
     timers.register(_apply, first_interval=0.0)
 
 
@@ -1052,6 +1089,17 @@ class DynamicArrayValue(PropertyGroup):
         return float(value)
 
 
+def _apply_dynamic_array_values(array, item_type: str, item_length: int, sanitized_values: Sequence):
+    """Assign ``sanitized_values`` to ``array`` with the given metadata."""
+
+    array.item_type = item_type
+    array.item_length = item_length
+    array.values.clear()
+    for item in sanitized_values:
+        arr_item = array.values.add()
+        arr_item.set_value(item_type, item, item_length)
+
+
 class DynamicArrayProperty(PropertyGroup):
     name: StringProperty(name="Name", default="")
     item_type: StringProperty(name="Item Type", default="FLOAT")
@@ -1059,13 +1107,14 @@ class DynamicArrayProperty(PropertyGroup):
     values: CollectionProperty(type=DynamicArrayValue)
 
     def set_from_python(self, data, meta):
-        self.item_type = meta.get("item_type", "FLOAT")
-        self.item_length = int(meta.get("item_length", 1))
-        sanitized = _sanitize_array_value(data, meta)
-        self.values.clear()
-        for item in sanitized:
-            arr_item = self.values.add()
-            arr_item.set_value(self.item_type, item, self.item_length)
+        item_type = meta.get("item_type", "FLOAT")
+        item_length = int(meta.get("item_length", 1))
+        sanitized = list(_sanitize_array_value(data, meta))
+
+        try:
+            _apply_dynamic_array_values(self, item_type, item_length, sanitized)
+        except (AttributeError, RuntimeError, ReferenceError):
+            _schedule_dynamic_array_update(self, (item_type, item_length, sanitized))
 
     def append_default(self, meta):
         default_value = meta.get("item_default", _default_item_for_type(self.item_type))
