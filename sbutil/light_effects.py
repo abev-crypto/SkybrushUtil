@@ -90,6 +90,10 @@ def linear_to_srgb(value: float) -> float:
         value = 0.0
     elif value > 1.0:
         value = 1.0
+
+    if value <= 0.04045:
+        return value / 12.92
+    return ((value + 0.055) / 1.055) ** 2.4
     if value < 0.0031308:
         return 12.92 * value
     return 1.055 * (value ** (1.0 / 2.4)) - 0.055
