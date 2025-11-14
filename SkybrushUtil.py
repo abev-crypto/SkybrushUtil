@@ -1481,6 +1481,15 @@ class DRONE_PT_Utilities(Panel):
         layout.operator("mesh.repel_from_neighbors", text="Repel From Neighbors")
         layout.separator()
         layout.operator("drone.apply_drone_check_gn", text="Apply Drone Check GN")
+        row = layout.row(align=True)
+        row.operator(
+            "drone.enable_drone_check_circle",
+            text="Enable Check Circle",
+        )
+        row.operator(
+            "drone.disable_drone_check_circle",
+            text="Disable Check Circle",
+        )
         layout.operator("drone.remove_drone_check_gn", text="Remove Drone Check GN")
         layout.separator()
         if hasattr(context.scene, "sbutil_camera_margin"):

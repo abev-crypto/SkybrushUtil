@@ -3,6 +3,66 @@ import bpy
 NODE_GROUP_NAME = "CamRing_GN"
 TARGET_COLLECTION_NAME = "Drones"
 SUPPORTED_TYPES = {'MESH', 'CURVE', 'SURFACE', 'FONT', 'POINTCLOUD'}
+CHECK_CIRCLE_SOCKET_NAME = "Check Circle"
+
+
+def _is_drone_check_modifier(mod):
+    return mod.type == 'NODES' and (
+        mod.name == NODE_GROUP_NAME or getattr(mod.node_group, "name", "") == NODE_GROUP_NAME
+    )
+
+
+def _iter_drone_check_modifiers(objects):
+    for obj in objects:
+        for mod in obj.modifiers:
+            if _is_drone_check_modifier(mod):
+                yield obj, mod
+
+
+def _resolve_socket_key(modifier, identifier):
+    """モディファイア内で Check Circle ソケットに対応するキー名を返す"""
+
+    keys = tuple(modifier.keys())
+    if identifier in keys:
+        return identifier
+
+    fallback_names = (
+        CHECK_CIRCLE_SOCKET_NAME,
+        CHECK_CIRCLE_SOCKET_NAME.replace(" ", "_"),
+        CHECK_CIRCLE_SOCKET_NAME.lower().replace(" ", "_"),
+    )
+    for name in fallback_names:
+        if name in keys:
+            return name
+
+    node_group = getattr(modifier, "node_group", None)
+    if not node_group:
+        return None
+
+    interface = getattr(node_group, "interface", None)
+    if not interface:
+        return None
+
+    items_tree = getattr(interface, "items_tree", None)
+    if items_tree is None:
+        return None
+
+    index = 1
+    for item in items_tree:
+        if getattr(item, "item_type", None) != 'SOCKET' or getattr(item, "in_out", None) != 'INPUT':
+            continue
+        if item.name == CHECK_CIRCLE_SOCKET_NAME:
+            for prefix in ("Input", "Socket"):
+                key = f"{prefix}_{index}"
+                if key in keys:
+                    return key
+            break
+        index += 1
+
+    return None
+
+
+CHECK_CIRCLE_SOCKET_IDENTIFIER = None
 
 
 def ensure_node_group():
@@ -37,8 +97,14 @@ def ensure_node_group():
     nodes.clear()
 
     interface = ng.interface
-    c_cir = interface.new_socket(name="Check Circle", in_out='INPUT', socket_type='NodeSocketBool')
+    c_cir = interface.new_socket(
+        name=CHECK_CIRCLE_SOCKET_NAME,
+        in_out='INPUT',
+        socket_type='NodeSocketBool',
+    )
     c_cir.default_value = True  # デフォルトは従来通り 0〜1 グラデ
+    global CHECK_CIRCLE_SOCKET_IDENTIFIER
+    CHECK_CIRCLE_SOCKET_IDENTIFIER = c_cir.identifier
 
     # ───────────────── Group In / Out ─────────────────
     n_in = nodes.new("NodeGroupInput")
@@ -129,7 +195,7 @@ def ensure_node_group():
 
     links.new(join_geo.outputs["Geometry"], switch.inputs["True"])
     links.new(scale_elem.outputs["Geometry"], switch.inputs["False"])
-    links.new(n_in.outputs['Check Circle'], switch.inputs["Switch"])
+    links.new(n_in.outputs[CHECK_CIRCLE_SOCKET_NAME], switch.inputs["Switch"])
 
     # Join → Set Material Index → Group Output
     links.new(switch.outputs["Output"], set_mat_index.inputs["Geometry"])
@@ -175,8 +241,7 @@ def add_modifier_to_drones():
             (
                 mod
                 for mod in obj.modifiers
-                if mod.type == 'NODES'
-                and (mod.name == NODE_GROUP_NAME or getattr(mod.node_group, "name", "") == NODE_GROUP_NAME)
+                if _is_drone_check_modifier(mod)
             ),
             None,
         )
@@ -187,21 +252,44 @@ def add_modifier_to_drones():
     return count
 
 
+def set_check_circle_state(enabled):
+    """既存 CamRing_GN モディファイアの Check Circle を一括で ON/OFF する"""
+
+    objects = get_target_objects()
+    if not objects:
+        return 0, 0
+
+    modifiers = list(_iter_drone_check_modifiers(objects))
+    if not modifiers:
+        return 0, 0
+
+    ng = ensure_node_group()
+    identifier = CHECK_CIRCLE_SOCKET_IDENTIFIER or CHECK_CIRCLE_SOCKET_NAME
+
+    updated = 0
+    skipped = 0
+    for obj, mod in modifiers:
+        mod.node_group = ng
+        key = _resolve_socket_key(mod, identifier)
+        if key is None:
+            skipped += 1
+            continue
+        mod[key] = bool(enabled)
+        updated += 1
+
+    return updated, skipped
+
+
 def remove_modifier_from_drones():
     """Drones コレクション内から対象ジオメトリノードモディファイアを削除"""
 
     objects = get_target_objects()
     removed = 0
     for obj in objects:
-        modifiers = [
-            mod
-            for mod in obj.modifiers
-            if mod.type == 'NODES'
-            and (mod.name == NODE_GROUP_NAME or getattr(mod.node_group, "name", "") == NODE_GROUP_NAME)
-        ]
-        for mod in modifiers:
-            obj.modifiers.remove(mod)
-            removed += 1
+        for mod in list(obj.modifiers):
+            if _is_drone_check_modifier(mod):
+                obj.modifiers.remove(mod)
+                removed += 1
 
     # 使われなくなったノードグループがあれば削除
     if NODE_GROUP_NAME in bpy.data.node_groups:
@@ -231,6 +319,50 @@ class DRONE_OT_apply_drone_check_gn(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class DRONE_OT_enable_drone_check_circle(bpy.types.Operator):
+    bl_idname = "drone.enable_drone_check_circle"
+    bl_label = "Enable Drone Check Circle"
+    bl_description = "CamRing_GN モディファイアの Check Circle を一括 ON"
+
+    def execute(self, context):
+        try:
+            updated, skipped = set_check_circle_state(True)
+        except Exception as exc:  # pragma: no cover - Blender runtime error
+            self.report({'ERROR'}, str(exc))
+            return {'CANCELLED'}
+
+        if updated == 0:
+            self.report({'WARNING'}, "対象モディファイアが見つかりませんでした")
+        else:
+            message = f"{updated} 件のモディファイアを更新しました"
+            if skipped:
+                message += f"（{skipped} 件はソケットが見つからずスキップ）"
+            self.report({'INFO'}, message)
+        return {'FINISHED'}
+
+
+class DRONE_OT_disable_drone_check_circle(bpy.types.Operator):
+    bl_idname = "drone.disable_drone_check_circle"
+    bl_label = "Disable Drone Check Circle"
+    bl_description = "CamRing_GN モディファイアの Check Circle を一括 OFF"
+
+    def execute(self, context):
+        try:
+            updated, skipped = set_check_circle_state(False)
+        except Exception as exc:  # pragma: no cover - Blender runtime error
+            self.report({'ERROR'}, str(exc))
+            return {'CANCELLED'}
+
+        if updated == 0:
+            self.report({'WARNING'}, "対象モディファイアが見つかりませんでした")
+        else:
+            message = f"{updated} 件のモディファイアを更新しました"
+            if skipped:
+                message += f"（{skipped} 件はソケットが見つからずスキップ）"
+            self.report({'INFO'}, message)
+        return {'FINISHED'}
+
+
 class DRONE_OT_remove_drone_check_gn(bpy.types.Operator):
     bl_idname = "drone.remove_drone_check_gn"
     bl_label = "Remove Drone Check GN"
@@ -252,6 +384,8 @@ class DRONE_OT_remove_drone_check_gn(bpy.types.Operator):
 
 classes = (
     DRONE_OT_apply_drone_check_gn,
+    DRONE_OT_enable_drone_check_circle,
+    DRONE_OT_disable_drone_check_circle,
     DRONE_OT_remove_drone_check_gn,
 )
 
