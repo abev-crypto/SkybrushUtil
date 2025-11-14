@@ -22,7 +22,6 @@ from bpy.types import Operator, Panel, PropertyGroup
 from os.path import basename, join
 
 from bpy.app.handlers import persistent
-from bpy.app import timers
 
 from collections.abc import Callable, Iterable, Sequence
 from functools import partial
@@ -131,33 +130,48 @@ def use_b_mesh(mesh):  # pragma: no cover - Blender integration
         bm.free()
 
 _state: dict[int, dict] = {}
-_delayed_id_property_updates: set[tuple[int, str]] = set()
+_delayed_id_property_updates: dict[tuple[int, str], tuple[object, object]] = {}
 _pending_dynamic_array_updates: dict[
     int, tuple[str, int, list]
 ] = {}
+
+
+def _flush_delayed_id_property_updates() -> None:
+    """Try to apply queued ID property writes without relying on timers."""
+    if not _delayed_id_property_updates:
+        return
+
+    for key, (pg, value) in list(_delayed_id_property_updates.items()):
+        _pointer, name = key
+        try:
+            keys = pg.keys()
+        except (AttributeError, RuntimeError, ReferenceError):
+            _delayed_id_property_updates.pop(key, None)
+            continue
+
+        try:
+            current = pg.get(name, None)
+            if name in keys and _as_dict(current) == value:
+                _delayed_id_property_updates.pop(key, None)
+                continue
+            pg[name] = value
+            _delayed_id_property_updates.pop(key, None)
+        except (AttributeError, RuntimeError, ReferenceError):
+            _delayed_id_property_updates.pop(key, None)
+            continue
 
 
 def _schedule_id_property_update(pg, name: str, value):
     """Schedule ``pg[name] = value`` once writing to ID properties is allowed."""
 
     key = (pg.as_pointer(), name)
-    if key in _delayed_id_property_updates:
+    sanitized = _as_dict(value)
+    existing = _delayed_id_property_updates.get(key)
+    if existing is not None and existing[1] == sanitized:
         return
 
-    def _apply():
-        try:
-            current = pg.get(name, None)
-            if name in pg.keys() and _as_dict(current) == _as_dict(value):
-                _delayed_id_property_updates.discard(key)
-                return None
-            pg[name] = value
-        except (AttributeError, RuntimeError):
-            return 0.1
-        _delayed_id_property_updates.discard(key)
-        return None
-
-    _delayed_id_property_updates.add(key)
-    timers.register(_apply, first_interval=0.0)
+    _delayed_id_property_updates[key] = (pg, sanitized)
+    _flush_delayed_id_property_updates()
 
 
 def _store_pending_dynamic_array(
@@ -189,6 +203,8 @@ def _try_assign_dynamic_array(
 
 def _set_id_property(pg, name: str, value) -> None:
     """Safely assign ``value`` to ``pg[name]`` with context-aware fallbacks."""
+
+    _flush_delayed_id_property_updates()
 
     if name in pg.keys():
         current = pg.get(name, None)
@@ -3280,13 +3296,13 @@ def draw_dynamic_array(pg, layout, name: str, meta: dict) -> None:
     header.label(text=name.upper())
     buttons = header.row(align=True)
     pointer = array.as_pointer()
+    refresh_row = buttons.row(align=True)
     if pointer in _pending_dynamic_array_updates:
-        refresh_row = buttons.row(align=True)
         refresh_row.alert = True
-        refresh = refresh_row.operator(
-            "skybrush.dynamic_array_refresh", text="", icon="FILE_REFRESH"
-        )
-        refresh.property_name = name
+    refresh = refresh_row.operator(
+        "skybrush.dynamic_config_refresh", text="", icon="FILE_REFRESH"
+    )
+    refresh.property_name = name
     add_op = buttons.operator(
         "skybrush.dynamic_array_item_add", text="", icon="ADD"
     )
@@ -3343,6 +3359,7 @@ def draw_dynamic_color_ramp(pg, layout, name: str, meta: dict) -> None:
 
 def draw_dynamic(pg, layout, schema):
     """Draw ID properties from ``pg`` on ``layout``."""
+    _flush_delayed_id_property_updates()
     for name, meta in schema.items():
         if meta.get("type") == "ARRAY":
             draw_dynamic_array(pg, layout, name, meta)
@@ -3354,9 +3371,9 @@ def draw_dynamic(pg, layout, schema):
             layout.prop(pg, f'["{name}"]', text=name.upper())
 
 
-class RefreshDynamicArrayOperator(Operator):  # pragma: no cover - Blender UI
-    bl_idname = "skybrush.dynamic_array_refresh"
-    bl_label = "Refresh Array"
+class RefreshDynamicConfigOperator(Operator):  # pragma: no cover - Blender UI
+    bl_idname = "skybrush.dynamic_config_refresh"
+    bl_label = "Refresh"
 
     property_name: StringProperty(name="Property Name", default="")
 
@@ -3389,17 +3406,21 @@ class RefreshDynamicArrayOperator(Operator):  # pragma: no cover - Blender UI
             _apply_dynamic_array_values(array, item_type, item_length, sanitized)
         except (AttributeError, RuntimeError, ReferenceError):
             _store_pending_dynamic_array(array, item_type, item_length, sanitized)
+            _set_id_property(entry, self.property_name, sanitized)
             self.report({"WARNING"}, "Unable to refresh array; try again later")
             return {'CANCELLED'}
 
-        if not _try_assign_dynamic_array(
+        success = _try_assign_dynamic_array(
             entry,
             self.property_name,
             array,
             item_type,
             item_length,
             sanitized,
-        ):
+        )
+        _set_id_property(entry, self.property_name, sanitized)
+
+        if not success:
             self.report({"WARNING"}, "Unable to refresh array; try again later")
             return {'CANCELLED'}
 
@@ -3755,7 +3776,7 @@ def register():  # pragma: no cover - executed in Blender
     bpy.utils.register_class(DynamicArrayProperty)
     bpy.utils.register_class(DynamicColorRampPoint)
     bpy.utils.register_class(DynamicColorRamp)
-    bpy.utils.register_class(RefreshDynamicArrayOperator)
+    bpy.utils.register_class(RefreshDynamicConfigOperator)
     bpy.utils.register_class(AddDynamicArrayItemOperator)
     bpy.utils.register_class(RemoveDynamicArrayItemOperator)
     bpy.utils.register_class(AddDynamicColorRampPointOperator)
@@ -3796,10 +3817,12 @@ def unregister():  # pragma: no cover - executed in Blender
     bpy.utils.unregister_class(AddDynamicColorRampPointOperator)
     bpy.utils.unregister_class(RemoveDynamicArrayItemOperator)
     bpy.utils.unregister_class(AddDynamicArrayItemOperator)
-    bpy.utils.unregister_class(RefreshDynamicArrayOperator)
+    bpy.utils.unregister_class(RefreshDynamicConfigOperator)
     bpy.utils.unregister_class(DynamicColorRamp)
     bpy.utils.unregister_class(DynamicColorRampPoint)
     bpy.utils.unregister_class(DynamicArrayProperty)
     bpy.utils.unregister_class(DynamicArrayValue)
     bpy.utils.unregister_class(SequenceDelayEntry)
+
+    _delayed_id_property_updates.clear()
 
