@@ -36,6 +36,10 @@ def ensure_node_group():
     links = ng.links
     nodes.clear()
 
+    interface = ng.interface
+    c_cir = interface.new_socket(name="Check Circle", in_out='INPUT', socket_type='NodeSocketBool')
+    c_cir.default_value = True  # デフォルトは従来通り 0〜1 グラデ
+
     # ───────────────── Group In / Out ─────────────────
     n_in = nodes.new("NodeGroupInput")
     n_in.location = (-600, -100)
@@ -91,6 +95,9 @@ def ensure_node_group():
     join_geo = nodes.new("GeometryNodeJoinGeometry")
     join_geo.location = (100, 100)
 
+    switch = nodes.new("GeometryNodeSwitch")
+    switch.location = (100, 200)
+
     set_mat_index = nodes.new("GeometryNodeSetMaterialIndex")
     set_mat_index.location = (350, 100)
     set_mat_index.inputs["Material Index"].default_value = 1
@@ -120,8 +127,12 @@ def ensure_node_group():
     # Transform Geometry → Join
     links.new(trans_geo.outputs["Geometry"], join_geo.inputs["Geometry"])
 
+    links.new(join_geo.outputs["Geometry"], switch.inputs["True"])
+    links.new(scale_elem.outputs["Geometry"], switch.inputs["False"])
+    links.new(n_in.outputs['Check Circle'], switch.inputs["Switch"])
+
     # Join → Set Material Index → Group Output
-    links.new(join_geo.outputs["Geometry"], set_mat_index.inputs["Geometry"])
+    links.new(switch.outputs["Output"], set_mat_index.inputs["Geometry"])
     links.new(set_mat_index.outputs["Geometry"], n_out.inputs["Geometry"])
 
     return ng
