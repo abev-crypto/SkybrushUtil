@@ -430,6 +430,124 @@ def _get_object_property(obj, prop_type):
     return color
 
 
+def _get_primary_material(obj):
+    """Return the first material assigned to ``obj`` if any."""
+
+    slots = getattr(obj, "material_slots", None)
+    if slots:
+        slot = slots[0]
+        mat = getattr(slot, "material", None)
+        if mat is not None:
+            return mat
+    return getattr(obj, "active_material", None)
+
+
+def _extract_material_color(obj):
+    """Return the color of the first material assigned to ``obj``."""
+
+    color = _get_object_property(obj, "MAT")
+    if color is None:
+        color = (0.0, 0.0, 0.0, 1.0)
+    values = [float(c) for c in color[:4]]
+    while len(values) < 4:
+        values.append(1.0 if len(values) == 3 else 0.0)
+    return values[:4]
+
+
+def _clamp_color(color):
+    result = [max(0.0, min(1.0, float(component))) for component in color[:4]]
+    while len(result) < 4:
+        result.append(1.0 if len(result) == 3 else 0.0)
+    return result[:4]
+
+
+def _color_changed(original, updated):
+    threshold = 1e-6
+    length = min(len(original), len(updated))
+    for idx in range(length):
+        if abs(float(updated[idx]) - float(original[idx])) > threshold:
+            return True
+    return False
+
+
+def _set_material_color_keyframe(material, color, frame):
+    """Assign ``color`` to ``material`` and insert a keyframe at ``frame``."""
+
+    color = _clamp_color(color)
+
+    if getattr(material, "use_nodes", False) and getattr(material, "node_tree", None):
+        node = next(
+            (
+                n
+                for n in material.node_tree.nodes
+                if getattr(n, "type", "") == "BSDF_PRINCIPLED"
+            ),
+            None,
+        )
+        if node is not None:
+            base_color = node.inputs.get("Base Color")
+            if base_color is not None:
+                base_color.default_value = color
+                base_color.keyframe_insert("default_value", frame=frame)
+                return True
+
+    diffuse = getattr(material, "diffuse_color", None)
+    if diffuse is not None:
+        material.diffuse_color = color
+        material.keyframe_insert("diffuse_color", frame=frame)
+        return True
+
+    return False
+
+
+def _guess_formation_index(obj):
+    """Try to determine the formation index of ``obj`` if available."""
+
+    for key in ("formation_index", "FormationIndex", "formationIndex"):
+        if key in getattr(obj, "keys", lambda: [])():
+            try:
+                return int(obj[key])
+            except (TypeError, ValueError):
+                continue
+
+    skybrush = getattr(obj, "skybrush", None)
+    if skybrush is not None:
+        for attr in ("formation_index", "drone_index", "index"):
+            value = getattr(skybrush, attr, None)
+            if value is not None:
+                try:
+                    return int(value)
+                except (TypeError, ValueError):
+                    break
+        formation = getattr(skybrush, "formation", None)
+        if formation is not None:
+            value = getattr(formation, "index", None)
+            if value is not None:
+                try:
+                    return int(value)
+                except (TypeError, ValueError):
+                    pass
+
+    return None
+
+
+def _build_formation_mapping(objects):
+    """Construct formation mapping for ``objects`` if indices are available."""
+
+    mapping: list[Optional[int]] = []
+    has_value = False
+    for obj in objects:
+        value = _guess_formation_index(obj)
+        if value is not None:
+            has_value = True
+        mapping.append(value)
+
+    if not has_value:
+        return list(range(len(objects)))
+
+    return mapping
+
+
 def _normalize_float_sequence(values, length, fill_value=0.0):
     result = [float(v) for v in values]
     if len(result) < length:
@@ -2196,6 +2314,141 @@ class BakeColorRampOperator(bpy.types.Operator):  # pragma: no cover - Blender U
         return {'FINISHED'}
 
 
+class BakeLightEffectToKeysOperator(bpy.types.Operator):  # pragma: no cover - Blender UI
+    bl_idname = "skybrush.bake_light_effect_to_keys"
+    bl_label = "Bake Colors"
+    bl_description = "Bake the active light effect into drone material color keyframes"
+
+    @classmethod
+    def poll(cls, context):
+        light_effects = getattr(getattr(context.scene, "skybrush", None), "light_effects", None)
+        entry = getattr(light_effects, "active_entry", None) if light_effects else None
+        return entry is not None
+
+    def _compute_frame_range(self, entry):
+        try:
+            start = int(getattr(entry, "frame_start", 0))
+        except (TypeError, ValueError):
+            return None
+        try:
+            duration = int(getattr(entry, "duration", 0))
+        except (TypeError, ValueError):
+            return None
+        if duration <= 0:
+            return None
+        end = start + max(duration - 1, 0)
+        return start, end
+
+    def _seed_for_frame(self, entry, frame):
+        seed = getattr(entry, "random_seed", None)
+        if seed is None:
+            seed = getattr(entry, "seed", None)
+        try:
+            base = int(seed) if seed is not None else 0
+        except (TypeError, ValueError):
+            base = 0
+        return base + frame
+
+    def _gather_drones(self):
+        drones_collection = bpy.data.collections.get("Drones")
+        if drones_collection is None:
+            return []
+        drones = []
+        for obj in drones_collection.objects:
+            if _get_primary_material(obj) is not None:
+                drones.append(obj)
+        return drones
+
+    def _evaluate_effect(self, context, entry, drones, frame_start, frame_end):
+        scene = context.scene
+        original_frame = scene.frame_current
+        view_layer = context.view_layer
+        mapping = _build_formation_mapping(drones)
+        inserted = False
+        try:
+            for frame in range(frame_start, frame_end + 1):
+                scene.frame_set(frame)
+                if view_layer is not None:
+                    view_layer.update()
+                base_colors = [_extract_material_color(obj) for obj in drones]
+                positions = [tuple(get_position_of_object(obj)) for obj in drones]
+                colors = [list(color) for color in base_colors]
+                random_seq = RandomSequence(self._seed_for_frame(entry, frame))
+                try:
+                    entry.apply_on_colors(
+                        colors,
+                        positions,
+                        mapping,
+                        frame=frame,
+                        random_seq=random_seq,
+                    )
+                except Exception as exc:  # pragma: no cover - Blender runtime
+                    raise RuntimeError(str(exc)) from exc
+                for obj, base_color, color in zip(drones, base_colors, colors):
+                    if not _color_changed(base_color, color):
+                        continue
+                    material = _get_primary_material(obj)
+                    if material is None:
+                        continue
+                    if _set_material_color_keyframe(material, color, frame):
+                        inserted = True
+            return inserted
+        finally:
+            scene.frame_set(original_frame)
+            if view_layer is not None:
+                view_layer.update()
+
+    def execute(self, context):
+        light_effects = context.scene.skybrush.light_effects
+        entry = light_effects.active_entry
+        frame_range = self._compute_frame_range(entry)
+        if frame_range is None:
+            self.report({'ERROR'}, "Active light effect has invalid frame range")
+            return {'CANCELLED'}
+
+        drones = self._gather_drones()
+        if not drones:
+            self.report({'ERROR'}, "No objects found in the 'Drones' collection")
+            return {'CANCELLED'}
+
+        entries = list(getattr(light_effects, "entries", []))
+        original_states = {
+            item.as_pointer(): bool(getattr(item, "enabled", True))
+            for item in entries
+            if hasattr(item, "enabled")
+        }
+
+        try:
+            for item in entries:
+                if hasattr(item, "enabled"):
+                    item.enabled = item is entry
+            if hasattr(context, "view_layer") and context.view_layer is not None:
+                context.view_layer.update()
+            inserted = self._evaluate_effect(
+                context, entry, drones, frame_range[0], frame_range[1]
+            )
+        except RuntimeError as exc:
+            self.report({'ERROR'}, f"Failed to bake light effect: {exc}")
+            return {'CANCELLED'}
+        finally:
+            for item in entries:
+                if not hasattr(item, "enabled") or item is entry:
+                    continue
+                state = original_states.get(item.as_pointer())
+                if state is not None:
+                    item.enabled = state
+            if hasattr(entry, "enabled"):
+                entry.enabled = False
+            if hasattr(context, "view_layer") and context.view_layer is not None:
+                context.view_layer.update()
+
+        if not inserted:
+            self.report({'WARNING'}, "No keyframes were inserted")
+        else:
+            self.report({'INFO'}, "Baked light effect into material keyframes")
+        return {'FINISHED'}
+
+
 class GeneratePathGradientMeshOperator(bpy.types.Operator):  # pragma: no cover - Blender UI
     bl_idname = "skybrush.generate_path_gradient_mesh"
     bl_label = "Generate Curve Mesh"
@@ -3251,6 +3504,11 @@ class PatchedLightEffectsPanel(Panel):  # pragma: no cover - Blender UI code
             if not getattr(entry, "sequence_mode", False):
                 col.prop(entry, "frame_end")
             col.separator()
+            col.operator(
+                BakeLightEffectToKeysOperator.bl_idname,
+                text="Bake Colors",
+            )
+            col.separator()
             col.prop(entry, "fade_in_duration")
             col.prop(entry, "fade_out_duration")
             col.separator()
@@ -3389,6 +3647,7 @@ def register():  # pragma: no cover - executed in Blender
     bpy.utils.register_class(EmbedColorFunctionOperator)
     bpy.utils.register_class(UnembedColorFunctionOperator)
     bpy.utils.register_class(BakeColorRampOperator)
+    bpy.utils.register_class(BakeLightEffectToKeysOperator)
     bpy.utils.register_class(GeneratePathGradientMeshOperator)
     bpy.utils.register_class(CreateBoundingBoxMeshOperator)
     bpy.utils.register_class(CreateTargetCollectionFromSelectionOperator)
@@ -3412,6 +3671,7 @@ def unregister():  # pragma: no cover - executed in Blender
     bpy.utils.unregister_class(CreateBoundingBoxMeshOperator)
     bpy.utils.unregister_class(GeneratePathGradientMeshOperator)
     bpy.utils.unregister_class(BakeColorRampOperator)
+    bpy.utils.unregister_class(BakeLightEffectToKeysOperator)
     bpy.utils.unregister_class(UnembedColorFunctionOperator)
     bpy.utils.unregister_class(EmbedColorFunctionOperator)
     bpy.utils.unregister_class(BakeColorRampSplitOperator)
