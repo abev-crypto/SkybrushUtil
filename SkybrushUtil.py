@@ -20,6 +20,7 @@ from sbutil import light_effects as light_effects_patch
 from sbutil import CSV2Vertex
 from sbutil import reflow_vertex
 from sbutil import drone_check_gn
+from sbutil import view_setup
 
 try:  # pragma: no cover - depends on sbstudio
     from sbstudio.plugin.operators.safety_check import RunFullProximityCheckOperator
@@ -1481,6 +1482,12 @@ class DRONE_PT_Utilities(Panel):
         layout.separator()
         layout.operator("drone.apply_drone_check_gn", text="Apply Drone Check GN")
         layout.operator("drone.remove_drone_check_gn", text="Remove Drone Check GN")
+        layout.separator()
+        if hasattr(context.scene, "sbutil_camera_margin"):
+            layout.prop(context.scene, "sbutil_camera_margin", slider=True)
+        row = layout.row(align=True)
+        row.operator("sbutil.setup_glare_compositor", text="Setup Glare")
+        row.operator("sbutil.frame_from_neg_y", text="Frame Camera")
 
 # -------------------------------
 # Add-on Preferences
@@ -1550,6 +1557,7 @@ def register():
     CSV2Vertex.register()
     reflow_vertex.register()
     drone_check_gn.register()
+    view_setup.register()
     bpy.app.timers.register(try_patch)
     bpy.app.handlers.load_post.append(_on_load_post)
     if _auto_run_proximity_check not in bpy.app.handlers.frame_change_post:
@@ -1567,6 +1575,7 @@ def unregister():
     CSV2Vertex.unregister()
     reflow_vertex.unregister()
     drone_check_gn.unregister()
+    view_setup.unregister()
 
     # ハンドラ除去（存在チェック）
     if _on_load_post in bpy.app.handlers.load_post:

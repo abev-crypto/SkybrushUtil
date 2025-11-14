@@ -1,5 +1,7 @@
 import bpy
 import math
+from bpy.props import FloatProperty
+from bpy.types import Operator
 from mathutils import Vector
 
 def setup_glare_compositor(scene=None):
@@ -38,8 +40,6 @@ def setup_glare_compositor(scene=None):
     # ----- Links -----
     links.new(n_rl.outputs["Image"], n_glare.inputs["Image"])
     links.new(n_glare.outputs["Image"], n_comp.inputs["Image"])
-
-setup_glare_compositor()
 
 def ensure_camera():
     """シーンにカメラがなければ新規作成して返す"""
@@ -82,7 +82,7 @@ def frame_selection_from_neg_y(margin_scale=1.2):
 
     if not selected:
         print("オブジェクトが選択されていません。")
-        return
+        return False
 
     cam_obj = ensure_camera()
     cam_data = cam_obj.data
@@ -133,7 +133,59 @@ def frame_selection_from_neg_y(margin_scale=1.2):
     cam_data.clip_end = max(1000.0, distance * 3.0)
 
     print("Y- 側からフレーミングするカメラを再配置しました。")
+    return True
 
 
-# 実行
-frame_selection_from_neg_y(margin_scale=1.4)
+class SBUTIL_OT_setup_glare_compositor(Operator):
+    bl_idname = "sbutil.setup_glare_compositor"
+    bl_label = "Setup Glare Compositor"
+    bl_description = "Create a bloom glare compositor setup for the active scene"
+    bl_options = {'REGISTER'}
+
+    def execute(self, context):
+        setup_glare_compositor(context.scene)
+        self.report({'INFO'}, "Glare compositor configured")
+        return {'FINISHED'}
+
+
+class SBUTIL_OT_frame_from_neg_y(Operator):
+    bl_idname = "sbutil.frame_from_neg_y"
+    bl_label = "Frame From -Y"
+    bl_description = "Reposition the camera on the negative Y axis to frame the selection"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        margin = getattr(context.scene, "sbutil_camera_margin", 1.2)
+        if frame_selection_from_neg_y(margin_scale=margin):
+            self.report({'INFO'}, "Camera framed from -Y")
+            return {'FINISHED'}
+
+        self.report({'WARNING'}, "Select at least one non-camera object")
+        return {'CANCELLED'}
+
+
+classes = (
+    SBUTIL_OT_setup_glare_compositor,
+    SBUTIL_OT_frame_from_neg_y,
+)
+
+
+def register():
+    for cls in classes:
+        bpy.utils.register_class(cls)
+
+    bpy.types.Scene.sbutil_camera_margin = FloatProperty(
+        name="Camera Margin",
+        description="Scale factor applied to the bounding box when framing the camera",
+        default=1.4,
+        min=1.0,
+        soft_max=3.0,
+    )
+
+
+def unregister():
+    if hasattr(bpy.types.Scene, "sbutil_camera_margin"):
+        del bpy.types.Scene.sbutil_camera_margin
+
+    for cls in reversed(classes):
+        bpy.utils.unregister_class(cls)
