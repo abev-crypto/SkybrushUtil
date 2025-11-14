@@ -132,8 +132,9 @@ def use_b_mesh(mesh):  # pragma: no cover - Blender integration
 
 _state: dict[int, dict] = {}
 _delayed_id_property_updates: set[tuple[int, str]] = set()
-_pending_dynamic_array_updates: dict[int, tuple] = {}
-_dynamic_array_timer_running = False
+_pending_dynamic_array_updates: dict[
+    int, tuple[str, int, list]
+] = {}
 
 
 def _schedule_id_property_update(pg, name: str, value):
@@ -159,39 +160,31 @@ def _schedule_id_property_update(pg, name: str, value):
     timers.register(_apply, first_interval=0.0)
 
 
-def _schedule_dynamic_array_update(array, payload):
-    """Apply ``payload`` to ``array`` once data blocks become writable."""
+def _store_pending_dynamic_array(
+    array, item_type: str, item_length: int, sanitized: Sequence
+) -> None:
+    values = [_as_dict(v) for v in list(sanitized)]
+    _pending_dynamic_array_updates[array.as_pointer()] = (
+        item_type,
+        item_length,
+        values,
+    )
 
-    global _dynamic_array_timer_running
 
-    _pending_dynamic_array_updates[array.as_pointer()] = (array,) + payload
+def _clear_pending_dynamic_array(array) -> None:
+    _pending_dynamic_array_updates.pop(array.as_pointer(), None)
 
-    if _dynamic_array_timer_running:
-        return
 
-    def _apply():
-        global _dynamic_array_timer_running
-        if not _pending_dynamic_array_updates:
-            _dynamic_array_timer_running = False
-            return None
-
-        for pointer, values in list(_pending_dynamic_array_updates.items()):
-            array_obj = values[0]
-            try:
-                _apply_dynamic_array_values(array_obj, *values[1:])
-            except (AttributeError, RuntimeError, ReferenceError):
-                continue
-            else:
-                _pending_dynamic_array_updates.pop(pointer, None)
-
-        if _pending_dynamic_array_updates:
-            return 0.1
-
-        _dynamic_array_timer_running = False
-        return None
-
-    _dynamic_array_timer_running = True
-    timers.register(_apply, first_interval=0.0)
+def _try_assign_dynamic_array(
+    entry, name: str, array, item_type: str, item_length: int, sanitized: Sequence
+) -> bool:
+    try:
+        entry[name] = array.to_storage_list()
+    except (AttributeError, RuntimeError):
+        _store_pending_dynamic_array(array, item_type, item_length, sanitized)
+        return False
+    _clear_pending_dynamic_array(array)
+    return True
 
 
 def _set_id_property(pg, name: str, value) -> None:
@@ -783,7 +776,17 @@ def _find_dynamic_color_ramp_owner(item):
 def _update_dynamic_array_item(self, _context):
     entry, array = _find_dynamic_array_owner(self)
     if entry is not None and array is not None and array.name:
-        _set_id_property(entry, array.name, array.to_storage_list())
+        sanitized = array.to_storage_list()
+        item_type = array.item_type or "FLOAT"
+        item_length = array.item_length or 1
+        _try_assign_dynamic_array(
+            entry,
+            array.name,
+            array,
+            item_type,
+            item_length,
+            sanitized,
+        )
 
 
 def _update_dynamic_color_ramp_point(self, _context):
@@ -1248,7 +1251,9 @@ class DynamicArrayProperty(PropertyGroup):
         try:
             _apply_dynamic_array_values(self, item_type, item_length, sanitized)
         except (AttributeError, RuntimeError, ReferenceError):
-            _schedule_dynamic_array_update(self, (item_type, item_length, sanitized))
+            _store_pending_dynamic_array(self, item_type, item_length, sanitized)
+            return item_type, item_length, sanitized, False
+        return item_type, item_length, sanitized, True
 
     def append_default(self, meta):
         default_value = meta.get("item_default", _default_item_for_type(self.item_type))
@@ -1476,8 +1481,33 @@ class PatchedLightEffect(PropertyGroup):
         if array is None:
             array = self.dynamic_arrays.add()
             array.name = name
-        array.set_from_python(self.get(name, meta.get("default", [])), meta)
-        _set_id_property(self, name, array.to_storage_list())
+
+        pointer = array.as_pointer()
+        pending = _pending_dynamic_array_updates.get(pointer)
+        if pending is not None:
+            item_type, item_length, sanitized = pending
+            try:
+                _apply_dynamic_array_values(array, item_type, item_length, sanitized)
+            except (AttributeError, RuntimeError, ReferenceError):
+                _store_pending_dynamic_array(array, item_type, item_length, sanitized)
+                return array
+        else:
+            item_type, item_length, sanitized, applied = array.set_from_python(
+                self.get(name, meta.get("default", [])),
+                meta,
+            )
+            if not applied:
+                _store_pending_dynamic_array(array, item_type, item_length, sanitized)
+                return array
+
+        _try_assign_dynamic_array(
+            self,
+            name,
+            array,
+            item_type,
+            item_length,
+            sanitized,
+        )
         return array
 
     def get_dynamic_array_value(self, name: str, meta: dict | None = None):
@@ -3246,9 +3276,18 @@ def ensure_schema(pg, schema):
 def draw_dynamic_array(pg, layout, name: str, meta: dict) -> None:
     array = pg.ensure_dynamic_array(name, meta)
     box = layout.box()
-    header = box.row(align=True)
+    header = box.row()
     header.label(text=name.upper())
-    add_op = header.operator(
+    buttons = header.row(align=True)
+    pointer = array.as_pointer()
+    if pointer in _pending_dynamic_array_updates:
+        refresh_row = buttons.row(align=True)
+        refresh_row.alert = True
+        refresh = refresh_row.operator(
+            "skybrush.dynamic_array_refresh", text="", icon="FILE_REFRESH"
+        )
+        refresh.property_name = name
+    add_op = buttons.operator(
         "skybrush.dynamic_array_item_add", text="", icon="ADD"
     )
     add_op.property_name = name
@@ -3315,6 +3354,58 @@ def draw_dynamic(pg, layout, schema):
             layout.prop(pg, f'["{name}"]', text=name.upper())
 
 
+class RefreshDynamicArrayOperator(Operator):  # pragma: no cover - Blender UI
+    bl_idname = "skybrush.dynamic_array_refresh"
+    bl_label = "Refresh Array"
+
+    property_name: StringProperty(name="Property Name", default="")
+
+    @classmethod
+    def poll(cls, context):
+        entry = getattr(context.scene.skybrush.light_effects, "active_entry", None)
+        return entry is not None and entry.type == "FUNCTION"
+
+    def execute(self, context):
+        entry = context.scene.skybrush.light_effects.active_entry
+        schema = get_state(entry).get("config_schema", {})
+        meta = schema.get(self.property_name) or _as_dict(
+            entry.get("_config_schema", {})
+        ).get(self.property_name, {})
+        if hasattr(meta, "items") and not isinstance(meta, dict):
+            meta = _as_dict(meta)
+        array = entry.ensure_dynamic_array(self.property_name, meta)
+        pointer = array.as_pointer()
+
+        payload = _pending_dynamic_array_updates.pop(pointer, None)
+        if payload is None:
+            item_type = meta.get("item_type", array.item_type or "FLOAT")
+            item_length = int(meta.get("item_length", array.item_length or 1))
+            sanitized = list(_sanitize_array_value(entry.get(self.property_name), meta))
+        else:
+            item_type, item_length, sanitized = payload
+            sanitized = list(sanitized)
+
+        try:
+            _apply_dynamic_array_values(array, item_type, item_length, sanitized)
+        except (AttributeError, RuntimeError, ReferenceError):
+            _store_pending_dynamic_array(array, item_type, item_length, sanitized)
+            self.report({"WARNING"}, "Unable to refresh array; try again later")
+            return {'CANCELLED'}
+
+        if not _try_assign_dynamic_array(
+            entry,
+            self.property_name,
+            array,
+            item_type,
+            item_length,
+            sanitized,
+        ):
+            self.report({"WARNING"}, "Unable to refresh array; try again later")
+            return {'CANCELLED'}
+
+        return {'FINISHED'}
+
+
 class AddDynamicArrayItemOperator(Operator):  # pragma: no cover - Blender UI
     bl_idname = "skybrush.dynamic_array_item_add"
     bl_label = "Add Array Item"
@@ -3336,7 +3427,19 @@ class AddDynamicArrayItemOperator(Operator):  # pragma: no cover - Blender UI
             meta = _as_dict(meta)
         array = entry.ensure_dynamic_array(self.property_name, meta)
         array.append_default(meta)
-        entry[self.property_name] = array.to_storage_list()
+        sanitized = array.to_storage_list()
+        item_type = array.item_type or meta.get("item_type", "FLOAT")
+        item_length = array.item_length or int(meta.get("item_length", 1))
+        if not _try_assign_dynamic_array(
+            entry,
+            self.property_name,
+            array,
+            item_type,
+            item_length,
+            sanitized,
+        ):
+            self.report({"WARNING"}, "Unable to update array; try refresh later")
+            return {'CANCELLED'}
         return {'FINISHED'}
 
 
@@ -3363,7 +3466,19 @@ class RemoveDynamicArrayItemOperator(Operator):  # pragma: no cover - Blender UI
         array = entry.ensure_dynamic_array(self.property_name, meta)
         if 0 <= self.index < len(array.values):
             array.values.remove(self.index)
-            entry[self.property_name] = array.to_storage_list()
+            sanitized = array.to_storage_list()
+            item_type = array.item_type or meta.get("item_type", "FLOAT")
+            item_length = array.item_length or int(meta.get("item_length", 1))
+            if not _try_assign_dynamic_array(
+                entry,
+                self.property_name,
+                array,
+                item_type,
+                item_length,
+                sanitized,
+            ):
+                self.report({"WARNING"}, "Unable to update array; try refresh later")
+                return {'CANCELLED'}
             return {'FINISHED'}
         return {'CANCELLED'}
 
@@ -3640,6 +3755,7 @@ def register():  # pragma: no cover - executed in Blender
     bpy.utils.register_class(DynamicArrayProperty)
     bpy.utils.register_class(DynamicColorRampPoint)
     bpy.utils.register_class(DynamicColorRamp)
+    bpy.utils.register_class(RefreshDynamicArrayOperator)
     bpy.utils.register_class(AddDynamicArrayItemOperator)
     bpy.utils.register_class(RemoveDynamicArrayItemOperator)
     bpy.utils.register_class(AddDynamicColorRampPointOperator)
@@ -3680,6 +3796,7 @@ def unregister():  # pragma: no cover - executed in Blender
     bpy.utils.unregister_class(AddDynamicColorRampPointOperator)
     bpy.utils.unregister_class(RemoveDynamicArrayItemOperator)
     bpy.utils.unregister_class(AddDynamicArrayItemOperator)
+    bpy.utils.unregister_class(RefreshDynamicArrayOperator)
     bpy.utils.unregister_class(DynamicColorRamp)
     bpy.utils.unregister_class(DynamicColorRampPoint)
     bpy.utils.unregister_class(DynamicArrayProperty)
