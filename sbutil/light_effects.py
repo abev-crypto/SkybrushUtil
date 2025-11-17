@@ -695,6 +695,26 @@ def _set_material_color_keyframe(material, color, frame):
     return False
 
 
+def _ensure_action_exists(obj):
+    """Ensure that ``obj`` has an animation action."""
+
+    if getattr(obj, "animation_data", None) is None:
+        obj.animation_data_create()
+    if getattr(obj.animation_data, "action", None) is None:
+        name = f"{getattr(obj, 'name', 'Object')}Action"
+        obj.animation_data.action = bpy.data.actions.new(name=name)
+
+
+def _set_object_color_keyframe(obj, color, frame):
+    """Assign ``color`` to the object itself and insert a keyframe."""
+
+    color = _clamp_color(color)
+    _ensure_action_exists(obj)
+    obj.color = color
+    obj.keyframe_insert("color", frame=frame)
+    return True
+
+
 def _guess_formation_index(obj):
     """Try to determine the formation index of ``obj`` if available."""
 
@@ -2677,9 +2697,10 @@ class BakeLightEffectToKeysOperator(bpy.types.Operator):  # pragma: no cover - B
                     if not _color_changed(base_color, color):
                         continue
                     material = _get_primary_material(obj)
-                    if material is None:
+                    if material is not None and _set_material_color_keyframe(material, color, frame):
+                        inserted = True
                         continue
-                    if _set_material_color_keyframe(material, color, frame):
+                    if _set_object_color_keyframe(obj, color, frame):
                         inserted = True
             return inserted
         finally:
