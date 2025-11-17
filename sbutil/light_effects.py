@@ -337,6 +337,7 @@ def sample_uv_factors(
     mesh_obj,
     positions: Sequence[Coordinate3D],
     axis: int,
+    tiling_mode: str = "NONE",
 ) -> Optional[list[Optional[float]]]:
     """Return pseudo-UV ``axis`` samples using the object's bounding box."""
 
@@ -383,8 +384,17 @@ def sample_uv_factors(
     for pos in positions:
         co = Vector(pos) if not isinstance(pos, Vector) else pos.copy()
         local = inv_world @ co
-        value = (local[component_index] - min_val) * inv_range
-        outputs.append(max(0.0, min(1.0, float(value))))
+        value = float((local[component_index] - min_val) * inv_range)
+
+        if tiling_mode == "REPEAT":
+            value = (value % 1.0 + 1.0) % 1.0
+        elif tiling_mode == "MIRROR":
+            wrapped = (value % 2.0 + 2.0) % 2.0
+            value = wrapped if wrapped <= 1.0 else 2.0 - wrapped
+        else:  # NONE
+            value = max(0.0, min(1.0, value))
+
+        outputs.append(value)
 
     return outputs
 
@@ -1552,6 +1562,20 @@ class PatchedLightEffect(PropertyGroup):
         ),
         default=False,
     )
+    uv_tiling_mode = EnumProperty(
+        name="UV Tiling",
+        description="How to evaluate mesh UVs outside the mesh bounds",
+        items=[
+            ("NONE", "None", "Clamp values outside the mesh bounds"),
+            ("REPEAT", "Repeat", "Repeat UV coordinates every 0-1 interval"),
+            (
+                "MIRROR",
+                "Mirror",
+                "Mirror UV coordinates across every second 0-1 interval",
+            ),
+        ],
+        default="NONE",
+    )
     formation_collection = PointerProperty(
         name="Formation Collection",
         description="Collection containing formation meshes for UV sampling",
@@ -1831,7 +1855,12 @@ class PatchedLightEffect(PropertyGroup):
                     uv_source = getattr(self, "uv_mesh", None) or getattr(self, "mesh", None)
                     if uv_source is not None:
                         axis = 0 if output_type == OUTPUT_MESH_UV_U else 1
-                        sampled = sample_uv_factors(uv_source, positions, axis)
+                        sampled = sample_uv_factors(
+                            uv_source,
+                            positions,
+                            axis,
+                            getattr(self, "uv_tiling_mode", "NONE"),
+                        )
                         if sampled is not None:
                             outputs = sampled
                     if outputs is None:
@@ -2379,6 +2408,7 @@ def patch_light_effect_class():
         type=bpy.types.Object,
         poll=_mesh_object_poll,
     )
+    LightEffect.uv_tiling_mode = PatchedLightEffect.uv_tiling_mode
     LightEffect.formation_collection = PatchedLightEffect.formation_collection
     LightEffect.target_collection = PointerProperty(
         name="Collection", type=bpy.types.Collection
@@ -2405,6 +2435,7 @@ def patch_light_effect_class():
     LightEffect.__annotations__["output_y"] = LightEffect.output_y
     LightEffect.__annotations__["target"] = LightEffect.target
     LightEffect.__annotations__["uv_mesh"] = LightEffect.uv_mesh
+    LightEffect.__annotations__["uv_tiling_mode"] = LightEffect.uv_tiling_mode
     LightEffect.__annotations__["formation_collection"] = (
         LightEffect.formation_collection
     )
@@ -2471,6 +2502,9 @@ def unpatch_light_effect_class():
     elif hasattr(LightEffect, "uv_mesh"):
         delattr(LightEffect, "uv_mesh")
         LightEffect.__annotations__.pop("uv_mesh", None)
+    if hasattr(LightEffect, "uv_tiling_mode"):
+        delattr(LightEffect, "uv_tiling_mode")
+        LightEffect.__annotations__.pop("uv_tiling_mode", None)
     if getattr(LightEffect, "original_formation_collection", None) is not None:
         LightEffect.formation_collection = LightEffect.original_formation_collection
         LightEffect.__annotations__["formation_collection"] = (
@@ -3967,6 +4001,13 @@ class PatchedLightEffectsPanel(Panel):  # pragma: no cover - Blender UI code
                 col.prop(entry, "convert_srgb")
             if output_type_supports_mapping_mode(entry.output_y):
                 col.prop(entry, "output_mapping_mode_y")
+            show_uv_tiling_mode = hasattr(entry, "uv_tiling_mode") and (
+                entry.output in {OUTPUT_MESH_UV_U, OUTPUT_MESH_UV_V}
+                or getattr(entry, "output_y", None)
+                in {OUTPUT_MESH_UV_U, OUTPUT_MESH_UV_V}
+            )
+            if show_uv_tiling_mode:
+                col.prop(entry, "uv_tiling_mode")
             col.prop(entry, "target")
             col.prop(entry, "invert_target")
             if entry.target == "COLLECTION":
