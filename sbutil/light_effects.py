@@ -285,7 +285,7 @@ def sample_vertex_color_factors(mesh_obj, positions: Sequence[Coordinate3D]) -> 
 
     depsgraph = bpy.context.evaluated_depsgraph_get()
     eval_obj = mesh_obj.evaluated_get(depsgraph)
-    eval_mesh = eval_obj.to_mesh(preserve_all_data_layers=True)
+    eval_mesh = eval_obj.to_mesh(preserve_all_data_layers=True, depsgraph=depsgraph)
     try:
         color_layer = _get_color_attribute(eval_mesh)
         if color_layer is None:
@@ -408,14 +408,23 @@ def _update_formation_collection(self, _context):
 
 def _collect_vertex_uvs(eval_mesh) -> dict[int, tuple[float, float]]:
     """Return averaged UV coordinates per vertex from ``eval_mesh``."""
+    print("mesh:", eval_mesh)
+    print("has uv_layers:", hasattr(eval_mesh, "uv_layers"))
+    if hasattr(eval_mesh, "uv_layers"):
+        print("len uv_layers:", len(eval_mesh.uv_layers))
+        print("uv_layers:", eval_mesh.uv_layers)
 
+        try:
+            print("uv_layers.active:", eval_mesh.uv_layers.active)
+        except Exception as e:
+            print("active access error:", e)
+
+    print("len loops:", len(getattr(eval_mesh, "loops", [])))
+    # ここまで見てから元のロジック続行
     if not getattr(eval_mesh, "uv_layers", None):
         return {}
 
-    try:
-        uv_layer = getattr(eval_mesh.uv_layers, "active", None)
-    except Exception:
-        uv_layer = None
+    uv_layer = getattr(eval_mesh.uv_layers, "active", None)
 
     if uv_layer is None and eval_mesh.uv_layers:
         uv_layer = eval_mesh.uv_layers[0]
@@ -429,10 +438,7 @@ def _collect_vertex_uvs(eval_mesh) -> dict[int, tuple[float, float]]:
 
     uv_accumulator: dict[int, list[tuple[float, float]]] = {}
     for loop in getattr(eval_mesh, "loops", []):
-        try:
-            uv = uv_data[loop.index].uv
-        except Exception:
-            continue
+        uv = uv_data[loop.index].uv
         uv_accumulator.setdefault(loop.vertex_index, []).append((float(uv[0]), float(uv[1])))
 
     averaged_uvs: dict[int, tuple[float, float]] = {}
@@ -470,12 +476,10 @@ def _get_or_build_formation_uv_cache(
 
     collection = getattr(effect, "formation_collection", None)
     if collection is None:
+        print("hasn't collection")
         return None
 
-    try:
-        collection_ptr = collection.as_pointer()
-    except Exception:
-        return None
+    collection_ptr = collection.as_pointer()
 
     st = get_state(effect)
     mapping_key = tuple(mapping) if mapping is not None else None
@@ -489,44 +493,40 @@ def _get_or_build_formation_uv_cache(
         ):
             return cache.get("entries")
 
-    try:
-        depsgraph = bpy.context.evaluated_depsgraph_get()
-    except Exception:
-        return None
+    depsgraph = bpy.context.evaluated_depsgraph_get()
 
     vertices: list[dict] = []
-    for obj in getattr(collection, "objects", []):
+    # ``all_objects`` traverses nested collections so we also pick up meshes
+    # that are not directly in the top-level formation collection.
+    objects_in_collection = getattr(collection, "all_objects", None)
+    if objects_in_collection is None:
+        objects_in_collection = getattr(collection, "objects", [])
+
+    for obj in objects_in_collection:
         if getattr(obj, "type", "") != "MESH":
             continue
-        try:
-            eval_obj = obj.evaluated_get(depsgraph)
-            eval_mesh = eval_obj.to_mesh(preserve_all_data_layers=True)
-        except Exception:
+        eval_obj = obj.evaluated_get(depsgraph)
+        eval_mesh = eval_obj.to_mesh(preserve_all_data_layers=True, depsgraph=depsgraph)
+
+        uv_by_vertex = _collect_vertex_uvs(eval_mesh)
+        if not uv_by_vertex:
             continue
-        try:
-            uv_by_vertex = _collect_vertex_uvs(eval_mesh)
-            if not uv_by_vertex:
+        matrix_world = getattr(eval_obj, "matrix_world", None)
+        for vertex in getattr(eval_mesh, "vertices", []):
+            uv = uv_by_vertex.get(vertex.index)
+            if uv is None:
                 continue
-            matrix_world = getattr(eval_obj, "matrix_world", None)
-            for vertex in getattr(eval_mesh, "vertices", []):
-                uv = uv_by_vertex.get(vertex.index)
-                if uv is None:
-                    continue
-                position = vertex.co
-                if matrix_world is not None:
-                    position = matrix_world @ position
-                vertices.append(
-                    {
-                        "vertex_id": int(vertex.index),
-                        "position": position.copy() if hasattr(position, "copy") else Vector(position),
-                        "uv": uv,
-                    }
-                )
-        finally:
-            try:
-                eval_obj.to_mesh_clear()
-            except Exception:
-                pass
+            position = vertex.co
+            if matrix_world is not None:
+                position = matrix_world @ position
+            vertices.append(
+                {
+                    "vertex_id": int(vertex.index),
+                    "position": position.copy() if hasattr(position, "copy") else Vector(position),
+                    "uv": uv,
+                }
+            )
+        eval_obj.to_mesh_clear()
 
     if not vertices:
         return None
