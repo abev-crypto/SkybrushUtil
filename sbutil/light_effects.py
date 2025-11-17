@@ -671,16 +671,31 @@ def _set_material_color_keyframe(material, color, frame):
     color = _clamp_color(color)
 
     if getattr(material, "use_nodes", False) and getattr(material, "node_tree", None):
-        node = next(
+        node_tree = material.node_tree
+
+        emission = node_tree.nodes.get("Emission")
+        if emission is None:
+            emission = next(
+                (n for n in node_tree.nodes if getattr(n, "type", "") == "EMISSION"),
+                None,
+            )
+        if emission is not None:
+            socket = emission.inputs[0] if len(emission.inputs) else None
+            if socket is not None:
+                socket.default_value = color
+                socket.keyframe_insert("default_value", frame=frame)
+                return True
+
+        principled = next(
             (
                 n
-                for n in material.node_tree.nodes
+                for n in node_tree.nodes
                 if getattr(n, "type", "") == "BSDF_PRINCIPLED"
             ),
             None,
         )
-        if node is not None:
-            base_color = node.inputs.get("Base Color")
+        if principled is not None:
+            base_color = principled.inputs.get("Base Color")
             if base_color is not None:
                 base_color.default_value = color
                 base_color.keyframe_insert("default_value", frame=frame)
@@ -693,6 +708,31 @@ def _set_material_color_keyframe(material, color, frame):
         return True
 
     return False
+
+
+def _ensure_action_exists(obj):
+    """Ensure that ``obj`` has an animation action."""
+
+    if getattr(obj, "animation_data", None) is None:
+        obj.animation_data_create()
+    if getattr(obj.animation_data, "action", None) is None:
+        name = f"{getattr(obj, 'name', 'Object')}Action"
+        obj.animation_data.action = bpy.data.actions.new(name=name)
+
+
+def _set_color_keyframe(obj, color, frame):
+    """Assign ``color`` to the object's material or the object itself."""
+
+    color = _clamp_color(color)
+
+    material = _get_primary_material(obj)
+    if material is not None and _set_material_color_keyframe(material, color, frame):
+        return True
+
+    _ensure_action_exists(obj)
+    obj.color = color
+    obj.keyframe_insert("color", frame=frame)
+    return True
 
 
 def _guess_formation_index(obj):
@@ -2676,10 +2716,7 @@ class BakeLightEffectToKeysOperator(bpy.types.Operator):  # pragma: no cover - B
                 for obj, base_color, color in zip(drones, base_colors, colors):
                     if not _color_changed(base_color, color):
                         continue
-                    material = _get_primary_material(obj)
-                    if material is None:
-                        continue
-                    if _set_material_color_keyframe(material, color, frame):
+                    if _set_color_keyframe(obj, color, frame):
                         inserted = True
             return inserted
         finally:
