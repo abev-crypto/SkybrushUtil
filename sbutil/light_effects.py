@@ -719,7 +719,6 @@ def _ensure_action_exists(obj):
         name = f"{getattr(obj, 'name', 'Object')}Action"
         obj.animation_data.action = bpy.data.actions.new(name=name)
 
-
 def _set_color_keyframe(obj, color, frame):
     """Assign ``color`` to the object's material or the object itself."""
 
@@ -728,7 +727,6 @@ def _set_color_keyframe(obj, color, frame):
     material = _get_primary_material(obj)
     if material is not None and _set_material_color_keyframe(material, color, frame):
         return True
-
     _ensure_action_exists(obj)
     obj.color = color
     obj.keyframe_insert("color", frame=frame)
