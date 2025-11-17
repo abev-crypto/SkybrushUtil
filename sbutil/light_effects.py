@@ -62,6 +62,7 @@ from sbstudio.plugin.panels.light_effects import LightEffectsPanel
 from sbstudio.plugin.model.light_effects import (
     effect_type_supports_randomization,
     output_type_supports_mapping_mode,
+    invalidate_pixel_cache,
 )
 from sbstudio.plugin.operators import (
     CreateLightEffectOperator,
@@ -3401,6 +3402,22 @@ class MergeSplitLightEffectsOperator(bpy.types.Operator):  # pragma: no cover - 
         return {'FINISHED'}
 
 
+class ClearLightEffectPixelCacheOperator(bpy.types.Operator):  # pragma: no cover - Blender UI
+    bl_idname = "skybrush.clear_light_effect_pixel_cache"
+    bl_label = "Clear Pixel Cache"
+    bl_description = "Clear cached pixels for light effects"
+
+    def execute(self, _context):
+        try:
+            invalidate_pixel_cache()
+        except Exception as exc:  # pragma: no cover - defensive
+            self.report({'WARNING'}, f"Failed to clear cache: {exc}")
+            return {'CANCELLED'}
+
+        self.report({'INFO'}, "Light effect pixel cache cleared")
+        return {'FINISHED'}
+
+
 class CreateTargetCollectionFromSelectionOperator(bpy.types.Operator):  # pragma: no cover - Blender UI
     bl_idname = "skybrush.create_target_collection"
     bl_label = "Create Target Collection"
@@ -3860,6 +3877,11 @@ class PatchedLightEffectsPanel(Panel):  # pragma: no cover - Blender UI code
             MoveLightEffectDownOperator.bl_idname, icon="TRIA_DOWN", text=""
         )
 
+        layout.operator(
+            ClearLightEffectPixelCacheOperator.bl_idname,
+            icon="FILE_REFRESH",
+        )
+
         entry = light_effects.active_entry
         if entry is not None:
             layout.prop(entry, "type")
@@ -4072,6 +4094,7 @@ def register():  # pragma: no cover - executed in Blender
     bpy.utils.register_class(ConvertCollectionToMeshOperator)
     bpy.utils.register_class(BakeColorRampSplitOperator)
     bpy.utils.register_class(MergeSplitLightEffectsOperator)
+    bpy.utils.register_class(ClearLightEffectPixelCacheOperator)
     if _ensure_light_effects_initialized not in bpy.app.handlers.depsgraph_update_pre:
         bpy.app.handlers.depsgraph_update_pre.append(_ensure_light_effects_initialized)
 
@@ -4094,6 +4117,7 @@ def unregister():  # pragma: no cover - executed in Blender
     bpy.utils.unregister_class(EmbedColorFunctionOperator)
     bpy.utils.unregister_class(BakeColorRampSplitOperator)
     bpy.utils.unregister_class(MergeSplitLightEffectsOperator)
+    bpy.utils.unregister_class(ClearLightEffectPixelCacheOperator)
     bpy.utils.unregister_class(RemoveDynamicColorRampPointOperator)
     bpy.utils.unregister_class(AddDynamicColorRampPointOperator)
     bpy.utils.unregister_class(RemoveDynamicArrayItemOperator)
