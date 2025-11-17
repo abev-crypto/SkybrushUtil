@@ -3185,6 +3185,104 @@ class CreateBoundingBoxMeshOperator(bpy.types.Operator):  # pragma: no cover - B
         return {'FINISHED'}
 
 
+class ToggleUvMeshPreviewOperator(bpy.types.Operator):  # pragma: no cover - Blender UI
+    bl_idname = "skybrush.toggle_uv_mesh_preview"
+    bl_label = "Preview"
+    bl_description = "Toggle UV mesh preview with the light effect image"
+
+    @classmethod
+    def poll(cls, context):
+        scene = getattr(context, "scene", None)
+        if scene is None:
+            return False
+        le = getattr(getattr(scene, "skybrush", None), "light_effects", None)
+        if not le:
+            return False
+        entry = getattr(le, "active_entry", None)
+        if entry is None or getattr(entry, "type", None) != "IMAGE":
+            return False
+        uv_mesh = getattr(entry, "uv_mesh", None)
+        if uv_mesh is None:
+            return False
+        texture = getattr(entry, "texture", None)
+        image = getattr(texture, "image", None) if texture else None
+        return image is not None
+
+    @staticmethod
+    def _set_display_mode(obj, mode: str) -> None:
+        if hasattr(obj, "display_type"):
+            obj.display_type = mode
+        elif hasattr(obj, "display"):
+            obj.display = mode
+
+    @staticmethod
+    def _ensure_preview_material(entry) -> bpy.types.Material:
+        texture = getattr(entry, "texture", None)
+        image = getattr(texture, "image", None) if texture else None
+        if image is None:
+            raise ValueError("No image found on the light effect")
+
+        mat_name = f"{entry.name}_PreviewEmission"
+        material = bpy.data.materials.get(mat_name)
+        if material is None:
+            material = bpy.data.materials.new(mat_name)
+
+        material.use_nodes = True
+        node_tree = material.node_tree
+        nodes = node_tree.nodes
+        links = node_tree.links
+        nodes.clear()
+
+        tex = nodes.new("ShaderNodeTexImage")
+        tex.image = image
+        tex.location = (-200, 0)
+
+        emission = nodes.new("ShaderNodeEmission")
+        emission.location = (0, 0)
+
+        output = nodes.new("ShaderNodeOutputMaterial")
+        output.location = (200, 0)
+
+        if tex.outputs.get("Color") and emission.inputs.get("Color"):
+            links.new(tex.outputs["Color"], emission.inputs["Color"])
+        if emission.outputs.get("Emission") and output.inputs.get("Surface"):
+            links.new(emission.outputs["Emission"], output.inputs["Surface"])
+
+        return material
+
+    @staticmethod
+    def _assign_material(mesh_obj, material: bpy.types.Material) -> None:
+        slots = getattr(getattr(mesh_obj, "data", None), "materials", None)
+        if slots is not None:
+            if slots:
+                slots[0] = material
+            else:
+                slots.append(material)
+        mesh_obj.active_material = material
+
+    def execute(self, context):
+        entry = context.scene.skybrush.light_effects.active_entry
+        uv_mesh = entry.uv_mesh
+
+        display_attr = "display_type" if hasattr(uv_mesh, "display_type") else "display"
+        current_mode = getattr(uv_mesh, display_attr, None)
+
+        if current_mode == 'SOLID':
+            self._set_display_mode(uv_mesh, 'BOUNDS')
+            self.report({'INFO'}, f"Preview disabled on {uv_mesh.name}")
+            return {'FINISHED'}
+
+        try:
+            material = self._ensure_preview_material(entry)
+            self._assign_material(uv_mesh, material)
+        except Exception as exc:
+            self.report({'WARNING'}, f"Failed to prepare preview material: {exc}")
+
+        self._set_display_mode(uv_mesh, 'SOLID')
+        self.report({'INFO'}, f"Preview enabled on {uv_mesh.name}")
+        return {'FINISHED'}
+
+
 class BakeColorRampSplitOperator(bpy.types.Operator):  # pragma: no cover - Blender UI
     bl_idname = "skybrush.bake_color_ramp_split"
     bl_label = "Bake (Split)"
@@ -3937,6 +4035,15 @@ class PatchedLightEffectsPanel(Panel):  # pragma: no cover - Blender UI code
         if entry is not None:
             layout.prop(entry, "type")
 
+            def _append_uv_mesh_preview_button(row):
+                if entry.type != "IMAGE":
+                    return
+                row.operator(
+                    ToggleUvMeshPreviewOperator.bl_idname,
+                    text="",
+                    icon="HIDE_OFF",
+                )
+
             if entry.texture:
                 if entry.type == "COLOR_RAMP":
                     row = layout.box()
@@ -4047,6 +4154,7 @@ class PatchedLightEffectsPanel(Panel):  # pragma: no cover - Blender UI code
                         icon="MESH_CUBE",
                     )
                     op_uv.assign_mode = "UV"
+                    _append_uv_mesh_preview_button(row_uv)
                 if (
                     hasattr(entry, "formation_collection")
                     and entry.output == OUTPUT_FORMATION_UV_U
@@ -4071,6 +4179,7 @@ class PatchedLightEffectsPanel(Panel):  # pragma: no cover - Blender UI code
                         icon="MESH_CUBE",
                     )
                     op_uv_y.assign_mode = "UV"
+                    _append_uv_mesh_preview_button(row_uv_y)
                 if (
                     hasattr(entry, "formation_collection")
                     and entry.output_y == OUTPUT_FORMATION_UV_V
@@ -4146,6 +4255,7 @@ def register():  # pragma: no cover - executed in Blender
     bpy.utils.register_class(BakeLightEffectToKeysOperator)
     bpy.utils.register_class(GeneratePathGradientMeshOperator)
     bpy.utils.register_class(CreateBoundingBoxMeshOperator)
+    bpy.utils.register_class(ToggleUvMeshPreviewOperator)
     bpy.utils.register_class(CreateTargetCollectionFromSelectionOperator)
     bpy.utils.register_class(ConvertCollectionToMeshOperator)
     bpy.utils.register_class(BakeColorRampSplitOperator)
@@ -4164,6 +4274,7 @@ def unregister():  # pragma: no cover - executed in Blender
 
     if _ensure_light_effects_initialized in bpy.app.handlers.depsgraph_update_pre:
         bpy.app.handlers.depsgraph_update_pre.remove(_ensure_light_effects_initialized)
+    bpy.utils.unregister_class(ToggleUvMeshPreviewOperator)
     bpy.utils.unregister_class(ConvertCollectionToMeshOperator)
     bpy.utils.unregister_class(CreateTargetCollectionFromSelectionOperator)
     bpy.utils.unregister_class(CreateBoundingBoxMeshOperator)
