@@ -77,6 +77,8 @@ import sbstudio
 OUTPUT_VERTEX_COLOR = "MESH_VERTEX_COLOR"
 OUTPUT_MESH_UV_U = "MESH_UV_U"
 OUTPUT_MESH_UV_V = "MESH_UV_V"
+OUTPUT_FORMATION_UV_U = "FORMATION_UV_U"
+OUTPUT_FORMATION_UV_V = "FORMATION_UV_V"
 
 
 _selection_tracker_active = False
@@ -385,6 +387,193 @@ def sample_uv_factors(
         outputs.append(max(0.0, min(1.0, float(value))))
 
     return outputs
+
+
+def _update_formation_collection(self, _context):
+    """Clear cached formation UV data when the collection changes."""
+
+    get_state(self).pop("formation_uv_cache", None)
+
+
+def _collect_vertex_uvs(eval_mesh) -> dict[int, tuple[float, float]]:
+    """Return averaged UV coordinates per vertex from ``eval_mesh``."""
+
+    if not getattr(eval_mesh, "uv_layers", None):
+        return {}
+
+    try:
+        uv_layer = getattr(eval_mesh.uv_layers, "active", None)
+    except Exception:
+        uv_layer = None
+
+    if uv_layer is None and eval_mesh.uv_layers:
+        uv_layer = eval_mesh.uv_layers[0]
+
+    if uv_layer is None:
+        return {}
+
+    uv_data = getattr(uv_layer, "data", None)
+    if uv_data is None:
+        return {}
+
+    uv_accumulator: dict[int, list[tuple[float, float]]] = {}
+    for loop in getattr(eval_mesh, "loops", []):
+        try:
+            uv = uv_data[loop.index].uv
+        except Exception:
+            continue
+        uv_accumulator.setdefault(loop.vertex_index, []).append((float(uv[0]), float(uv[1])))
+
+    averaged_uvs: dict[int, tuple[float, float]] = {}
+    for vertex_index, values in uv_accumulator.items():
+        if not values:
+            continue
+        sum_u = sum(u for u, _v in values)
+        sum_v = sum(v for _u, v in values)
+        count = len(values)
+        averaged_uvs[vertex_index] = (sum_u / count, sum_v / count)
+
+    return averaged_uvs
+
+
+def _get_drone_number(
+    mapping: Optional[Sequence[Optional[int]]], index: int
+) -> Optional[int]:
+    """Return the drone number for ``index`` using ``mapping`` when available."""
+
+    if mapping is None:
+        return index
+    if 0 <= index < len(mapping):
+        return mapping[index]
+    return None
+
+
+def _get_or_build_formation_uv_cache(
+    effect,
+    positions: Sequence[Coordinate3D],
+    mapping: Optional[Sequence[Optional[int]]],
+    *,
+    frame: int,
+):
+    """Return cached formation UV data or build it for the current frame."""
+
+    collection = getattr(effect, "formation_collection", None)
+    if collection is None:
+        return None
+
+    try:
+        collection_ptr = collection.as_pointer()
+    except Exception:
+        return None
+
+    st = get_state(effect)
+    mapping_key = tuple(mapping) if mapping is not None else None
+    cache = st.get("formation_uv_cache")
+    if cache:
+        if (
+            cache.get("frame") == frame
+            and cache.get("collection") == collection_ptr
+            and cache.get("drone_count") == len(positions)
+            and cache.get("mapping") == mapping_key
+        ):
+            return cache.get("entries")
+
+    try:
+        depsgraph = bpy.context.evaluated_depsgraph_get()
+    except Exception:
+        return None
+
+    vertices: list[dict] = []
+    for obj in getattr(collection, "objects", []):
+        if getattr(obj, "type", "") != "MESH":
+            continue
+        try:
+            eval_obj = obj.evaluated_get(depsgraph)
+            eval_mesh = eval_obj.to_mesh(preserve_all_data_layers=True)
+        except Exception:
+            continue
+        try:
+            uv_by_vertex = _collect_vertex_uvs(eval_mesh)
+            if not uv_by_vertex:
+                continue
+            matrix_world = getattr(eval_obj, "matrix_world", None)
+            for vertex in getattr(eval_mesh, "vertices", []):
+                uv = uv_by_vertex.get(vertex.index)
+                if uv is None:
+                    continue
+                position = vertex.co
+                if matrix_world is not None:
+                    position = matrix_world @ position
+                vertices.append(
+                    {
+                        "vertex_id": int(vertex.index),
+                        "position": position.copy() if hasattr(position, "copy") else Vector(position),
+                        "uv": uv,
+                    }
+                )
+        finally:
+            try:
+                eval_obj.to_mesh_clear()
+            except Exception:
+                pass
+
+    if not vertices:
+        return None
+
+    drone_count = len(positions)
+    best_matches: list[Optional[dict]] = [None] * drone_count
+    best_distances = [float("inf")] * drone_count
+
+    for vertex in vertices:
+        pos = vertex["position"]
+        closest_drone = None
+        closest_distance = None
+        for idx, drone_pos in enumerate(positions):
+            drone_vec = (
+                drone_pos.copy()
+                if isinstance(drone_pos, Vector)
+                else Vector(drone_pos)
+            )
+            dist_sq = (drone_vec - pos).length_squared
+            if closest_distance is None or dist_sq < closest_distance:
+                closest_distance = dist_sq
+                closest_drone = idx
+
+        if closest_drone is None or closest_distance is None:
+            continue
+
+        if closest_distance < best_distances[closest_drone]:
+            best_distances[closest_drone] = closest_distance
+            best_matches[closest_drone] = vertex
+
+    entries = []
+    for idx, match in enumerate(best_matches):
+        drone_number = _get_drone_number(mapping, idx)
+        entries.append(
+            {
+                "drone_index": idx,
+                "drone_number": drone_number,
+                "vertex_id": (match or {}).get("vertex_id"),
+                "uv": (match or {}).get("uv"),
+            }
+        )
+
+    entries.sort(
+        key=lambda item: (
+            item["drone_number"] if item["drone_number"] is not None else float("inf"),
+            item["drone_index"],
+        )
+    )
+
+    st["formation_uv_cache"] = {
+        "frame": frame,
+        "collection": collection_ptr,
+        "drone_count": drone_count,
+        "mapping": mapping_key,
+        "entries": entries,
+    }
+
+    return entries
         
 
 
@@ -1363,6 +1552,12 @@ class PatchedLightEffect(PropertyGroup):
         ),
         default=False,
     )
+    formation_collection = PointerProperty(
+        name="Formation Collection",
+        description="Collection containing formation meshes for UV sampling",
+        type=bpy.types.Collection,
+        update=_update_formation_collection,
+    )
     sequence_mode = BoolProperty(
         name="Sequence Mode",
         description="Enable sequential playback across multiple mask meshes",
@@ -1641,6 +1836,23 @@ class PatchedLightEffect(PropertyGroup):
                             outputs = sampled
                     if outputs is None:
                         outputs = [None] * num_positions
+                elif output_type in {OUTPUT_FORMATION_UV_U, OUTPUT_FORMATION_UV_V}:
+                    cache_entries = _get_or_build_formation_uv_cache(
+                        self, positions, mapping, frame=effective_frame
+                    )
+                    outputs = [None] * num_positions
+                    if cache_entries:
+                        axis = 0 if output_type == OUTPUT_FORMATION_UV_U else 1
+                        for entry in cache_entries:
+                            drone_index = entry.get("drone_index")
+                            uv = entry.get("uv")
+                            if (
+                                drone_index is None
+                                or uv is None
+                                or drone_index >= num_positions
+                            ):
+                                continue
+                            outputs[drone_index] = float(uv[axis])
                 elif output_type_supports_mapping_mode(output_type):
                     proportional = mapping_mode == "PROPORTIONAL"
                     if output_type == "DISTANCE":
@@ -2114,6 +2326,7 @@ def patch_light_effect_class():
             ("CUSTOM", "Custom expression", "", 12),
             (OUTPUT_VERTEX_COLOR, "Mesh vertex color", "", 14),
             (OUTPUT_MESH_UV_U, "Mesh UV (U)", "", 15),
+            (OUTPUT_FORMATION_UV_U, "Formation UV (U)", "", 16),
         ],
         default="LAST_COLOR",
     )
@@ -2137,6 +2350,7 @@ def patch_light_effect_class():
             ("CUSTOM", "Custom expression", "", 12),
             (OUTPUT_VERTEX_COLOR, "Mesh vertex color", "", 14),
             (OUTPUT_MESH_UV_V, "Mesh UV (V)", "", 15),
+            (OUTPUT_FORMATION_UV_V, "Formation UV (V)", "", 16),
         ],
         default="LAST_COLOR",
     )
@@ -2156,12 +2370,16 @@ def patch_light_effect_class():
         ],
         default="ALL",
     )
+    LightEffect.original_formation_collection = getattr(
+        LightEffect, "formation_collection", None
+    )
     LightEffect.original_uv_mesh = getattr(LightEffect, "uv_mesh", None)
     LightEffect.uv_mesh = PointerProperty(
         name="UV Mesh",
         type=bpy.types.Object,
         poll=_mesh_object_poll,
     )
+    LightEffect.formation_collection = PatchedLightEffect.formation_collection
     LightEffect.target_collection = PointerProperty(
         name="Collection", type=bpy.types.Collection
     )
@@ -2187,6 +2405,9 @@ def patch_light_effect_class():
     LightEffect.__annotations__["output_y"] = LightEffect.output_y
     LightEffect.__annotations__["target"] = LightEffect.target
     LightEffect.__annotations__["uv_mesh"] = LightEffect.uv_mesh
+    LightEffect.__annotations__["formation_collection"] = (
+        LightEffect.formation_collection
+    )
     LightEffect.__annotations__["target_collection"] = LightEffect.target_collection
     ensure_all_function_entries_initialized()
 
@@ -2250,6 +2471,15 @@ def unpatch_light_effect_class():
     elif hasattr(LightEffect, "uv_mesh"):
         delattr(LightEffect, "uv_mesh")
         LightEffect.__annotations__.pop("uv_mesh", None)
+    if getattr(LightEffect, "original_formation_collection", None) is not None:
+        LightEffect.formation_collection = LightEffect.original_formation_collection
+        LightEffect.__annotations__["formation_collection"] = (
+            LightEffect.original_formation_collection
+        )
+        LightEffect.original_formation_collection = None
+    elif hasattr(LightEffect, "formation_collection"):
+        delattr(LightEffect, "formation_collection")
+        LightEffect.__annotations__.pop("formation_collection", None)
     if getattr(LightEffect, "_original_get_spatial_effect_predicate", None) is not None:
         LightEffect._get_spatial_effect_predicate = (
             LightEffect._original_get_spatial_effect_predicate
@@ -3705,6 +3935,11 @@ class PatchedLightEffectsPanel(Panel):  # pragma: no cover - Blender UI code
                         icon="MESH_CUBE",
                     )
                     op_uv.assign_mode = "UV"
+                if (
+                    hasattr(entry, "formation_collection")
+                    and entry.output == OUTPUT_FORMATION_UV_U
+                ):
+                    col.prop(entry, "formation_collection")
             if output_type_supports_mapping_mode(entry.output):
                 col.prop(entry, "output_mapping_mode")
             if entry.type == "IMAGE":
@@ -3724,6 +3959,11 @@ class PatchedLightEffectsPanel(Panel):  # pragma: no cover - Blender UI code
                         icon="MESH_CUBE",
                     )
                     op_uv_y.assign_mode = "UV"
+                if (
+                    hasattr(entry, "formation_collection")
+                    and entry.output_y == OUTPUT_FORMATION_UV_V
+                ):
+                    col.prop(entry, "formation_collection")
                 col.prop(entry, "convert_srgb")
             if output_type_supports_mapping_mode(entry.output_y):
                 col.prop(entry, "output_mapping_mode_y")
