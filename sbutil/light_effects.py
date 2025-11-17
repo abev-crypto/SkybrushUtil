@@ -407,20 +407,6 @@ def _update_formation_collection(self, _context):
 
 
 def _collect_vertex_uvs(eval_mesh) -> dict[int, tuple[float, float]]:
-    """Return averaged UV coordinates per vertex from ``eval_mesh``."""
-    print("mesh:", eval_mesh)
-    print("has uv_layers:", hasattr(eval_mesh, "uv_layers"))
-    if hasattr(eval_mesh, "uv_layers"):
-        print("len uv_layers:", len(eval_mesh.uv_layers))
-        print("uv_layers:", eval_mesh.uv_layers)
-
-        try:
-            print("uv_layers.active:", eval_mesh.uv_layers.active)
-        except Exception as e:
-            print("active access error:", e)
-
-    print("len loops:", len(getattr(eval_mesh, "loops", [])))
-    # ここまで見てから元のロジック続行
     if not getattr(eval_mesh, "uv_layers", None):
         return {}
 
@@ -2650,16 +2636,6 @@ class BakeLightEffectToKeysOperator(bpy.types.Operator):  # pragma: no cover - B
         end = start + max(duration - 1, 0)
         return start, end
 
-    def _seed_for_frame(self, entry, frame):
-        seed = getattr(entry, "random_seed", None)
-        if seed is None:
-            seed = getattr(entry, "seed", None)
-        try:
-            base = int(seed) if seed is not None else 0
-        except (TypeError, ValueError):
-            base = 0
-        return base + frame
-
     def _gather_drones(self):
         drones_collection = bpy.data.collections.get("Drones")
         if drones_collection is None:
@@ -2684,7 +2660,9 @@ class BakeLightEffectToKeysOperator(bpy.types.Operator):  # pragma: no cover - B
                 base_colors = [_extract_material_color(obj) for obj in drones]
                 positions = [tuple(get_position_of_object(obj)) for obj in drones]
                 colors = [list(color) for color in base_colors]
-                random_seq = RandomSequence(self._seed_for_frame(entry, frame))
+                settings = getattr(getattr(context, "scene", None), "skybrush", None)
+                settings = getattr(settings, "settings", None)
+                random_seq = getattr(settings, "random_sequence_root", None)
                 try:
                     entry.apply_on_colors(
                         colors,
