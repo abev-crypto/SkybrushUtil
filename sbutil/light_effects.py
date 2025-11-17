@@ -3431,6 +3431,44 @@ class ClearLightEffectPixelCacheOperator(bpy.types.Operator):  # pragma: no cove
         return {'FINISHED'}
 
 
+class ReloadLightEffectImageOperator(bpy.types.Operator):  # pragma: no cover - Blender UI
+    bl_idname = "skybrush.reload_light_effect_image"
+    bl_label = "Reload Light Effect Image"
+    bl_description = "Reload the currently selected image for the active light effect"
+
+    @classmethod
+    def poll(cls, context):
+        light_effects = getattr(context.scene.skybrush, "light_effects", None)
+        if not light_effects:
+            return False
+
+        entry = getattr(light_effects, "active_entry", None)
+        texture = getattr(entry, "texture", None) if entry else None
+        image = getattr(texture, "image", None) if texture else None
+        return (
+            entry is not None
+            and getattr(entry, "type", None) == "IMAGE"
+            and image is not None
+        )
+
+    def execute(self, context):
+        entry = context.scene.skybrush.light_effects.active_entry
+        texture = getattr(entry, "texture", None)
+        image = getattr(texture, "image", None) if texture else None
+        if image is None:
+            self.report({'WARNING'}, "Image not found")
+            return {'CANCELLED'}
+
+        try:
+            image.reload()
+        except Exception as exc:
+            self.report({'ERROR'}, f"Failed to reload image: {exc}")
+            return {'CANCELLED'}
+
+        self.report({'INFO'}, f"Reloaded image: {image.name}")
+        return {'FINISHED'}
+
+
 class CreateTargetCollectionFromSelectionOperator(bpy.types.Operator):  # pragma: no cover - Blender UI
     bl_idname = "skybrush.create_target_collection"
     bl_label = "Create Target Collection"
@@ -3911,6 +3949,11 @@ class PatchedLightEffectsPanel(Panel):  # pragma: no cover - Blender UI code
 
                     col = row.column(align=True)
                     col.operator("image.open", icon="FILE_FOLDER", text="")
+                    col.operator(
+                        ReloadLightEffectImageOperator.bl_idname,
+                        icon="FILE_REFRESH",
+                        text="",
+                    )
                 elif entry.type == "FUNCTION":
                     box = self.layout.box()
                     row = box.row(align=True)
@@ -4108,6 +4151,7 @@ def register():  # pragma: no cover - executed in Blender
     bpy.utils.register_class(BakeColorRampSplitOperator)
     bpy.utils.register_class(MergeSplitLightEffectsOperator)
     bpy.utils.register_class(ClearLightEffectPixelCacheOperator)
+    bpy.utils.register_class(ReloadLightEffectImageOperator)
     if _ensure_light_effects_initialized not in bpy.app.handlers.depsgraph_update_pre:
         bpy.app.handlers.depsgraph_update_pre.append(_ensure_light_effects_initialized)
 
@@ -4131,6 +4175,7 @@ def unregister():  # pragma: no cover - executed in Blender
     bpy.utils.unregister_class(BakeColorRampSplitOperator)
     bpy.utils.unregister_class(MergeSplitLightEffectsOperator)
     bpy.utils.unregister_class(ClearLightEffectPixelCacheOperator)
+    bpy.utils.unregister_class(ReloadLightEffectImageOperator)
     bpy.utils.unregister_class(RemoveDynamicColorRampPointOperator)
     bpy.utils.unregister_class(AddDynamicColorRampPointOperator)
     bpy.utils.unregister_class(RemoveDynamicArrayItemOperator)
