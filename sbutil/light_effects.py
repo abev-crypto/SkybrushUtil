@@ -3576,7 +3576,24 @@ class CreateBoundingBoxMeshOperator(bpy.types.Operator):  # pragma: no cover - B
                 )
 
         scene = context.scene
-        scene.collection.objects.link(mesh_obj)
+        collection_name = getattr(entry, "name", None) or "LightEffects"
+        collection = bpy.data.collections.get(collection_name)
+        if collection is None:
+            collection = bpy.data.collections.new(collection_name)
+            try:
+                scene.collection.children.link(collection)
+            except RuntimeError:
+                pass
+        elif collection not in scene.collection.children:
+            try:
+                scene.collection.children.link(collection)
+            except RuntimeError:
+                pass
+
+        try:
+            collection.objects.link(mesh_obj)
+        except RuntimeError:
+            pass
 
         for modifier in list(getattr(mesh_obj, "modifiers", [])):
             if modifier.type == 'NODES' and modifier.name == "Sample UV Subdivide":
