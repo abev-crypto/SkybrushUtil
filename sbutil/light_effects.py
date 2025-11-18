@@ -3340,29 +3340,7 @@ class CreateBoundingBoxMeshOperator(bpy.types.Operator):  # pragma: no cover - B
 
     def _compute_bounds(self, objects):
         if not objects:
-            return Vector((1.0, 1.0, 1.0)), Matrix.Identity(4)
-
-        if len(objects) == 1:
-            obj = objects[0]
-            dims = Vector(getattr(obj, "dimensions", (1.0, 1.0, 1.0)))
-            dims = Vector((max(float(d), 1e-4) for d in dims))
-            bbox = getattr(obj, "bound_box", None)
-            center_world = obj.matrix_world.translation
-            if bbox:
-                try:
-                    corners = [Vector(corner) for corner in bbox]
-                    if corners:
-                        center_local = sum(corners, Vector()) / float(len(corners))
-                        center_world = obj.matrix_world @ center_local
-                except Exception:
-                    pass
-            rotation = obj.matrix_world.to_3x3()
-            try:
-                rotation = rotation.normalized()
-            except Exception:
-                rotation = Matrix.Identity(3)
-            transform = Matrix.Translation(center_world) @ rotation.to_4x4()
-            return dims, transform
+            return None
 
         min_corner = Vector((float("inf"), float("inf"), float("inf")))
         max_corner = Vector((float("-inf"), float("-inf"), float("-inf")))
@@ -3398,20 +3376,33 @@ class CreateBoundingBoxMeshOperator(bpy.types.Operator):  # pragma: no cover - B
             obj = objects[0]
             dims = Vector(getattr(obj, "dimensions", (1.0, 1.0, 1.0)))
             dims = Vector((max(float(d), 1e-4) for d in dims))
-            center_world = obj.matrix_world.translation
-            rotation = obj.matrix_world.to_3x3()
-            try:
-                rotation = rotation.normalized()
-            except Exception:
-                rotation = Matrix.Identity(3)
-            transform = Matrix.Translation(center_world) @ rotation.to_4x4()
-            return dims, transform
+            center_world = getattr(obj.matrix_world, "translation", Vector((0.0, 0.0, 0.0)))
+            return dims, Matrix.Translation(center_world)
 
         center_world = (min_corner + max_corner) * 0.5
         dims = max_corner - min_corner
         dims = Vector((max(float(d), 1e-4) for d in dims))
         transform = Matrix.Translation(center_world)
         return dims, transform
+
+    def _get_fallback_bounds_from_dpi_props(self):
+        scene = bpy.data.scenes.get("Scene") if hasattr(bpy.data, "scenes") else None
+        dpi_props = getattr(scene, "dpi_props", None) if scene else None
+        range_x = getattr(dpi_props, "output_range_x", None) if dpi_props else None
+        range_y = getattr(dpi_props, "output_range_y", None) if dpi_props else None
+
+        try:
+            dims = Vector(
+                (
+                    max(float(range_x), 1e-4),
+                    max(float(range_y), 1e-4),
+                    1e-4,
+                )
+            )
+        except Exception:
+            return None
+
+        return dims, Matrix.Identity(4)
 
     def _build_delaunay_object(self, entry, ref_objs):
         positions = delaunay.get_evaluated_world_positions(ref_objs)
@@ -3516,9 +3507,15 @@ class CreateBoundingBoxMeshOperator(bpy.types.Operator):  # pragma: no cover - B
     def execute(self, context):
         entry = context.scene.skybrush.light_effects.active_entry
         ref_objs = self._get_reference_objects(context)
+        fallback_bounds = None
         if not ref_objs:
-            self.report({'WARNING'}, "Select one or more objects to define the mesh bounds.")
-            return {'CANCELLED'}
+            fallback_bounds = self._get_fallback_bounds_from_dpi_props()
+            if fallback_bounds is None:
+                self.report(
+                    {'WARNING'},
+                    "Select one or more objects to define the mesh bounds.",
+                )
+                return {'CANCELLED'}
 
         mode = getattr(self, "assign_mode", "AUTO")
         assign_to_uv = False
@@ -3540,7 +3537,7 @@ class CreateBoundingBoxMeshOperator(bpy.types.Operator):  # pragma: no cover - B
         mesh_obj = None
         delaunay_error = None
         delaunay_used = False
-        if not assign_to_uv:
+        if ref_objs and not assign_to_uv:
             try:
                 mesh_obj = self._build_delaunay_object(entry, ref_objs)
                 delaunay_used = True
@@ -3548,7 +3545,19 @@ class CreateBoundingBoxMeshOperator(bpy.types.Operator):  # pragma: no cover - B
                 delaunay_error = exc
 
         if mesh_obj is None:
-            dims, transform = self._compute_bounds(ref_objs)
+            if ref_objs:
+                bounds = self._compute_bounds(ref_objs)
+            else:
+                bounds = fallback_bounds
+
+            if bounds is None:
+                self.report(
+                    {'WARNING'},
+                    "Unable to determine bounds for bounding box mesh.",
+                )
+                return {'CANCELLED'}
+
+            dims, transform = bounds
             mesh = self._build_cube_mesh(dims)
 
             obj_name = pick_unique_name(f"{entry.name}_bb_mesh", bpy.data.objects)
