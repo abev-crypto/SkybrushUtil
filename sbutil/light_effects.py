@@ -453,9 +453,17 @@ def _collect_vertex_colors(eval_mesh) -> dict[int, tuple[float, float]]:
         return {}
 
     if domain == "POINT":
-        return {
-            idx: (float(col[0]), float(col[1])) for idx, col in enumerate(data)
-        }
+        colors: dict[int, tuple[float, float]] = {}
+        for idx, col in enumerate(data):
+            # Entries from the color attribute expose their values via the
+            # ``color`` property; indexing the attribute itself raises
+            # ``TypeError`` on some Blender versions.
+            color = getattr(col, "color", col)
+            try:
+                colors[idx] = (float(color[0]), float(color[1]))
+            except Exception:
+                continue
+        return colors
 
     color_accumulator: dict[int, list[tuple[float, float]]] = {}
     for loop in getattr(eval_mesh, "loops", []):
