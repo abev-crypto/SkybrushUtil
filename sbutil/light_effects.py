@@ -2132,14 +2132,14 @@ class PatchedLightEffect(PropertyGroup):
                     uv_source = getattr(self, "uv_mesh", None) or getattr(self, "mesh", None)
                     if uv_source is not None:
                         axis = 0 if output_type == OUTPUT_MESH_UV_U else 1
-                            sampled = sample_uv_factors(
-                                uv_source,
-                                positions,
-                                axis,
-                                getattr(self, "uv_tiling_mode", "NONE"),
-                            )
-                            if sampled is not None:
-                                outputs = sampled
+                        sampled = sample_uv_factors(
+                            uv_source,
+                            positions,
+                            axis,
+                            getattr(self, "uv_tiling_mode", "NONE"),
+                        )
+                        if sampled is not None:
+                            outputs = sampled
                     if outputs is None:
                         outputs = [None] * num_positions
                 elif output_type in {OUTPUT_BAKED_UV_R, OUTPUT_BAKED_UV_G}:
