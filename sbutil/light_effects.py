@@ -80,6 +80,8 @@ OUTPUT_MESH_UV_U = "MESH_UV_U"
 OUTPUT_MESH_UV_V = "MESH_UV_V"
 OUTPUT_FORMATION_UV_U = "FORMATION_UV_U"
 OUTPUT_FORMATION_UV_V = "FORMATION_UV_V"
+OUTPUT_BAKED_UV_R = "BAKED_UV_R"
+OUTPUT_BAKED_UV_G = "BAKED_UV_G"
 
 
 _selection_tracker_active = False
@@ -404,6 +406,7 @@ def _update_formation_collection(self, _context):
     """Clear cached formation UV data when the collection changes."""
 
     get_state(self).pop("formation_uv_cache", None)
+    get_state(self).pop("baked_uv_cache", None)
 
 
 def _collect_vertex_uvs(eval_mesh) -> dict[int, tuple[float, float]]:
@@ -437,6 +440,42 @@ def _collect_vertex_uvs(eval_mesh) -> dict[int, tuple[float, float]]:
         averaged_uvs[vertex_index] = (sum_u / count, sum_v / count)
 
     return averaged_uvs
+
+
+def _collect_vertex_colors(eval_mesh) -> dict[int, tuple[float, float]]:
+    color_layer = _get_color_attribute(eval_mesh)
+    if color_layer is None:
+        return {}
+
+    domain = getattr(color_layer, "domain", None)
+    data = getattr(color_layer, "data", None)
+    if data is None:
+        return {}
+
+    if domain == "POINT":
+        return {
+            idx: (float(col[0]), float(col[1])) for idx, col in enumerate(data)
+        }
+
+    color_accumulator: dict[int, list[tuple[float, float]]] = {}
+    for loop in getattr(eval_mesh, "loops", []):
+        if loop.index >= len(data):
+            continue
+        color = data[loop.index].color
+        color_accumulator.setdefault(loop.vertex_index, []).append(
+            (float(color[0]), float(color[1]))
+        )
+
+    averaged_colors: dict[int, tuple[float, float]] = {}
+    for vertex_index, values in color_accumulator.items():
+        if not values:
+            continue
+        sum_r = sum(r for r, _g in values)
+        sum_g = sum(g for _r, g in values)
+        count = len(values)
+        averaged_colors[vertex_index] = (sum_r / count, sum_g / count)
+
+    return averaged_colors
 
 
 def _get_drone_number(
@@ -563,6 +602,125 @@ def _get_or_build_formation_uv_cache(
     )
 
     st["formation_uv_cache"] = {
+        "frame": frame,
+        "collection": collection_ptr,
+        "drone_count": drone_count,
+        "mapping": mapping_key,
+        "entries": entries,
+    }
+
+    return entries
+
+
+def _get_or_build_baked_uv_cache(
+    effect,
+    positions: Sequence[Coordinate3D],
+    mapping: Optional[Sequence[Optional[int]]],
+    *,
+    frame: int,
+):
+    """Return cached baked UV data or build it for the current frame."""
+
+    collection = getattr(effect, "formation_collection", None)
+    if collection is None:
+        return None
+
+    collection_ptr = collection.as_pointer()
+    st = get_state(effect)
+    mapping_key = tuple(mapping) if mapping is not None else None
+    cache = st.get("baked_uv_cache")
+    if cache:
+        if (
+            cache.get("frame") == frame
+            and cache.get("collection") == collection_ptr
+            and cache.get("drone_count") == len(positions)
+            and cache.get("mapping") == mapping_key
+        ):
+            return cache.get("entries")
+
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    vertices: list[dict] = []
+    for obj in getattr(collection, "objects", []):
+        if getattr(obj, "type", "") != "MESH":
+            continue
+        try:
+            eval_obj = obj.evaluated_get(depsgraph)
+            eval_mesh = eval_obj.to_mesh(
+                preserve_all_data_layers=True, depsgraph=depsgraph
+            )
+        except Exception:
+            continue
+        try:
+            colors_by_vertex = _collect_vertex_colors(eval_mesh)
+            if not colors_by_vertex:
+                continue
+            matrix_world = getattr(eval_obj, "matrix_world", None)
+            for vertex in getattr(eval_mesh, "vertices", []):
+                color = colors_by_vertex.get(vertex.index)
+                if color is None:
+                    continue
+                position = vertex.co
+                if matrix_world is not None:
+                    position = matrix_world @ position
+                vertices.append(
+                    {
+                        "vertex_id": int(vertex.index),
+                        "position": position.copy()
+                        if hasattr(position, "copy")
+                        else Vector(position),
+                        "color": color,
+                    }
+                )
+        finally:
+            eval_obj.to_mesh_clear()
+
+    if not vertices:
+        return None
+
+    drone_count = len(positions)
+    best_matches: list[Optional[dict]] = [None] * drone_count
+    best_distances = [float("inf")] * drone_count
+
+    for vertex in vertices:
+        pos = vertex["position"]
+        closest_drone = None
+        closest_distance = None
+        for idx, drone_pos in enumerate(positions):
+            drone_vec = (
+                drone_pos.copy() if isinstance(drone_pos, Vector) else Vector(drone_pos)
+            )
+            dist_sq = (drone_vec - pos).length_squared
+            if closest_distance is None or dist_sq < closest_distance:
+                closest_distance = dist_sq
+                closest_drone = idx
+
+        if closest_drone is None or closest_distance is None:
+            continue
+
+        if closest_distance < best_distances[closest_drone]:
+            best_distances[closest_drone] = closest_distance
+            best_matches[closest_drone] = vertex
+
+    entries = []
+    for idx, match in enumerate(best_matches):
+        drone_number = _get_drone_number(mapping, idx)
+        entries.append(
+            {
+                "drone_index": idx,
+                "drone_number": drone_number,
+                "vertex_id": (match or {}).get("vertex_id"),
+                "color": (match or {}).get("color"),
+            }
+        )
+
+    entries.sort(
+        key=lambda item: (
+            item["drone_number"] if item["drone_number"] is not None else float("inf"),
+            item["drone_index"],
+        )
+    )
+
+    st["baked_uv_cache"] = {
         "frame": frame,
         "collection": collection_ptr,
         "drone_count": drone_count,
@@ -779,6 +937,100 @@ def _build_formation_mapping(objects):
         return list(range(len(objects)))
 
     return mapping
+
+
+def _find_closest_vertices(
+    meshes: Sequence[object], positions: Sequence[Coordinate3D]
+) -> list[Optional[dict]]:
+    vertices: list[dict] = []
+    for obj in meshes:
+        if getattr(obj, "type", "") != "MESH":
+            continue
+        mesh_data = getattr(obj, "data", None)
+        if mesh_data is None:
+            continue
+        matrix_world = getattr(obj, "matrix_world", None)
+        for vertex in getattr(mesh_data, "vertices", []):
+            position = vertex.co
+            if matrix_world is not None:
+                position = matrix_world @ position
+            vertices.append(
+                {
+                    "object": obj,
+                    "vertex_id": int(vertex.index),
+                    "position": position.copy()
+                    if hasattr(position, "copy")
+                    else Vector(position),
+                }
+            )
+
+    drone_count = len(positions)
+    best_matches: list[Optional[dict]] = [None] * drone_count
+    best_distances = [float("inf")] * drone_count
+
+    for vertex in vertices:
+        pos = vertex["position"]
+        closest_drone = None
+        closest_distance = None
+        for idx, drone_pos in enumerate(positions):
+            drone_vec = (
+                drone_pos.copy() if isinstance(drone_pos, Vector) else Vector(drone_pos)
+            )
+            dist_sq = (drone_vec - pos).length_squared
+            if closest_distance is None or dist_sq < closest_distance:
+                closest_distance = dist_sq
+                closest_drone = idx
+
+        if closest_drone is None or closest_distance is None:
+            continue
+
+        if closest_distance < best_distances[closest_drone]:
+            best_distances[closest_drone] = closest_distance
+            best_matches[closest_drone] = vertex
+
+    return best_matches
+
+
+def _assign_vertex_colors(mesh, assignments: list[tuple[int, tuple[float, float, float, float]]]):
+    if mesh is None:
+        return
+
+    layer = None
+    if hasattr(mesh, "color_attributes"):
+        layer = mesh.color_attributes.get("color")
+        if layer is None or getattr(layer, "domain", None) != "POINT":
+            try:
+                layer = mesh.color_attributes.new(
+                    "color", type="FLOAT_COLOR", domain="POINT"
+                )
+            except Exception:
+                layer = None
+    else:
+        vcols = getattr(mesh, "vertex_colors", None)
+        if vcols is not None:
+            layer = vcols.get("color") or (
+                vcols.new(name="color") if hasattr(vcols, "new") else None
+            )
+
+    if layer is None:
+        return
+
+    if getattr(layer, "domain", None) == "POINT":
+        data = getattr(layer, "data", [])
+        for vertex_index, color in assignments:
+            if 0 <= vertex_index < len(data):
+                data[vertex_index].color = color
+        return
+
+    loops_by_vertex: dict[int, list[int]] = {}
+    for loop in getattr(mesh, "loops", []):
+        loops_by_vertex.setdefault(loop.vertex_index, []).append(loop.index)
+
+    data = getattr(layer, "data", [])
+    for vertex_index, color in assignments:
+        for loop_index in loops_by_vertex.get(vertex_index, []):
+            if 0 <= loop_index < len(data):
+                data[loop_index].color = color
 
 
 def _normalize_float_sequence(values, length, fill_value=0.0):
@@ -1880,16 +2132,34 @@ class PatchedLightEffect(PropertyGroup):
                     uv_source = getattr(self, "uv_mesh", None) or getattr(self, "mesh", None)
                     if uv_source is not None:
                         axis = 0 if output_type == OUTPUT_MESH_UV_U else 1
-                        sampled = sample_uv_factors(
-                            uv_source,
-                            positions,
-                            axis,
-                            getattr(self, "uv_tiling_mode", "NONE"),
-                        )
-                        if sampled is not None:
-                            outputs = sampled
+                            sampled = sample_uv_factors(
+                                uv_source,
+                                positions,
+                                axis,
+                                getattr(self, "uv_tiling_mode", "NONE"),
+                            )
+                            if sampled is not None:
+                                outputs = sampled
                     if outputs is None:
                         outputs = [None] * num_positions
+                elif output_type in {OUTPUT_BAKED_UV_R, OUTPUT_BAKED_UV_G}:
+                    cache_entries = _get_or_build_baked_uv_cache(
+                        self, positions, mapping, frame=effective_frame
+                    )
+                    outputs = [None] * num_positions
+                    if cache_entries:
+                        axis = 0 if output_type == OUTPUT_BAKED_UV_R else 1
+                        for entry in cache_entries:
+                            drone_index = entry.get("drone_index")
+                            color = entry.get("color")
+                            if (
+                                drone_index is None
+                                or color is None
+                                or drone_index >= num_positions
+                                or axis >= len(color)
+                            ):
+                                continue
+                            outputs[drone_index] = float(color[axis])
                 elif output_type in {OUTPUT_FORMATION_UV_U, OUTPUT_FORMATION_UV_V}:
                     cache_entries = _get_or_build_formation_uv_cache(
                         self, positions, mapping, frame=effective_frame
@@ -2381,6 +2651,7 @@ def patch_light_effect_class():
             (OUTPUT_VERTEX_COLOR, "Mesh vertex color", "", 14),
             (OUTPUT_MESH_UV_U, "Mesh UV (U)", "", 15),
             (OUTPUT_FORMATION_UV_U, "Formation UV (U)", "", 16),
+            (OUTPUT_BAKED_UV_R, "Baked UV (R)", "", 17),
         ],
         default="LAST_COLOR",
     )
@@ -2405,6 +2676,7 @@ def patch_light_effect_class():
             (OUTPUT_VERTEX_COLOR, "Mesh vertex color", "", 14),
             (OUTPUT_MESH_UV_V, "Mesh UV (V)", "", 15),
             (OUTPUT_FORMATION_UV_V, "Formation UV (V)", "", 16),
+            (OUTPUT_BAKED_UV_G, "Baked UV (G)", "", 17),
         ],
         default="LAST_COLOR",
     )
@@ -2770,6 +3042,149 @@ class BakeLightEffectToKeysOperator(bpy.types.Operator):  # pragma: no cover - B
             self.report({'WARNING'}, "No keyframes were inserted")
         else:
             self.report({'INFO'}, "Baked light effect into material keyframes")
+        return {'FINISHED'}
+
+
+class BakeMeshUVToVertexColorOperator(bpy.types.Operator):  # pragma: no cover - Blender UI
+    bl_idname = "skybrush.bake_uv_to_vertex_color"
+    bl_label = "Bake UV"
+    bl_description = (
+        "Bake mesh UV output values into the vertex colors of selected meshes"
+    )
+
+    @classmethod
+    def poll(cls, context):
+        light_effects = getattr(getattr(context.scene, "skybrush", None), "light_effects", None)
+        entry = getattr(light_effects, "active_entry", None) if light_effects else None
+        if entry is None:
+            return False
+        if entry.output not in {OUTPUT_MESH_UV_U, OUTPUT_MESH_UV_V} and getattr(entry, "output_y", None) not in {OUTPUT_MESH_UV_U, OUTPUT_MESH_UV_V}:
+            return False
+        selected = getattr(context, "selected_objects", [])
+        return any(getattr(obj, "type", "") == "MESH" for obj in selected)
+
+    def _gather_drones(self):
+        drones_collection = bpy.data.collections.get("Drones")
+        if drones_collection is None:
+            return []
+        drones = []
+        for obj in drones_collection.objects:
+            if getattr(obj, "type", "") == "MESH":
+                drones.append(obj)
+        return drones
+
+    def execute(self, context):
+        entry = context.scene.skybrush.light_effects.active_entry
+        selected_meshes = [
+            obj
+            for obj in getattr(context, "selected_objects", [])
+            if getattr(obj, "type", "") == "MESH"
+        ]
+        if not selected_meshes:
+            self.report({'ERROR'}, "Select one or more mesh objects to bake into.")
+            return {'CANCELLED'}
+
+        uv_source = getattr(entry, "uv_mesh", None) or getattr(entry, "mesh", None)
+        if uv_source is None:
+            self.report({'ERROR'}, "No UV mesh available for baking.")
+            return {'CANCELLED'}
+
+        drones = self._gather_drones()
+        if not drones:
+            self.report({'ERROR'}, "No objects found in the 'Drones' collection")
+            return {'CANCELLED'}
+
+        positions = [tuple(get_position_of_object(obj)) for obj in drones]
+        mapping = _build_formation_mapping(drones)
+
+        outputs_x = sample_uv_factors(
+            uv_source, positions, 0, getattr(entry, "uv_tiling_mode", "NONE")
+        )
+        outputs_y = sample_uv_factors(
+            uv_source, positions, 1, getattr(entry, "uv_tiling_mode", "NONE")
+        )
+        if outputs_x is None or outputs_y is None:
+            self.report({'ERROR'}, "Failed to evaluate UV coordinates for drones")
+            return {'CANCELLED'}
+
+        matches = _find_closest_vertices(selected_meshes, positions)
+        assignments: dict[object, list[tuple[int, tuple[float, float, float, float]]]] = {}
+        for idx, match in enumerate(matches):
+            if match is None:
+                continue
+            if idx >= len(outputs_x) or idx >= len(outputs_y):
+                continue
+            if outputs_x[idx] is None or outputs_y[idx] is None:
+                continue
+            obj = match.get("object")
+            vertex_id = match.get("vertex_id")
+            if obj is None or vertex_id is None:
+                continue
+            assignments.setdefault(obj, []).append(
+                (
+                    int(vertex_id),
+                    (
+                        float(outputs_x[idx]),
+                        float(outputs_y[idx]),
+                        0.0,
+                        1.0,
+                    ),
+                )
+            )
+
+        if not assignments:
+            self.report({'ERROR'}, "No matching vertices found for baking")
+            return {'CANCELLED'}
+
+        for obj, vertex_colors in assignments.items():
+            _assign_vertex_colors(getattr(obj, "data", None), vertex_colors)
+            mesh_data = getattr(obj, "data", None)
+            if mesh_data is not None:
+                try:
+                    mesh_data.update()
+                except Exception:
+                    pass
+
+        collection = getattr(entry, "formation_collection", None)
+        if collection is not None:
+            collection_ptr = collection.as_pointer()
+            mapping_key = tuple(mapping) if mapping is not None else None
+            entries = []
+            for idx, match in enumerate(matches):
+                drone_number = _get_drone_number(mapping, idx)
+                color = None
+                if idx < len(outputs_x) and idx < len(outputs_y):
+                    ox, oy = outputs_x[idx], outputs_y[idx]
+                    if ox is not None and oy is not None:
+                        color = (float(ox), float(oy))
+                entries.append(
+                    {
+                        "drone_index": idx,
+                        "drone_number": drone_number,
+                        "vertex_id": (match or {}).get("vertex_id"),
+                        "color": color,
+                    }
+                )
+
+            entries.sort(
+                key=lambda item: (
+                    item["drone_number"]
+                    if item["drone_number"] is not None
+                    else float("inf"),
+                    item["drone_index"],
+                )
+            )
+
+            st = get_state(entry)
+            st["baked_uv_cache"] = {
+                "frame": getattr(context.scene, "frame_current", 0),
+                "collection": collection_ptr,
+                "drone_count": len(positions),
+                "mapping": mapping_key,
+                "entries": entries,
+            }
+
+        self.report({'INFO'}, "Baked UV outputs into vertex colors")
         return {'FINISHED'}
 
 
@@ -4155,9 +4570,15 @@ class PatchedLightEffectsPanel(Panel):  # pragma: no cover - Blender UI code
                     )
                     op_uv.assign_mode = "UV"
                     _append_uv_mesh_preview_button(row_uv)
+                    row_uv.operator(
+                        BakeMeshUVToVertexColorOperator.bl_idname,
+                        text="Bake UV",
+                        icon="RENDER_STILL",
+                    )
                 if (
                     hasattr(entry, "formation_collection")
-                    and entry.output == OUTPUT_FORMATION_UV_U
+                    and entry.output
+                    in {OUTPUT_FORMATION_UV_U, OUTPUT_BAKED_UV_R}
                 ):
                     col.prop(entry, "formation_collection")
             if output_type_supports_mapping_mode(entry.output):
@@ -4180,9 +4601,15 @@ class PatchedLightEffectsPanel(Panel):  # pragma: no cover - Blender UI code
                     )
                     op_uv_y.assign_mode = "UV"
                     _append_uv_mesh_preview_button(row_uv_y)
+                    row_uv_y.operator(
+                        BakeMeshUVToVertexColorOperator.bl_idname,
+                        text="Bake UV",
+                        icon="RENDER_STILL",
+                    )
                 if (
                     hasattr(entry, "formation_collection")
-                    and entry.output_y == OUTPUT_FORMATION_UV_V
+                    and entry.output_y
+                    in {OUTPUT_FORMATION_UV_V, OUTPUT_BAKED_UV_G}
                 ):
                     col.prop(entry, "formation_collection")
                 col.prop(entry, "convert_srgb")
@@ -4253,6 +4680,7 @@ def register():  # pragma: no cover - executed in Blender
     bpy.utils.register_class(UnembedColorFunctionOperator)
     bpy.utils.register_class(BakeColorRampOperator)
     bpy.utils.register_class(BakeLightEffectToKeysOperator)
+    bpy.utils.register_class(BakeMeshUVToVertexColorOperator)
     bpy.utils.register_class(GeneratePathGradientMeshOperator)
     bpy.utils.register_class(CreateBoundingBoxMeshOperator)
     bpy.utils.register_class(ToggleUvMeshPreviewOperator)
@@ -4281,6 +4709,7 @@ def unregister():  # pragma: no cover - executed in Blender
     bpy.utils.unregister_class(GeneratePathGradientMeshOperator)
     bpy.utils.unregister_class(BakeColorRampOperator)
     bpy.utils.unregister_class(BakeLightEffectToKeysOperator)
+    bpy.utils.unregister_class(BakeMeshUVToVertexColorOperator)
     bpy.utils.unregister_class(UnembedColorFunctionOperator)
     bpy.utils.unregister_class(EmbedColorFunctionOperator)
     bpy.utils.unregister_class(BakeColorRampSplitOperator)
