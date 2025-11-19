@@ -3418,22 +3418,70 @@ class CreateBoundingBoxMeshOperator(bpy.types.Operator):  # pragma: no cover - B
         transform = Matrix.Translation(center_world)
         return dims, transform
 
-    def _get_fallback_bounds_from_dpi_props(self):
+    def _get_image_aspect_ratio(self, entry) -> Optional[float]:
+        if entry is None or getattr(entry, "type", None) != "IMAGE":
+            return None
+
+        texture = getattr(entry, "texture", None)
+        image = getattr(texture, "image", None) if texture else None
+        size = getattr(image, "size", None) if image else None
+        if not size:
+            return None
+
+        try:
+            width = float(size[0])
+            height = float(size[1])
+        except (TypeError, ValueError, IndexError):
+            return None
+
+        if width <= 0.0 or height <= 0.0:
+            return None
+
+        return width / height
+
+    def _fit_dims_to_image_ratio(
+        self,
+        dims: Vector,
+        entry,
+        *,
+        max_width: Optional[float] = None,
+        max_height: Optional[float] = None,
+    ) -> Vector:
+        aspect = self._get_image_aspect_ratio(entry)
+        if aspect is None:
+            return dims
+
+        try:
+            width_limit = float(max_width if max_width is not None else dims.x)
+            height_limit = float(max_height if max_height is not None else dims.y)
+        except (TypeError, ValueError):
+            return dims
+
+        width_limit = max(width_limit, 1e-4)
+        height_limit = max(height_limit, 1e-4)
+
+        fitted_width = width_limit
+        fitted_height = width_limit / aspect
+        if fitted_height > height_limit:
+            fitted_height = height_limit
+            fitted_width = height_limit * aspect
+
+        return Vector((fitted_width, fitted_height, max(float(dims.z), 1e-4)))
+
+    def _get_fallback_bounds_from_dpi_props(self, entry):
         scene = bpy.data.scenes.get("Scene") if hasattr(bpy.data, "scenes") else None
         dpi_props = getattr(scene, "dpi_props", None) if scene else None
         range_x = getattr(dpi_props, "output_range_x", None) if dpi_props else None
         range_y = getattr(dpi_props, "output_range_y", None) if dpi_props else None
 
         try:
-            dims = Vector(
-                (
-                    max(float(range_x), 1e-4),
-                    max(float(range_y), 1e-4),
-                    1e-4,
-                )
-            )
+            width = max(float(range_x), 1e-4)
+            height = max(float(range_y), 1e-4)
         except Exception:
             return None
+
+        dims = Vector((width, height, 1e-4))
+        dims = self._fit_dims_to_image_ratio(dims, entry, max_width=width, max_height=height)
 
         return dims, Matrix.Identity(4)
 
@@ -3542,7 +3590,7 @@ class CreateBoundingBoxMeshOperator(bpy.types.Operator):  # pragma: no cover - B
         ref_objs = self._get_reference_objects(context)
         fallback_bounds = None
         if not ref_objs:
-            fallback_bounds = self._get_fallback_bounds_from_dpi_props()
+            fallback_bounds = self._get_fallback_bounds_from_dpi_props(entry)
             if fallback_bounds is None:
                 self.report(
                     {'WARNING'},
