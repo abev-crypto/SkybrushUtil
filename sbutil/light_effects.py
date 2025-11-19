@@ -71,7 +71,7 @@ from sbstudio.plugin.operators import (
     MoveLightEffectUpOperator,
     RemoveLightEffectOperator,
 )
-from sbutil import delaunay, path_gradient, selection_order
+from sbutil import delaunay, follow_curve, path_gradient, selection_order
 
 import sbstudio
 
@@ -3278,6 +3278,31 @@ class GeneratePathGradientMeshOperator(bpy.types.Operator):  # pragma: no cover 
         return {'FINISHED'}
 
 
+class SetupFollowCurveOperator(bpy.types.Operator):  # pragma: no cover - Blender UI
+    bl_idname = "skybrush.setup_follow_curve"
+    bl_label = "Follow Curve"
+    bl_description = (
+        "Assign a PathFollowLine Geometry Nodes modifier between a selected"
+        " mesh and curve object. Select both and run the operator to set up the"
+        " modifier."
+    )
+
+    @classmethod
+    def poll(cls, context):
+        entry = getattr(context.scene.skybrush.light_effects, "active_entry", None)
+        return entry is not None and entry.type == "COLOR_RAMP"
+
+    def execute(self, context):
+        try:
+            follow_curve.setup_modifier_for_selection()
+        except Exception as exc:  # pragma: no cover - Blender UI
+            self.report({'ERROR'}, str(exc))
+            return {'CANCELLED'}
+
+        self.report({'INFO'}, "Added PathFollowLine modifier to the selected mesh")
+        return {'FINISHED'}
+
+
 class CreateBoundingBoxMeshOperator(bpy.types.Operator):  # pragma: no cover - Blender UI
     bl_idname = "skybrush.create_bb_mesh"
     bl_label = "Create BB Mesh"
@@ -4581,10 +4606,16 @@ class PatchedLightEffectsPanel(Panel):  # pragma: no cover - Blender UI code
                     )
                 else:
                     row2.operator(BakeColorRampSplitOperator.bl_idname, text="Bake (Split)")
-                col.operator(
+                row_curve = col.row(align=True)
+                row_curve.operator(
                     GeneratePathGradientMeshOperator.bl_idname,
                     text="Generate Curve Mesh",
                     icon="OUTLINER_OB_CURVE",
+                )
+                row_curve.operator(
+                    SetupFollowCurveOperator.bl_idname,
+                    text="Follow Curve",
+                    icon="CURVE_PATH",
                 )
             if entry.type == "COLOR_RAMP" or entry.type == "IMAGE":
                 col.prop(entry, "output")
@@ -4716,6 +4747,7 @@ def register():  # pragma: no cover - executed in Blender
     bpy.utils.register_class(BakeLightEffectToKeysOperator)
     bpy.utils.register_class(BakeMeshUVToVertexColorOperator)
     bpy.utils.register_class(GeneratePathGradientMeshOperator)
+    bpy.utils.register_class(SetupFollowCurveOperator)
     bpy.utils.register_class(CreateBoundingBoxMeshOperator)
     bpy.utils.register_class(ToggleUvMeshPreviewOperator)
     bpy.utils.register_class(CreateTargetCollectionFromSelectionOperator)
@@ -4740,6 +4772,7 @@ def unregister():  # pragma: no cover - executed in Blender
     bpy.utils.unregister_class(ConvertCollectionToMeshOperator)
     bpy.utils.unregister_class(CreateTargetCollectionFromSelectionOperator)
     bpy.utils.unregister_class(CreateBoundingBoxMeshOperator)
+    bpy.utils.unregister_class(SetupFollowCurveOperator)
     bpy.utils.unregister_class(GeneratePathGradientMeshOperator)
     bpy.utils.unregister_class(BakeColorRampOperator)
     bpy.utils.unregister_class(BakeLightEffectToKeysOperator)
