@@ -164,9 +164,14 @@ def ensure_node_group():
     switch = nodes.new("GeometryNodeSwitch")
     switch.location = (100, 200)
 
+    switch_mat_index = nodes.new("GeometryNodeSwitch")
+    switch_mat_index.location = (350, -20)
+    switch_mat_index.input_type = 'INT'
+    switch_mat_index.inputs["True"].default_value = 1
+    switch_mat_index.inputs["False"].default_value = 0
+
     set_mat_index = nodes.new("GeometryNodeSetMaterialIndex")
-    set_mat_index.location = (350, 100)
-    set_mat_index.inputs["Material Index"].default_value = 1
+    set_mat_index.location = (600, 100)
 
     # ───────────────── リンク接続 ─────────────────
 
@@ -196,9 +201,11 @@ def ensure_node_group():
     links.new(join_geo.outputs["Geometry"], switch.inputs["True"])
     links.new(scale_elem.outputs["Geometry"], switch.inputs["False"])
     links.new(n_in.outputs[CHECK_CIRCLE_SOCKET_NAME], switch.inputs["Switch"])
+    links.new(n_in.outputs[CHECK_CIRCLE_SOCKET_NAME], switch_mat_index.inputs["Switch"])
 
     # Join → Set Material Index → Group Output
     links.new(switch.outputs["Output"], set_mat_index.inputs["Geometry"])
+    links.new(switch_mat_index.outputs["Output"], set_mat_index.inputs["Material Index"])
     links.new(set_mat_index.outputs["Geometry"], n_out.inputs["Geometry"])
 
     return ng
