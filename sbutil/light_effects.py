@@ -141,6 +141,12 @@ _pending_dynamic_array_updates: dict[
 ] = {}
 
 
+def clear_light_effect_caches() -> None:
+    """Clear cached metadata related to light effects."""
+
+    _state.clear()
+
+
 def _assign_material(mesh_obj, material: bpy.types.Material) -> None:
     slots = getattr(getattr(mesh_obj, "data", None), "materials", None)
     if slots is not None:
@@ -1408,23 +1414,23 @@ def initialize_color_function(pg) -> None:
         return
 
     st = get_state(pg)
+    cached_schema = _as_dict(st.get("config_schema", {}))
 
     # Cache existing dynamic property values so they can be restored later if
     # the state needs to be reset and the new schema still contains them.
     cached_values = {
         name: _as_dict(pg[name])
-        for name in pg.get("_config_schema", {})
+        for name in cached_schema
         if name in pg
     }
     brna = getattr(pg, "bl_rna", None)
     reserved = {p.identifier.lower() for p in getattr(brna, "properties", [])}
 
     def reset_state():
-        for an in list(pg.get("_config_schema", {})):
+        schema = _as_dict(st.get("config_schema", {}))
+        for an in list(schema):
             if an in pg:
                 del pg[an]
-        if "_config_schema" in pg:
-            del pg["_config_schema"]
         st.clear()
         if hasattr(pg, "dynamic_arrays"):
             pg.dynamic_arrays.clear()
@@ -1438,7 +1444,6 @@ def initialize_color_function(pg) -> None:
         if text_hash != st.get("text_hash"):
             reset_state()
             st["text_hash"] = text_hash
-            _set_id_property(pg, "_text_hash", text_hash)
         if "module" not in st:
             module = ModuleType(text.name)
             exec(source, module.__dict__)
@@ -1537,7 +1542,6 @@ def initialize_color_function(pg) -> None:
                             meta["object_ref_type"] = "MAT"
                         schema[attr_name] = meta
             st["config_schema"] = schema
-            _set_id_property(pg, "_config_schema", schema)
             # Restore cached property values when possible, but only update
             # when the value actually differs from the current one.
             for name, value in cached_values.items():
@@ -1555,7 +1559,6 @@ def initialize_color_function(pg) -> None:
     if ap != st.get("absolute_path", ""):
         reset_state()
         st["absolute_path"] = ap
-        _set_id_property(pg, "_absolute_path", ap)
     if "module" not in st:
         st["module"] = load_module(ap)
     module = st["module"]
@@ -1652,7 +1655,6 @@ def initialize_color_function(pg) -> None:
                         meta["object_ref_type"] = "MAT"
                     schema[attr_name] = meta
         st["config_schema"] = schema
-        _set_id_property(pg, "_config_schema", schema)
         for name, value in cached_values.items():
             if name in schema and pg.get(name) != value:
                 _set_id_property(pg, name, value)
@@ -4091,6 +4093,7 @@ class ClearLightEffectPixelCacheOperator(bpy.types.Operator):  # pragma: no cove
     def execute(self, _context):
         try:
             invalidate_pixel_cache()
+            clear_light_effect_caches()
         except Exception as exc:  # pragma: no cover - defensive
             self.report({'WARNING'}, f"Failed to clear cache: {exc}")
             return {'CANCELLED'}
