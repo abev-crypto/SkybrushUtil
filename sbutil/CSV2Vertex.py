@@ -1,6 +1,6 @@
 import bpy
-from bpy.props import StringProperty
-from bpy.types import Operator, Panel, PropertyGroup
+from bpy.props import BoolProperty, CollectionProperty, IntProperty, StringProperty
+from bpy.types import Operator, Panel, PropertyGroup, UIList
 import csv, os, re, math
 
 from sbutil.color_key_utils import apply_color_keys_from_key_data
@@ -61,6 +61,15 @@ def build_tracks_from_folder(folder, delimiter="auto"):
             continue
         tracks.append({"name": os.path.splitext(os.path.basename(p))[0], "data": data})
     return tracks
+
+
+def calculate_duration_from_tracks(tracks, fps):
+    """Return the duration in frames for ``tracks`` at the given ``fps``."""
+
+    if not tracks:
+        return 0
+    max_t_ms = max(tr["data"][-1]["t_ms"] for tr in tracks if tr["data"])
+    return int(ms_to_frame(max_t_ms, fps))
 
 
 def tracks_to_keydata(tracks, fps):
@@ -230,12 +239,44 @@ def import_csv_folder(context, folder, start_frame):
 
 # ---------- Properties / UI ----------
 
+
+class CSVVA_PreviewItem(PropertyGroup):
+    name: StringProperty(name="Name")
+    folder: StringProperty(name="Folder")
+    start_frame: IntProperty(name="Start Frame", default=0)
+    duration: IntProperty(name="Duration", default=0)
+    checked: BoolProperty(name="Include", default=False)
+    exists: BoolProperty(name="Exists", default=False)
+    frame_mismatch: BoolProperty(name="Frame Mismatch", default=False)
+
+
 class CSVVA_Props(PropertyGroup):
     folder: StringProperty(
         name="CSV Folder",
         description="Folder containing CSV/TSV files with columns: Time[msec], x[m], y[m], z[m], Red, Green, Blue",
         subtype="DIR_PATH",
     )
+    preview_items: CollectionProperty(type=CSVVA_PreviewItem)
+    preview_index: IntProperty(default=0)
+
+
+class CSVVA_UL_Preview(UIList):
+    bl_idname = "CSVVA_UL_Preview"
+
+    def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
+        row = layout.row(align=True)
+        row.prop(item, "checked", text="")
+        main = row.row(align=True)
+        main.label(text=item.name)
+        main.label(text=f"Start: {item.start_frame}")
+        main.label(text=f"Dur: {item.duration}")
+        status_icon = "CHECKMARK" if not item.exists else "FILE_REFRESH"
+        status_text = "New" if not item.exists else "Existing"
+        if item.frame_mismatch:
+            status_icon = "ERROR"
+            status_text = "Frame diff"
+        main.label(text=status_text, icon=status_icon)
+
 
 class CSVVA_OT_Import(Operator):
     bl_idname = "csvva.import_setup"
@@ -329,6 +370,176 @@ class CSVVA_OT_Import(Operator):
         self.report({"INFO"}, f"Setup complete: {obj.name}")
         return {"FINISHED"}
 
+
+class CSVVA_OT_Preview(Operator):
+    bl_idname = "csvva.preview"
+    bl_label = "Preview"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        prefs = context.scene.csvva_props
+        folder = bpy.path.abspath(prefs.folder)
+        storyboard = context.scene.skybrush.storyboard
+        prefs.preview_items.clear()
+
+        if not os.path.isdir(folder):
+            self.report({"ERROR"}, "Invalid CSV folder")
+            return {"CANCELLED"}
+
+        fps = context.scene.render.fps
+        subdirs = [d for d in sorted(os.listdir(folder)) if os.path.isdir(os.path.join(folder, d))]
+        target_folders = []
+        if subdirs:
+            target_folders = [os.path.join(folder, d) for d in subdirs]
+        else:
+            target_folders = [folder]
+
+        base_start = 0
+        if storyboard.entries:
+            last = storyboard.entries[-1]
+            base_start = last.frame_start + last.duration
+
+        next_start = base_start
+        created = 0
+        for path in target_folders:
+            folder_name = os.path.basename(os.path.normpath(path))
+            base_name = re.sub(r"_(\d+)$", "", folder_name)
+            start_frame = next_start
+            match = re.search(r"_(\d+)$", folder_name)
+            if match:
+                start_frame = int(match.group(1))
+
+            tracks = build_tracks_from_folder(path)
+            duration = calculate_duration_from_tracks(tracks, fps)
+            if duration == 0:
+                continue
+
+            existing_entry = None
+            for sb in storyboard.entries:
+                if sb.name == base_name:
+                    existing_entry = sb
+                    break
+
+            frame_mismatch = False
+            checked = False
+            if existing_entry:
+                frame_mismatch = (
+                    existing_entry.frame_start != start_frame
+                    or existing_entry.duration != duration
+                )
+                checked = frame_mismatch
+            else:
+                checked = True
+
+            item = prefs.preview_items.add()
+            item.name = base_name
+            item.folder = path
+            item.start_frame = start_frame
+            item.duration = duration
+            item.checked = checked
+            item.exists = existing_entry is not None
+            item.frame_mismatch = frame_mismatch
+            created += 1
+
+            next_start = max(next_start, start_frame + duration)
+
+        if not created:
+            self.report({"ERROR"}, "No valid CSV folders found")
+            return {"CANCELLED"}
+
+        self.report({"INFO"}, "Preview generated")
+        return {"FINISHED"}
+
+
+class CSVVA_OT_Update(Operator):
+    bl_idname = "csvva.update"
+    bl_label = "Update"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        prefs = context.scene.csvva_props
+        storyboard = context.scene.skybrush.storyboard
+        checked_items = [item for item in prefs.preview_items if item.checked]
+
+        if not checked_items:
+            self.report({"ERROR"}, "No items selected for update")
+            return {"CANCELLED"}
+
+        processed = 0
+        key_data_collection = []
+        fps = context.scene.render.fps
+
+        for item in checked_items:
+            existing_entry = None
+            existing_index = None
+            for idx, sb in enumerate(storyboard.entries):
+                if sb.name == item.name:
+                    existing_entry = sb
+                    existing_index = idx
+                    break
+
+            target_start = item.start_frame
+            keep_start = None
+            keep_duration = None
+            if existing_entry:
+                keep_start = existing_entry.frame_start
+                keep_duration = existing_entry.duration
+                target_start = keep_start if not item.frame_mismatch else item.start_frame
+                clear_drone_keys(existing_entry.frame_start, existing_entry.duration)
+                for candidate_name in (existing_entry.name, f"{existing_entry.name}_CSV"):
+                    old_obj = bpy.data.objects.get(candidate_name)
+                    if old_obj:
+                        mesh = old_obj.data
+                        bpy.data.objects.remove(old_obj, do_unlink=True)
+                        if mesh and mesh.users == 0:
+                            bpy.data.meshes.remove(mesh)
+                storyboard.entries.remove(existing_index)
+
+            tracks = build_tracks_from_folder(item.folder)
+            duration = calculate_duration_from_tracks(tracks, fps)
+            if duration == 0:
+                self.report({"WARNING"}, f"No CSV/TSV files found in {item.folder}")
+                continue
+
+            obj, imported_duration, key_entries = import_csv_folder(context, item.folder, target_start)
+            if not obj:
+                self.report({"WARNING"}, f"Failed to import from {item.folder}")
+                continue
+
+            entry = storyboard.entries[-1]
+            if existing_entry is not None:
+                storyboard.entries.move(len(storyboard.entries) - 1, existing_index)
+                if not item.frame_mismatch:
+                    entry.frame_start = keep_start
+                    entry.duration = keep_duration
+                else:
+                    entry.frame_start = item.start_frame
+                    entry.duration = duration
+
+            key_data_collection.append((key_entries, entry.frame_start))
+            processed += 1
+
+        if not processed:
+            self.report({"ERROR"}, "Nothing was updated")
+            return {"CANCELLED"}
+
+        try:
+            bpy.ops.skybrush.recalculate_transitions(scope="ALL")
+        except Exception:
+            pass
+
+        current_frame = context.scene.frame_current
+        for key_entries, start_frame in key_data_collection:
+            context.scene.frame_set(start_frame)
+            apply_color_keys_from_key_data(
+                key_entries,
+                start_frame,
+            )
+        context.scene.frame_set(current_frame)
+
+        self.report({"INFO"}, f"Updated {processed} formation(s)")
+        return {"FINISHED"}
+
 class CSVVA_PT_UI(Panel):
     bl_label = "CSV Vertex Anim"
     bl_idname = "CSVVA_PT_UI"
@@ -341,14 +552,30 @@ class CSVVA_PT_UI(Panel):
         prefs = context.scene.csvva_props
         col = lay.column(align=True)
         col.prop(prefs, "folder")
-        col.operator(CSVVA_OT_Import.bl_idname, icon="IMPORT")
+        row = col.row(align=True)
+        row.operator(CSVVA_OT_Import.bl_idname, icon="IMPORT")
+        row.operator(CSVVA_OT_Preview.bl_idname, icon="VIEWZOOM")
+        col.template_list(
+            CSVVA_UL_Preview.bl_idname,
+            "",
+            prefs,
+            "preview_items",
+            prefs,
+            "preview_index",
+            rows=4,
+        )
+        col.operator(CSVVA_OT_Update.bl_idname, icon="FILE_REFRESH")
 
 
 # ---------- Registration ----------
 
 classes = (
+    CSVVA_PreviewItem,
     CSVVA_Props,
+    CSVVA_UL_Preview,
     CSVVA_OT_Import,
+    CSVVA_OT_Preview,
+    CSVVA_OT_Update,
     CSVVA_PT_UI,
 )
 
