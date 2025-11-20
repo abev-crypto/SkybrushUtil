@@ -141,6 +141,46 @@ _pending_dynamic_array_updates: dict[
 ] = {}
 
 
+def _assign_material(mesh_obj, material: bpy.types.Material) -> None:
+    slots = getattr(getattr(mesh_obj, "data", None), "materials", None)
+    if slots is not None:
+        if slots:
+            slots[0] = material
+        else:
+            slots.append(material)
+    mesh_obj.active_material = material
+
+
+def _ensure_transparent_material() -> bpy.types.Material:
+    mat_name = "SkybrushBB_Transparent"
+    material = bpy.data.materials.get(mat_name)
+    if material is None:
+        material = bpy.data.materials.new(mat_name)
+        material.use_nodes = True
+        material.use_backface_culling = False
+        try:
+            material.blend_method = 'BLEND'
+            material.shadow_method = 'NONE'
+        except Exception:
+            pass
+
+        node_tree = material.node_tree
+        nodes = node_tree.nodes
+        links = node_tree.links
+        nodes.clear()
+
+        transparent = nodes.new("ShaderNodeBsdfTransparent")
+        transparent.location = (0, 0)
+
+        output = nodes.new("ShaderNodeOutputMaterial")
+        output.location = (200, 0)
+
+        if transparent.outputs.get("BSDF") and output.inputs.get("Surface"):
+            links.new(transparent.outputs["BSDF"], output.inputs["Surface"])
+
+    return material
+
+
 def _flush_delayed_id_property_updates() -> None:
     """Try to apply queued ID property writes without relying on timers."""
     if not _delayed_id_property_updates:
@@ -3337,6 +3377,12 @@ class CreateBoundingBoxMeshOperator(bpy.types.Operator):  # pragma: no cover - B
         default=True,
         options={'HIDDEN'},
     )
+    force_bounds: BoolProperty(
+        name="Force Bounds Mesh",
+        description="Create a bounds-aligned cube instead of a Delaunay mesh",
+        default=False,
+        options={'HIDDEN'},
+    )
 
     @classmethod
     def poll(cls, context):
@@ -3353,6 +3399,7 @@ class CreateBoundingBoxMeshOperator(bpy.types.Operator):  # pragma: no cover - B
 
     def invoke(self, context, event):  # pragma: no cover - Blender UI
         entry = getattr(context.scene.skybrush.light_effects, "active_entry", None)
+        self.force_bounds = bool(getattr(event, "shift", False))
         if entry is not None:
             stored = None
             for key in ("sample_uv_divisions", "uv_sample_divisions", "_uv_sample_divisions"):
@@ -3618,7 +3665,8 @@ class CreateBoundingBoxMeshOperator(bpy.types.Operator):  # pragma: no cover - B
         mesh_obj = None
         delaunay_error = None
         delaunay_used = False
-        if ref_objs and not assign_to_uv:
+        force_bounds = bool(getattr(self, "force_bounds", False))
+        if ref_objs and not assign_to_uv and not force_bounds:
             try:
                 mesh_obj = self._build_delaunay_object(entry, ref_objs)
                 delaunay_used = True
@@ -3639,6 +3687,9 @@ class CreateBoundingBoxMeshOperator(bpy.types.Operator):  # pragma: no cover - B
                 return {'CANCELLED'}
 
             dims, transform = bounds
+            if not assign_to_uv:
+                padding = Vector((1.5, 1.5, 1.5))
+                dims = Vector((max(d + padding[i], 1e-4) for i, d in enumerate(dims)))
             mesh = self._build_cube_mesh(dims)
 
             obj_name = pick_unique_name(f"{entry.name}_bb_mesh", bpy.data.objects)
@@ -3686,6 +3737,10 @@ class CreateBoundingBoxMeshOperator(bpy.types.Operator):  # pragma: no cover - B
             mesh_obj.display = 'BOUNDS'
         if hasattr(mesh_obj, "hide_render"):
             mesh_obj.hide_render = True
+        transparent_material = _ensure_transparent_material()
+        if transparent_material is not None:
+            _assign_material(mesh_obj, transparent_material)
+
         if assign_to_uv:
             try:
                 entry.uv_mesh = mesh_obj
@@ -3772,16 +3827,6 @@ class ToggleUvMeshPreviewOperator(bpy.types.Operator):  # pragma: no cover - Ble
 
         return material
 
-    @staticmethod
-    def _assign_material(mesh_obj, material: bpy.types.Material) -> None:
-        slots = getattr(getattr(mesh_obj, "data", None), "materials", None)
-        if slots is not None:
-            if slots:
-                slots[0] = material
-            else:
-                slots.append(material)
-        mesh_obj.active_material = material
-
     def execute(self, context):
         entry = context.scene.skybrush.light_effects.active_entry
         uv_mesh = entry.uv_mesh
@@ -3790,13 +3835,16 @@ class ToggleUvMeshPreviewOperator(bpy.types.Operator):  # pragma: no cover - Ble
         current_mode = getattr(uv_mesh, display_attr, None)
 
         if current_mode == 'SOLID':
+            transparent_material = _ensure_transparent_material()
+            if transparent_material is not None:
+                _assign_material(uv_mesh, transparent_material)
             self._set_display_mode(uv_mesh, 'BOUNDS')
             self.report({'INFO'}, f"Preview disabled on {uv_mesh.name}")
             return {'FINISHED'}
 
         try:
             material = self._ensure_preview_material(entry)
-            self._assign_material(uv_mesh, material)
+            _assign_material(uv_mesh, material)
         except Exception as exc:
             self.report({'WARNING'}, f"Failed to prepare preview material: {exc}")
 
