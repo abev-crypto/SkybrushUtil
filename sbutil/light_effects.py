@@ -57,6 +57,7 @@ from contextlib import contextmanager
 from sbstudio.plugin.model.light_effects import OUTPUT_TYPE_TO_AXIS_SORT_KEY
 
 from sbstudio.plugin.model.light_effects import LightEffect
+from sbstudio.plugin.model.light_effects import LightEffectCollection
 from sbstudio.plugin.panels.light_effects import LightEffectsPanel
 
 from sbstudio.plugin.model.light_effects import (
@@ -139,6 +140,81 @@ _delayed_id_property_updates: dict[tuple[int, str], tuple[object, object]] = {}
 _pending_dynamic_array_updates: dict[
     int, tuple[str, int, list]
 ] = {}
+
+
+def _copy_patched_light_effect_properties(source, target) -> None:
+    """Copy add-on specific light effect properties from ``source`` to ``target``."""
+
+    property_names = (
+        "loop_count",
+        "loop_method",
+        "color_function_text",
+        "convert_srgb",
+        "uv_tiling_mode",
+        "formation_collection",
+        "sequence_mode",
+        "sequence_mask_collection",
+        "sequence_duration",
+        "sequence_delay",
+        "sequence_manual_delay",
+    )
+
+    for name in property_names:
+        if hasattr(source, name) and hasattr(target, name):
+            try:
+                setattr(target, name, getattr(source, name))
+            except Exception:
+                continue
+
+    if hasattr(source, "sequence_delays") and hasattr(target, "sequence_delays"):
+        try:
+            target.sequence_delays.clear()
+        except Exception:
+            while len(target.sequence_delays):
+                target.sequence_delays.remove(len(target.sequence_delays) - 1)
+
+        for delay_entry in getattr(source, "sequence_delays", []):
+            try:
+                new_delay = target.sequence_delays.add()
+                new_delay.delay = getattr(delay_entry, "delay", 0)
+            except Exception:
+                continue
+
+    if hasattr(source, "dynamic_arrays") and hasattr(target, "dynamic_arrays"):
+        try:
+            target.dynamic_arrays.clear()
+        except Exception:
+            while len(target.dynamic_arrays):
+                target.dynamic_arrays.remove(len(target.dynamic_arrays) - 1)
+
+        for array in getattr(source, "dynamic_arrays", []):
+            try:
+                sanitized = list(array.to_storage_list())
+                item_type = getattr(array, "item_type", "FLOAT")
+                item_length = getattr(array, "item_length", 1)
+                new_array = target.dynamic_arrays.add()
+                new_array.name = array.name
+                _apply_dynamic_array_values(new_array, item_type, item_length, sanitized)
+                _set_id_property(target, new_array.name, sanitized)
+            except Exception:
+                continue
+
+    if hasattr(source, "dynamic_color_ramps") and hasattr(target, "dynamic_color_ramps"):
+        try:
+            target.dynamic_color_ramps.clear()
+        except Exception:
+            while len(target.dynamic_color_ramps):
+                target.dynamic_color_ramps.remove(len(target.dynamic_color_ramps) - 1)
+
+        for ramp in getattr(source, "dynamic_color_ramps", []):
+            try:
+                sanitized = list(ramp.to_storage_list())
+                new_ramp = target.dynamic_color_ramps.add()
+                new_ramp.name = ramp.name
+                new_ramp.set_from_python(sanitized)
+                _set_id_property(target, new_ramp.name, sanitized)
+            except Exception:
+                continue
 
 
 def clear_light_effect_caches() -> None:
@@ -2636,6 +2712,48 @@ def calculate_effective_sequence_span(effect) -> tuple[int | None, int | None]:
 
     total_duration = max(total_end - frame_start_i + 1, duration_i, sequence_duration_i)
     return total_end, total_duration
+
+
+def _duplicate_selected_entry(self, *, select=False, context=None):
+    source_entry = None
+    try:
+        source_entry = self.entries[self.active_entry_index]
+    except Exception:
+        source_entry = None
+
+    new_entry = LightEffectCollection._original_duplicate_selected_entry(
+        self, select=select, context=context
+    )
+
+    if new_entry is not None and source_entry is not None:
+        _copy_patched_light_effect_properties(source_entry, new_entry)
+
+    return new_entry
+
+
+def patch_light_effect_collection():
+    if LightEffectCollection is None:  # pragma: no cover - Blender integration
+        return
+
+    if getattr(LightEffectCollection, "_original_duplicate_selected_entry", None) is None:
+        LightEffectCollection._original_duplicate_selected_entry = getattr(
+            LightEffectCollection, "duplicate_selected_entry", None
+        )
+
+    if getattr(LightEffectCollection, "_original_duplicate_selected_entry", None) is None:
+        return
+
+    LightEffectCollection.duplicate_selected_entry = _duplicate_selected_entry
+
+
+def unpatch_light_effect_collection():
+    if LightEffectCollection is None:  # pragma: no cover - Blender integration
+        return
+
+    original = getattr(LightEffectCollection, "_original_duplicate_selected_entry", None)
+    if original is not None:
+        LightEffectCollection.duplicate_selected_entry = original
+        LightEffectCollection._original_duplicate_selected_entry = None
 
 def patch_light_effect_class():
     """Inject loop properties into ``LightEffect`` using monkey patching."""
