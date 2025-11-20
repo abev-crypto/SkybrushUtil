@@ -1341,6 +1341,7 @@ def try_patch():
             bpy.app.timers.unregister(try_patch)
             return None
         patch_recalculate_operator()
+        light_effects_patch.patch_light_effect_collection()
         light_effects_patch.patch_light_effect_class()
         light_effects_patch.patch_light_effects_panel()
         patch_safety_check_panel()
@@ -1364,6 +1365,7 @@ def _on_load_post(_dummy):
 def _restore_originals():
     try:
         unpatch_recalculate_operator()
+        light_effects_patch.unpatch_light_effect_collection()
         light_effects_patch.unpatch_light_effects_panel()
         light_effects_patch.unpatch_light_effect_class()
         unpatch_safety_check_panel()
