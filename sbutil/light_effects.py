@@ -2731,6 +2731,79 @@ def _duplicate_selected_entry(self, *, select=False, context=None):
     return new_entry
 
 
+def _get_storyboard_range_for_frame(scene, frame_current: int) -> Optional[tuple[int, int]]:
+    """Return the storyboard range covering ``frame_current`` if any.
+
+    If the frame falls between storyboard entries, the empty gap spanning the
+    current frame is returned instead. The tuple consists of ``(start,``
+    ``duration)``. ``None`` is returned when the storyboard cannot provide a
+    reasonable range.
+    """
+
+    storyboard = getattr(getattr(scene, "skybrush", None), "storyboard", None)
+    entries = getattr(storyboard, "entries", None)
+    if not entries:
+        return None
+
+    def as_int(value, default=0):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    ranges: list[tuple[int, int, int]] = []
+    for entry in sorted(entries, key=lambda e: as_int(getattr(e, "frame_start", 0))):
+        start = as_int(getattr(entry, "frame_start", None), None)
+        duration = as_int(getattr(entry, "duration", None), None)
+        if start is None or duration is None or duration <= 0:
+            continue
+        end = start + duration - 1
+        ranges.append((start, end, duration))
+
+    if not ranges:
+        return None
+
+    for start, end, duration in ranges:
+        if start <= frame_current <= end:
+            return start, duration
+
+    previous_end = None
+    for start, end, _duration in ranges:
+        gap_start = previous_end + 1 if previous_end is not None else as_int(getattr(scene, "frame_start", 0))
+        gap_end = start - 1
+        if gap_start <= frame_current <= gap_end:
+            return gap_start, gap_end - gap_start + 1
+        previous_end = end
+
+    gap_start = previous_end + 1 if previous_end is not None else as_int(getattr(scene, "frame_start", 0))
+    gap_end = as_int(getattr(scene, "frame_end", frame_current), frame_current)
+    if frame_current >= gap_start and gap_end >= gap_start:
+        return gap_start, max(gap_end - gap_start + 1, 1)
+
+    return None
+
+
+def _append_new_entry(self, name, frame_start=None, duration=None, *, select=False, context=None):
+    context = context or getattr(bpy, "context", None)
+    if context is not None and (frame_start is None or duration is None or duration <= 0):
+        suggestion = _get_storyboard_range_for_frame(context.scene, context.scene.frame_current)
+        if suggestion is not None:
+            suggested_start, suggested_duration = suggestion
+            if frame_start is None:
+                frame_start = suggested_start
+            if duration is None or duration <= 0:
+                duration = suggested_duration
+
+    return LightEffectCollection._original_append_new_entry(
+        self,
+        name,
+        frame_start,
+        duration,
+        select=select,
+        context=context,
+    )
+
+
 def patch_light_effect_collection():
     if LightEffectCollection is None:  # pragma: no cover - Blender integration
         return
@@ -2745,6 +2818,14 @@ def patch_light_effect_collection():
 
     LightEffectCollection.duplicate_selected_entry = _duplicate_selected_entry
 
+    if getattr(LightEffectCollection, "_original_append_new_entry", None) is None:
+        LightEffectCollection._original_append_new_entry = getattr(
+            LightEffectCollection, "append_new_entry", None
+        )
+
+    if getattr(LightEffectCollection, "_original_append_new_entry", None) is not None:
+        LightEffectCollection.append_new_entry = _append_new_entry
+
 
 def unpatch_light_effect_collection():
     if LightEffectCollection is None:  # pragma: no cover - Blender integration
@@ -2754,6 +2835,11 @@ def unpatch_light_effect_collection():
     if original is not None:
         LightEffectCollection.duplicate_selected_entry = original
         LightEffectCollection._original_duplicate_selected_entry = None
+
+    original = getattr(LightEffectCollection, "_original_append_new_entry", None)
+    if original is not None:
+        LightEffectCollection.append_new_entry = original
+        LightEffectCollection._original_append_new_entry = None
 
 def patch_light_effect_class():
     """Inject loop properties into ``LightEffect`` using monkey patching."""
