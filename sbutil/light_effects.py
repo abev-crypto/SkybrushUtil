@@ -925,99 +925,34 @@ def _get_primary_material(obj):
     return getattr(obj, "active_material", None)
 
 
-def _extract_material_color(obj):
-    """Return the color of the first material assigned to ``obj``."""
-
-    color = _get_object_property(obj, "MAT")
-    if color is None:
-        color = (0.0, 0.0, 0.0, 1.0)
-    values = [float(c) for c in color[:4]]
-    while len(values) < 4:
-        values.append(1.0 if len(values) == 3 else 0.0)
-    return values[:4]
-
-
-def _clamp_color(color):
-    result = [max(0.0, min(1.0, float(component))) for component in color[:4]]
-    while len(result) < 4:
-        result.append(1.0 if len(result) == 3 else 0.0)
-    return result[:4]
-
-
-def _color_changed(original, updated):
-    threshold = 1e-6
-    length = min(len(original), len(updated))
-    for idx in range(length):
-        if abs(float(updated[idx]) - float(original[idx])) > threshold:
-            return True
-    return False
-
-
-def _set_material_color_keyframe(material, color, frame):
-    """Assign ``color`` to ``material`` and insert a keyframe at ``frame``."""
-
-    color = _clamp_color(color)
-
-    if getattr(material, "use_nodes", False) and getattr(material, "node_tree", None):
-        node_tree = material.node_tree
-
-        emission = node_tree.nodes.get("Emission")
-        if emission is None:
-            emission = next(
-                (n for n in node_tree.nodes if getattr(n, "type", "") == "EMISSION"),
-                None,
-            )
-        if emission is not None:
-            socket = emission.inputs[0] if len(emission.inputs) else None
-            if socket is not None:
-                socket.default_value = color
-                socket.keyframe_insert("default_value", frame=frame)
-                return True
-
-        principled = next(
-            (
-                n
-                for n in node_tree.nodes
-                if getattr(n, "type", "") == "BSDF_PRINCIPLED"
-            ),
-            None,
-        )
-        if principled is not None:
-            base_color = principled.inputs.get("Base Color")
-            if base_color is not None:
-                base_color.default_value = color
-                base_color.keyframe_insert("default_value", frame=frame)
-                return True
-
-    diffuse = getattr(material, "diffuse_color", None)
-    if diffuse is not None:
-        material.diffuse_color = color
-        material.keyframe_insert("diffuse_color", frame=frame)
-        return True
-
-    return False
-
-
-def _ensure_action_exists(obj):
-    """Ensure that ``obj`` has an animation action."""
-
-    if getattr(obj, "animation_data", None) is None:
-        obj.animation_data_create()
-    if getattr(obj.animation_data, "action", None) is None:
-        name = f"{getattr(obj, 'name', 'Object')}Action"
-        obj.animation_data.action = bpy.data.actions.new(name=name)
-
-def _set_color_keyframe(obj, color, frame):
-    """Assign ``color`` to the object's material or the object itself."""
-
-    color = _clamp_color(color)
+def _insert_emission_color_keyframe(obj, frame):
+    """Insert a keyframe on the emission shader's base color if present."""
 
     material = _get_primary_material(obj)
-    if material is not None and _set_material_color_keyframe(material, color, frame):
-        return True
-    _ensure_action_exists(obj)
-    obj.color = color
-    obj.keyframe_insert("color", frame=frame)
+    if material is None:
+        return False
+
+    if not getattr(material, "use_nodes", False):
+        return False
+
+    node_tree = getattr(material, "node_tree", None)
+    if node_tree is None:
+        return False
+
+    emission = node_tree.nodes.get("Emission")
+    if emission is None:
+        emission = next(
+            (n for n in node_tree.nodes if getattr(n, "type", "") == "EMISSION"),
+            None,
+        )
+    if emission is None:
+        return False
+
+    socket = emission.inputs[0] if len(emission.inputs) else None
+    if socket is None:
+        return False
+
+    socket.keyframe_insert("default_value", frame=frame)
     return True
 
 
@@ -3223,32 +3158,18 @@ class BakeLightEffectToKeysOperator(bpy.types.Operator):  # pragma: no cover - B
         scene = context.scene
         original_frame = scene.frame_current
         view_layer = context.view_layer
-        mapping = _build_formation_mapping(drones)
         inserted = False
         try:
             for frame in range(frame_start, frame_end + 1):
                 scene.frame_set(frame)
                 if view_layer is not None:
                     view_layer.update()
-                base_colors = [_extract_material_color(obj) for obj in drones]
-                positions = [tuple(get_position_of_object(obj)) for obj in drones]
-                colors = [list(color) for color in base_colors]
-                settings = getattr(getattr(context, "scene", None), "skybrush", None)
-                settings = getattr(settings, "settings", None)
-                random_seq = getattr(settings, "random_sequence_root", None)
-                try:
-                    entry.apply_on_colors(
-                        colors,
-                        positions,
-                        mapping,
-                        frame=frame,
-                        random_seq=random_seq,
-                    )
-                except Exception as exc:  # pragma: no cover - Blender runtime
-                    raise RuntimeError(str(exc)) from exc
-                for obj, base_color, color in zip(drones, base_colors, colors):
-                    if _set_color_keyframe(obj, color, frame):
-                        inserted = True
+                for obj in drones:
+                    try:
+                        if _insert_emission_color_keyframe(obj, frame):
+                            inserted = True
+                    except Exception as exc:  # pragma: no cover - Blender runtime
+                        raise RuntimeError(str(exc)) from exc
             return inserted
         finally:
             scene.frame_set(original_frame)
