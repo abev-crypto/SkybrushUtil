@@ -22,6 +22,7 @@ from sbutil import CSV2Vertex
 from sbutil import reflow_vertex
 from sbutil import drone_check_gn
 from sbutil import view_setup
+from sbutil import storyboard_patch
 
 try:  # pragma: no cover - depends on sbstudio
     from sbstudio.plugin.operators.safety_check import RunFullProximityCheckOperator
@@ -1343,6 +1344,7 @@ def try_patch():
             return None
         patch_recalculate_operator()
         formation_patch.patch_create_formation_operator()
+        storyboard_patch.patch_storyboard_entry_removal()
         light_effects_patch.patch_light_effect_collection()
         light_effects_patch.patch_light_effect_class()
         light_effects_patch.patch_light_effects_panel()
@@ -1368,6 +1370,7 @@ def _restore_originals():
     try:
         unpatch_recalculate_operator()
         formation_patch.unpatch_create_formation_operator()
+        storyboard_patch.unpatch_storyboard_entry_removal()
         light_effects_patch.unpatch_light_effect_collection()
         light_effects_patch.unpatch_light_effects_panel()
         light_effects_patch.unpatch_light_effect_class()
