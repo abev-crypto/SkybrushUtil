@@ -14,11 +14,29 @@ __all__ = (
 )
 
 
+def _remove_gn_sphere_proximity_modifier(obj):
+    modifiers = getattr(obj, "modifiers", None)
+    if modifiers is None:
+        return
+
+    for modifier in list(modifiers):
+        if modifier.name == "GN_SphereProximity":
+            modifiers.remove(modifier)
+
+
+def _remove_skybrush_vertex_groups(obj):
+    to_remove = [vg for vg in obj.vertex_groups if "Skybrush[" in vg.name]
+    for vertex_group in to_remove:
+        obj.vertex_groups.remove(vertex_group)
+
+
 def _assign_drones_vertex_group(obj, group_name="Drones"):
-    """Ensure ``group_name`` exists and covers all vertices on ``obj``."""
+    """Ensure ``group_name`` exists, locked and covering all vertices on ``obj``."""
 
     if obj.type != "MESH" or obj.data is None:
         return
+
+    _remove_skybrush_vertex_groups(obj)
 
     vertex_group = obj.vertex_groups.get(group_name)
     if vertex_group is None:
@@ -28,13 +46,38 @@ def _assign_drones_vertex_group(obj, group_name="Drones"):
     if indices:
         vertex_group.add(indices, 1.0, "REPLACE")
 
+    if hasattr(vertex_group, "lock_weight"):
+        vertex_group.lock_weight = True
+
     skybrush = getattr(obj, "skybrush", None)
     if skybrush is not None:
         skybrush.formation_vertex_group = group_name
 
 
+def _is_in_formations_collection(obj, root_collection_name="Formations"):
+    formations = bpy.data.collections.get(root_collection_name)
+    if formations is None:
+        return False
+
+    def _collect_descendants(collection):
+        yield collection
+        for child in collection.children:
+            yield from _collect_descendants(child)
+
+    formations_collections = set(_collect_descendants(formations))
+
+    try:
+        return any(collection in formations_collections for collection in obj.users_collection)
+    except AttributeError:
+        return False
+
+
 def _prepare_selected_meshes(context):
-    for obj in context.selected_objects:
+    for obj in list(context.selected_objects):
+        if _is_in_formations_collection(obj):
+            obj.select_set(False)
+            continue
+        _remove_gn_sphere_proximity_modifier(obj)
         _assign_drones_vertex_group(obj)
 
 
