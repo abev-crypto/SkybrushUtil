@@ -3,6 +3,8 @@ from bpy.props import BoolProperty, CollectionProperty, IntProperty, StringPrope
 from bpy.types import Operator, Panel, PropertyGroup, UIList
 import csv, os, re, math
 
+from sbutil import csv_vat_gn
+
 from sbutil.color_key_utils import apply_color_keys_from_key_data
 
 # ---------- Utilities ----------
@@ -46,6 +48,36 @@ def load_csv(path, delimiter="auto"):
 
 def ms_to_frame(ms, fps):
     return (ms / 1000.0) * fps
+
+
+def parse_gap_value(value, fps):
+    """Parse ``value`` into a frame count using ``fps``.
+
+    The suffix ``s`` means seconds, ``f`` means frames (or when there is no
+    suffix). Non-matching values resolve to zero to keep the existing schedule.
+    """
+
+    if not value:
+        return 0
+    m = re.match(r"(?i)^(?P<amount>\d+(?:\.\d+)?)(?P<unit>[sf]?)$", value.strip())
+    if not m:
+        return 0
+    amount = float(m.group("amount"))
+    unit = m.group("unit").lower()
+    if unit == "s":
+        return int(round(amount * fps))
+    return int(round(amount))
+
+
+def split_name_and_gap(folder_name, fps):
+    """Return ``(base_name, gap_frames)`` parsed from ``folder_name``."""
+
+    m = re.match(r"^(.*)_(\d+(?:\.\d+)?[sf]?)$", folder_name)
+    if not m:
+        return folder_name, 0
+    base_name = m.group(1)
+    gap_frames = parse_gap_value(m.group(2), fps)
+    return base_name, gap_frames
 
 def build_tracks_from_folder(folder, delimiter="auto"):
     files = []
@@ -158,22 +190,20 @@ def clear_drone_keys(start_frame, duration):
 
 # ---------- Import Helper ----------
 
-def import_csv_folder(context, folder, start_frame):
+def import_csv_folder(context, folder, start_frame, *, use_vat: bool = False):
     """Import CSV tracks from ``folder`` and create a mesh with animation.
 
     Returns a tuple ``(object, duration, key_entries)`` where ``object`` is the
     created mesh or ``None`` if no tracks were found, ``duration`` is the
     animation length in frames and ``key_entries`` contains color keyframe data
     prepared for later application."""
+    fps = context.scene.render.fps
+
     folder_name = os.path.basename(os.path.normpath(folder))
-    m = re.search(r"(.+)_\d+$", folder_name)
-    if m:
-        folder_name = m.group(1)
+    folder_name, _gap = split_name_and_gap(folder_name, fps)
     tracks = build_tracks_from_folder(folder)
     if not tracks:
         return None, 0
-
-    fps = context.scene.render.fps
 
     # Determine total duration in frames
     max_t_ms = max(tr["data"][-1]["t_ms"] for tr in tracks if tr["data"])
@@ -185,17 +215,50 @@ def import_csv_folder(context, folder, start_frame):
         d0 = tr["data"][0]
         first_positions.append((d0["x"], d0["y"], d0["z"]))
 
-    # Create mesh and armature with N bones/vertices
-    # Name it after the storyboard entry + "_CSV" for clarity
-    obj = ensure_mesh_with_armature(
-        name=f"{folder_name}_CSV",
-        count=len(tracks),
-        first_positions=first_positions,
-    )
+    if use_vat:
+        obj = csv_vat_gn.create_vat_animation_from_tracks(
+            tracks,
+            fps,
+            start_frame=start_frame,
+            base_name=f"{folder_name}_CSV",
+        )
+        key_entries = None
+    else:
+        # Create mesh and armature with N bones/vertices
+        # Name it after the storyboard entry + "_CSV" for clarity
+        obj = ensure_mesh_with_armature(
+            name=f"{folder_name}_CSV",
+            count=len(tracks),
+            first_positions=first_positions,
+        )
 
-    # Create a vertex group containing all vertices for formations
-    vg = obj.vertex_groups.new(name="Drones")
-    vg.add(range(len(obj.data.vertices)), 1.0, 'REPLACE')
+        # Animate bones directly with keyframes
+        arm_obj = obj.parent
+        for i, tr in enumerate(tracks):
+            pb = arm_obj.pose.bones.get(f"Bone_{i}")
+            if not pb:
+                continue
+            for row in tr["data"]:
+                frame = start_frame + ms_to_frame(row["t_ms"], fps)
+                pb.location = (row["x"], row["y"], row["z"])
+                pb.keyframe_insert(data_path="location", frame=frame)
+
+        if arm_obj.animation_data and arm_obj.animation_data.action:
+            for fcurve in arm_obj.animation_data.action.fcurves:
+                for key in fcurve.keyframe_points:
+                    key.interpolation = 'LINEAR'
+
+        # Prepare color keyframe data for later application
+        key_entries = tracks_to_keydata(tracks, fps)
+
+    if obj is None:
+        return None, duration, None
+
+    # Ensure a vertex group exists for formation mapping
+    vg = obj.vertex_groups.get("Drones")
+    if vg is None:
+        vg = obj.vertex_groups.new(name="Drones")
+        vg.add(range(len(obj.data.vertices)), 1.0, 'REPLACE')
 
     if hasattr(obj, "skybrush"):
         obj.skybrush.formation_vertex_group = "Drones"
@@ -214,25 +277,6 @@ def import_csv_folder(context, folder, start_frame):
         entry.duration = duration
     except Exception:
         pass
-
-    # Animate bones directly with keyframes
-    arm_obj = obj.parent
-    for i, tr in enumerate(tracks):
-        pb = arm_obj.pose.bones.get(f"Bone_{i}")
-        if not pb:
-            continue
-        for row in tr["data"]:
-            frame = start_frame + ms_to_frame(row["t_ms"], fps)
-            pb.location = (row["x"], row["y"], row["z"])
-            pb.keyframe_insert(data_path="location", frame=frame)
-
-    if arm_obj.animation_data and arm_obj.animation_data.action:
-        for fcurve in arm_obj.animation_data.action.fcurves:
-            for key in fcurve.keyframe_points:
-                key.interpolation = 'LINEAR'
-
-    # Prepare color keyframe data for later application
-    key_entries = tracks_to_keydata(tracks, fps)
 
     return obj, duration, key_entries
 
@@ -255,6 +299,11 @@ class CSVVA_Props(PropertyGroup):
         name="CSV Folder",
         description="Folder containing CSV/TSV files with columns: Time[msec], x[m], y[m], z[m], Red, Green, Blue",
         subtype="DIR_PATH",
+    )
+    use_vat: BoolProperty(
+        name="Use VAT",
+        description="Generate vertex animation textures instead of bone-based animation",
+        default=False,
     )
     preview_items: CollectionProperty(type=CSVVA_PreviewItem)
     preview_index: IntProperty(default=0)
@@ -302,16 +351,19 @@ class CSVVA_OT_Import(Operator):
             key_data_collection = []
             for d in subdirs:
                 sub_path = os.path.join(folder, d)
-                m = re.search(r".*_(\d+)$", d)
-                if m:
-                    sf = int(m.group(1))
-                else:
-                    sf = next_start
-                obj, dur, key_entries = import_csv_folder(context, sub_path, sf)
+                base_name, gap_frames = split_name_and_gap(d, context.scene.render.fps)
+                sf = next_start
+                obj, dur, key_entries = import_csv_folder(
+                    context,
+                    sub_path,
+                    sf,
+                    use_vat=prefs.use_vat,
+                )
                 if obj:
                     created.append(obj)
-                    key_data_collection.append((key_entries, sf, obj, sub_path))
-                    next_start = max(next_start, sf + dur)
+                    if key_entries:
+                        key_data_collection.append((key_entries, sf, obj, sub_path))
+                    next_start = max(next_start, sf + dur + gap_frames)
             if not created:
                 self.report({"ERROR"}, "No CSV/TSV files found in subfolders")
                 return {"CANCELLED"}
@@ -331,11 +383,10 @@ class CSVVA_OT_Import(Operator):
             return {"FINISHED"}
 
         folder_name = os.path.basename(os.path.normpath(folder))
+        base_name, _gap = split_name_and_gap(
+            folder_name, context.scene.render.fps
+        )
         start_frame = base_start
-        base_name = folder_name
-        m = re.search(r"(.+)_([0-9]+)$", folder_name)
-        if m:
-            base_name, start_frame = m.group(1), int(m.group(2))
         storyboard = context.scene.skybrush.storyboard
         for idx, sb in enumerate(storyboard.entries):
             if sb.name == base_name:
@@ -349,7 +400,9 @@ class CSVVA_OT_Import(Operator):
                 storyboard.entries.remove(idx)
                 break
 
-        obj, _, key_entries = import_csv_folder(context, folder, start_frame)
+        obj, _, key_entries = import_csv_folder(
+            context, folder, start_frame, use_vat=prefs.use_vat
+        )
         if not obj:
             self.report({"ERROR"}, "No CSV/TSV files found in folder")
             return {"CANCELLED"}
@@ -357,13 +410,14 @@ class CSVVA_OT_Import(Operator):
             bpy.ops.skybrush.recalculate_transitions(scope="ALL")
         except Exception:
             pass
-        current_frame = context.scene.frame_current
-        context.scene.frame_set(start_frame)
-        apply_color_keys_from_key_data(
-            key_entries,
-            start_frame,
-        )
-        context.scene.frame_set(current_frame)
+        if key_entries:
+            current_frame = context.scene.frame_current
+            context.scene.frame_set(start_frame)
+            apply_color_keys_from_key_data(
+                key_entries,
+                start_frame,
+            )
+            context.scene.frame_set(current_frame)
         bpy.ops.object.select_all(action='DESELECT')
         obj.select_set(True)
         context.view_layer.objects.active = obj
@@ -401,13 +455,11 @@ class CSVVA_OT_Preview(Operator):
 
         next_start = base_start
         created = 0
+        fps = context.scene.render.fps
         for path in target_folders:
             folder_name = os.path.basename(os.path.normpath(path))
-            base_name = re.sub(r"_(\d+)$", "", folder_name)
+            base_name, gap_frames = split_name_and_gap(folder_name, fps)
             start_frame = next_start
-            match = re.search(r"_(\d+)$", folder_name)
-            if match:
-                start_frame = int(match.group(1))
 
             tracks = build_tracks_from_folder(path)
             duration = calculate_duration_from_tracks(tracks, fps)
@@ -441,7 +493,7 @@ class CSVVA_OT_Preview(Operator):
             item.frame_mismatch = frame_mismatch
             created += 1
 
-            next_start = max(next_start, start_frame + duration)
+            next_start = max(next_start, start_frame + duration + gap_frames)
 
         if not created:
             self.report({"ERROR"}, "No valid CSV folders found")
@@ -501,7 +553,9 @@ class CSVVA_OT_Update(Operator):
                 self.report({"WARNING"}, f"No CSV/TSV files found in {item.folder}")
                 continue
 
-            obj, imported_duration, key_entries = import_csv_folder(context, item.folder, target_start)
+            obj, imported_duration, key_entries = import_csv_folder(
+                context, item.folder, target_start, use_vat=prefs.use_vat
+            )
             if not obj:
                 self.report({"WARNING"}, f"Failed to import from {item.folder}")
                 continue
@@ -516,7 +570,8 @@ class CSVVA_OT_Update(Operator):
                     entry.frame_start = item.start_frame
                     entry.duration = duration
 
-            key_data_collection.append((key_entries, entry.frame_start))
+            if key_entries:
+                key_data_collection.append((key_entries, entry.frame_start))
             processed += 1
 
         if not processed:
@@ -552,6 +607,7 @@ class CSVVA_PT_UI(Panel):
         prefs = context.scene.csvva_props
         col = lay.column(align=True)
         col.prop(prefs, "folder")
+        col.prop(prefs, "use_vat")
         row = col.row(align=True)
         row.operator(CSVVA_OT_Import.bl_idname, icon="IMPORT")
         row.operator(CSVVA_OT_Preview.bl_idname, icon="VIEWZOOM")

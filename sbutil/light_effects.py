@@ -608,6 +608,58 @@ def _collect_vertex_colors(eval_mesh) -> dict[int, tuple[float, float]]:
     return averaged_colors
 
 
+def _collect_vertex_colors_rgba(eval_mesh) -> dict[int, tuple[float, float, float, float]]:
+    color_layer = _get_color_attribute(eval_mesh)
+    if color_layer is None:
+        return {}
+
+    domain = getattr(color_layer, "domain", None)
+    data = getattr(color_layer, "data", None)
+    if data is None:
+        return {}
+
+    colors: dict[int, tuple[float, float, float, float]] = {}
+    if domain == "POINT":
+        for idx, col in enumerate(data):
+            color = getattr(col, "color", col)
+            try:
+                colors[idx] = tuple(float(color[i]) for i in range(4))
+            except Exception:
+                continue
+        return colors
+
+    color_accumulator: dict[int, list[tuple[float, float, float, float]]] = {}
+    for loop in getattr(eval_mesh, "loops", []):
+        if loop.index >= len(data):
+            continue
+        color = data[loop.index].color
+        color_accumulator.setdefault(loop.vertex_index, []).append(
+            (
+                float(color[0]),
+                float(color[1]),
+                float(color[2]),
+                float(color[3]) if len(color) > 3 else 1.0,
+            )
+        )
+
+    for vertex_index, values in color_accumulator.items():
+        if not values:
+            continue
+        sum_r = sum(r for r, _g, _b, _a in values)
+        sum_g = sum(g for _r, g, _b, _a in values)
+        sum_b = sum(b for _r, _g, b, _a in values)
+        sum_a = sum(a for _r, _g, _b, a in values)
+        count = len(values)
+        colors[vertex_index] = (
+            sum_r / count,
+            sum_g / count,
+            sum_b / count,
+            sum_a / count,
+        )
+
+    return colors
+
+
 def _get_drone_number(
     mapping: Optional[Sequence[Optional[int]]], index: int
 ) -> Optional[int]:
@@ -853,6 +905,117 @@ def _get_or_build_baked_uv_cache(
     st["baked_uv_cache"] = {
         "frame": frame,
         "collection": collection_ptr,
+        "drone_count": drone_count,
+        "mapping": mapping_key,
+        "entries": entries,
+    }
+
+    return entries
+
+
+def _get_or_build_vertex_color_cache(
+    effect,
+    mesh_obj,
+    positions: Sequence[Coordinate3D],
+    mapping: Optional[Sequence[Optional[int]]],
+    *,
+    frame: int,
+):
+    if mesh_obj is None:
+        return None
+
+    st = get_state(effect)
+    mesh_ptr = mesh_obj.as_pointer()
+    mapping_key = tuple(mapping) if mapping is not None else None
+    cache = st.get("vertex_color_cache")
+    if cache:
+        if (
+            cache.get("frame") == frame
+            and cache.get("mesh") == mesh_ptr
+            and cache.get("drone_count") == len(positions)
+            and cache.get("mapping") == mapping_key
+        ):
+            return cache.get("entries")
+
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    try:
+        eval_obj = mesh_obj.evaluated_get(depsgraph)
+        eval_mesh = eval_obj.to_mesh(preserve_all_data_layers=True, depsgraph=depsgraph)
+    except Exception:
+        return None
+
+    try:
+        colors_by_vertex = _collect_vertex_colors_rgba(eval_mesh)
+        if not colors_by_vertex:
+            return None
+        matrix_world = getattr(eval_obj, "matrix_world", None)
+        vertices: list[dict] = []
+        for vertex in getattr(eval_mesh, "vertices", []):
+            color = colors_by_vertex.get(vertex.index)
+            if color is None:
+                continue
+            position = vertex.co
+            if matrix_world is not None:
+                position = matrix_world @ position
+            vertices.append(
+                {
+                    "vertex_id": int(vertex.index),
+                    "position": position.copy()
+                    if hasattr(position, "copy")
+                    else Vector(position),
+                    "color": color,
+                }
+            )
+    finally:
+        eval_obj.to_mesh_clear()
+
+    if not vertices:
+        return None
+
+    drone_count = len(positions)
+    best_matches: list[Optional[dict]] = [None] * drone_count
+    best_distances = [float("inf")] * drone_count
+
+    for vertex in vertices:
+        pos = vertex["position"]
+        closest_drone = None
+        closest_distance = None
+        for idx, drone_pos in enumerate(positions):
+            drone_vec = drone_pos.copy() if isinstance(drone_pos, Vector) else Vector(drone_pos)
+            dist_sq = (drone_vec - pos).length_squared
+            if closest_distance is None or dist_sq < closest_distance:
+                closest_distance = dist_sq
+                closest_drone = idx
+
+        if closest_drone is None or closest_distance is None:
+            continue
+
+        if closest_distance < best_distances[closest_drone]:
+            best_distances[closest_drone] = closest_distance
+            best_matches[closest_drone] = vertex
+
+    entries = []
+    for idx, match in enumerate(best_matches):
+        drone_number = _get_drone_number(mapping, idx)
+        entries.append(
+            {
+                "drone_index": idx,
+                "drone_number": drone_number,
+                "vertex_id": (match or {}).get("vertex_id"),
+                "color": (match or {}).get("color"),
+            }
+        )
+
+    entries.sort(
+        key=lambda item: (
+            item["drone_number"] if item["drone_number"] is not None else float("inf"),
+            item["drone_index"],
+        )
+    )
+
+    st["vertex_color_cache"] = {
+        "frame": frame,
+        "mesh": mesh_ptr,
         "drone_count": drone_count,
         "mapping": mapping_key,
         "entries": entries,
@@ -1878,10 +2041,15 @@ class PatchedLightEffect(PropertyGroup):
     type = EnumProperty(
         name="Effect Type",
         description=(
-            "Type of the light effect: color ramp-based, image-based or"
-            " custom function"
+            "Type of the light effect: color ramp-based, image-based, vertex"
+            " color driven or custom function"
         ),
-        items=[("COLOR_RAMP", "Color ramp", "", 1), ("IMAGE", "Image", "", 2), ("FUNCTION", "Function", "", 3)],
+        items=[
+            ("COLOR_RAMP", "Color ramp", "", 1),
+            ("IMAGE", "Image", "", 2),
+            ("FUNCTION", "Function", "", 3),
+            ("VERTEX_COLOR", "Vertex color", "", 4),
+        ],
         default="COLOR_RAMP",
     )
     loop_count = IntProperty(name="Loop Count", default=0, min=0)
@@ -2437,39 +2605,77 @@ class PatchedLightEffect(PropertyGroup):
                         else:
                             setattr(module, name.upper(), value)
             new_color = [0.0] * 4
-            outputs_x, common_output_x = get_output_based_on_output_type(
-                self.output, self.output_mapping_mode, self.output_function
-            )
-            if color_image is not None:
-                outputs_y, common_output_y = get_output_based_on_output_type(
-                    self.output_y, self.output_mapping_mode_y, self.output_function_y
+            outputs_x: Optional[list[Optional[float]]] | None = None
+            outputs_y: Optional[list[Optional[float]]] | None = None
+            common_output_x: Optional[float] = None
+            common_output_y: Optional[float] = None
+            vertex_colors: Optional[list[Optional[Sequence[float]]]] = None
+
+            if self.type == "VERTEX_COLOR":
+                cache_entries = _get_or_build_vertex_color_cache(
+                    self,
+                    getattr(self, "mesh", None),
+                    positions,
+                    mapping,
+                    frame=effective_frame,
                 )
+                if cache_entries:
+                    vertex_colors = [None] * num_positions
+                    for entry in cache_entries:
+                        drone_index = entry.get("drone_index")
+                        color = entry.get("color")
+                        if (
+                            drone_index is None
+                            or drone_index >= num_positions
+                            or color is None
+                        ):
+                            continue
+                        color_values = (
+                            tuple(color)
+                            if len(color) >= 4
+                            else tuple(list(color) + [1.0])
+                        )
+                        vertex_colors[drone_index] = color_values
+            else:
+                outputs_x, common_output_x = get_output_based_on_output_type(
+                    self.output, self.output_mapping_mode, self.output_function
+                )
+                if color_image is not None:
+                    outputs_y, common_output_y = get_output_based_on_output_type(
+                        self.output_y, self.output_mapping_mode_y, self.output_function_y
+                    )
             condition = self._get_spatial_effect_predicate()
             for index, position in enumerate(positions):
                 color = colors[index]
-                if common_output_x is not None:
-                    output_x = common_output_x
-                else:
-                    assert outputs_x is not None
-                    if outputs_x[index] is None:
+                direct_color = None
+                if vertex_colors is not None and index < len(vertex_colors):
+                    direct_color = vertex_colors[index]
+                if direct_color is None:
+                    if self.type == "VERTEX_COLOR":
                         continue
-                    output_x = outputs_x[index]
-                assert isinstance(output_x, float)
-                if color_image is not None:
-                    if common_output_y is not None:
-                        output_y = common_output_y
+                    if common_output_x is not None:
+                        output_x = common_output_x
                     else:
-                        assert outputs_y is not None
-                        if outputs_y[index] is None:
+                        assert outputs_x is not None
+                        if outputs_x[index] is None:
                             continue
-                        output_y = outputs_y[index]
-                    assert isinstance(output_y, float)
-                if self.randomness != 0:
-                    offset_x = (random_seq.get_float(index) - 0.5) * self.randomness
-                    output_x = (offset_x + output_x) % 1.0
+                        output_x = outputs_x[index]
+                    assert isinstance(output_x, float)
                     if color_image is not None:
-                        offset_y = (random_seq.get_float(index) - 0.5) * self.randomness
-                        output_y = (offset_y + output_y) % 1.0
+                        if common_output_y is not None:
+                            output_y = common_output_y
+                        else:
+                            assert outputs_y is not None
+                            if outputs_y[index] is None:
+                                continue
+                            output_y = outputs_y[index]
+                        assert isinstance(output_y, float)
+                    if self.randomness != 0:
+                        offset_x = (random_seq.get_float(index) - 0.5) * self.randomness
+                        output_x = (offset_x + output_x) % 1.0
+                        if color_image is not None:
+                            offset_y = (random_seq.get_float(index) - 0.5) * self.randomness
+                            output_y = (offset_y + output_y) % 1.0
                 alpha = max(
                     min(
                         self._evaluate_influence_at(
@@ -2479,7 +2685,15 @@ class PatchedLightEffect(PropertyGroup):
                     ),
                     0.0,
                 )
-                if getattr(self, "color_function_text", None):
+                if direct_color is not None:
+                    dc = list(direct_color) if isinstance(direct_color, Iterable) else [1.0, 1.0, 1.0, 1.0]
+                    if len(dc) < 4:
+                        dc.extend([1.0] * (4 - len(dc)))
+                    new_color[:] = dc[:4]
+                    if getattr(self, "convert_srgb", False):
+                        for idx in range(3):
+                            new_color[idx] = linear_to_srgb(new_color[idx])
+                elif getattr(self, "color_function_text", None):
                     ctx = st.get("module", ModuleType("_dummy")).__dict__
                     ctx.update(
                         frame=frame,
@@ -4766,6 +4980,9 @@ class PatchedLightEffectsPanel(Panel):  # pragma: no cover - Blender UI code
                         icon="FILE_REFRESH",
                         text="",
                     )
+                elif entry.type == "VERTEX_COLOR":
+                    box = layout.box()
+                    box.label(text="Vertex colors will drive drone colors")
                 elif entry.type == "FUNCTION":
                     box = self.layout.box()
                     row = box.row(align=True)
@@ -4787,6 +5004,9 @@ class PatchedLightEffectsPanel(Panel):  # pragma: no cover - Blender UI code
                     row.alert = True
                     row.label(text="Invalid light effect type", icon="ERROR")
                     layout.separator()
+            elif entry.type == "VERTEX_COLOR":
+                box = layout.box()
+                box.label(text="Vertex colors will drive drone colors")
 
             col = layout.column()
             col.prop(entry, "frame_start")
@@ -4877,7 +5097,10 @@ class PatchedLightEffectsPanel(Panel):  # pragma: no cover - Blender UI code
                     in {OUTPUT_FORMATION_UV_U, OUTPUT_BAKED_UV_R}
                 ):
                     col.prop(entry, "formation_collection")
-            if output_type_supports_mapping_mode(entry.output):
+            if (
+                entry.type in {"COLOR_RAMP", "IMAGE"}
+                and output_type_supports_mapping_mode(entry.output)
+            ):
                 col.prop(entry, "output_mapping_mode")
             if entry.type == "IMAGE":
                 col.prop(entry, "output_y")
@@ -4909,7 +5132,12 @@ class PatchedLightEffectsPanel(Panel):  # pragma: no cover - Blender UI code
                 ):
                     col.prop(entry, "formation_collection")
                 col.prop(entry, "convert_srgb")
-            if output_type_supports_mapping_mode(entry.output_y):
+            elif entry.type == "VERTEX_COLOR":
+                col.prop(entry, "convert_srgb")
+            if (
+                entry.type == "IMAGE"
+                and output_type_supports_mapping_mode(entry.output_y)
+            ):
                 col.prop(entry, "output_mapping_mode_y")
             show_uv_tiling_mode = hasattr(entry, "uv_tiling_mode") and (
                 entry.output in {OUTPUT_MESH_UV_U, OUTPUT_MESH_UV_V}
