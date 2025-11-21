@@ -3247,8 +3247,6 @@ class BakeLightEffectToKeysOperator(bpy.types.Operator):  # pragma: no cover - B
                 except Exception as exc:  # pragma: no cover - Blender runtime
                     raise RuntimeError(str(exc)) from exc
                 for obj, base_color, color in zip(drones, base_colors, colors):
-                    if not _color_changed(base_color, color):
-                        continue
                     if _set_color_keyframe(obj, color, frame):
                         inserted = True
             return inserted
