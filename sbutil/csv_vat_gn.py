@@ -98,9 +98,9 @@ def build_vat_images_from_tracks(
             ny = (row["y"] - pos_min[1]) / ry
             nz = (row["z"] - pos_min[2]) / rz
 
-            cr = _normalize_color_value(row.get("r", 0.0))
-            cg = _normalize_color_value(row.get("g", 0.0))
-            cb = _normalize_color_value(row.get("b", 0.0))
+            cr = row.get("r", 0.0)/ 255.0
+            cg = row.get("g", 0.0)/ 255.0
+            cb = row.get("b", 0.0)/ 255.0
 
             idx = (drone_idx * frame_count + frame_idx) * 4
             pos_pixels[idx + 0] = nx
