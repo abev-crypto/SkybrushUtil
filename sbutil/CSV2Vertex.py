@@ -4,6 +4,7 @@ from bpy.types import Operator, Panel, PropertyGroup, UIList
 import csv, os, re, math
 
 from sbutil import csv_vat_gn
+from sbutil.light_effects import OUTPUT_VERTEX_COLOR
 
 from sbutil.color_key_utils import apply_color_keys_from_key_data
 
@@ -188,6 +189,84 @@ def clear_drone_keys(start_frame, duration):
                 if start_frame <= key.co.x <= end_frame:
                     fcurve.keyframe_points.remove(key)
 
+
+def _update_frame_range_from_storyboard(context):
+    """Extend the scene frame range to cover all storyboard entries."""
+
+    scene = context.scene
+    storyboard = getattr(getattr(scene, "skybrush", None), "storyboard", None)
+    entries = getattr(storyboard, "entries", None)
+    if not entries:
+        return
+
+    max_end = 0
+    for entry in entries:
+        try:
+            start = int(getattr(entry, "frame_start", 0))
+            duration = int(getattr(entry, "duration", 0))
+        except (TypeError, ValueError):
+            continue
+        max_end = max(max_end, start + max(duration, 0))
+
+    if max_end > 0:
+        scene.frame_end = max(scene.frame_end, max_end)
+
+
+def _create_light_effect_for_storyboard(context, mesh_obj, storyboard_entry):
+    """Create a vertex color light effect aligned with ``storyboard_entry``."""
+
+    skybrush = getattr(context.scene, "skybrush", None)
+    light_effects = getattr(skybrush, "light_effects", None)
+    entries = getattr(light_effects, "entries", None)
+    if entries is None:
+        return None
+
+    le_entry = None
+    append_entry = getattr(light_effects, "append_new_entry", None)
+    if callable(append_entry):
+        try:
+            le_entry = append_entry(
+                storyboard_entry.name,
+                storyboard_entry.frame_start,
+                storyboard_entry.duration,
+                select=False,
+                context=context,
+            )
+        except Exception:
+            le_entry = None
+
+    if le_entry is None:
+        try:
+            le_entry = entries.add()
+            le_entry.name = storyboard_entry.name
+            le_entry.frame_start = storyboard_entry.frame_start
+            le_entry.duration = storyboard_entry.duration
+        except Exception:
+            return None
+
+    if hasattr(le_entry, "type"):
+        try:
+            le_entry.type = "VERTEX_COLOR"
+        except Exception:
+            pass
+    if hasattr(le_entry, "output"):
+        try:
+            le_entry.output = OUTPUT_VERTEX_COLOR
+        except Exception:
+            pass
+    if hasattr(le_entry, "mesh"):
+        try:
+            le_entry.mesh = mesh_obj
+        except Exception:
+            pass
+    if hasattr(le_entry, "convert_srgb"):
+        try:
+            le_entry.convert_srgb = True
+        except Exception:
+            pass
+
+    return le_entry
+
 # ---------- Import Helper ----------
 
 def import_csv_folder(context, folder, start_frame, *, use_vat: bool = False):
@@ -221,6 +300,7 @@ def import_csv_folder(context, folder, start_frame, *, use_vat: bool = False):
             fps,
             start_frame=start_frame,
             base_name=f"{folder_name}_CSV",
+            storyboard_name=folder_name,
         )
         key_entries = None
     else:
@@ -268,6 +348,7 @@ def import_csv_folder(context, folder, start_frame, *, use_vat: bool = False):
     obj.select_set(True)
     context.view_layer.objects.active = obj
     bpy.ops.skybrush.create_formation(name=obj.name, contents='SELECTED_OBJECTS')
+    entry = None
     try:
         bpy.ops.skybrush.append_formation_to_storyboard()
         storyboard = context.scene.skybrush.storyboard
@@ -276,7 +357,12 @@ def import_csv_folder(context, folder, start_frame, *, use_vat: bool = False):
         entry.frame_start = start_frame
         entry.duration = duration
     except Exception:
-        pass
+        entry = None
+
+    if use_vat and entry is not None:
+        _create_light_effect_for_storyboard(context, obj, entry)
+
+    _update_frame_range_from_storyboard(context)
 
     return obj, duration, key_entries
 
