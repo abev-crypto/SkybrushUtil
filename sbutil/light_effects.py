@@ -8,6 +8,7 @@ plug‑in is not available, the module simply does nothing.
 
 import bpy
 import bmesh
+import numpy as np
 from bpy.props import (
     BoolProperty,
     CollectionProperty,
@@ -496,32 +497,75 @@ def sample_uv_factors(
         return [None] * len(positions)
 
     component_index = 0 if axis == 0 else 2  # U=X, V=Z
-    values = [point[component_index] for point in local_points]
-    min_val = min(values)
-    max_val = max(values)
-    range_val = max_val - min_val
 
-    if abs(range_val) < 1e-9:
-        return [0.5 for _ in positions]
+    def _fallback_sample() -> list[Optional[float]]:
+        values = [point[component_index] for point in local_points]
+        min_val = min(values)
+        max_val = max(values)
+        range_val = max_val - min_val
 
-    inv_range = 1.0 / range_val
-    outputs: list[Optional[float]] = []
-    for pos in positions:
-        co = Vector(pos) if not isinstance(pos, Vector) else pos.copy()
-        local = inv_world @ co
-        value = float((local[component_index] - min_val) * inv_range)
+        if abs(range_val) < 1e-9:
+            return [0.5 for _ in positions]
+
+        inv_range = 1.0 / range_val
+        outputs: list[Optional[float]] = []
+        for pos in positions:
+            co = Vector(pos) if not isinstance(pos, Vector) else pos.copy()
+            local = inv_world @ co
+            value = float((local[component_index] - min_val) * inv_range)
+
+            if tiling_mode == "REPEAT":
+                value = (value % 1.0 + 1.0) % 1.0
+            elif tiling_mode == "MIRROR":
+                wrapped = (value % 2.0 + 2.0) % 2.0
+                value = wrapped if wrapped <= 1.0 else 2.0 - wrapped
+            else:  # NONE
+                value = max(0.0, min(1.0, value))
+            outputs.append(value)
+        return outputs
+
+    try:
+        local_coords = np.asarray(local_points, dtype=float)
+        values = local_coords[:, component_index]
+        min_val = float(np.min(values))
+        max_val = float(np.max(values))
+        range_val = max_val - min_val
+
+        if abs(range_val) < 1e-9:
+            return [0.5 for _ in positions]
+
+        inv_range = 1.0 / range_val
+        try:
+            pos_array = np.asarray(
+                [tuple(Vector(pos)) if not isinstance(pos, Vector) else tuple(pos) for pos in positions],
+                dtype=float,
+            )
+        except Exception:
+            return _fallback_sample()
+
+        if pos_array.ndim != 2 or pos_array.shape[1] < 3:
+            return _fallback_sample()
+
+        homogenous = np.concatenate(
+            [pos_array[:, :3], np.ones((pos_array.shape[0], 1), dtype=float)], axis=1
+        )
+        inv_matrix = np.asarray(inv_world, dtype=float)
+        local_coords = homogenous @ inv_matrix.T
+        values = (local_coords[:, component_index] - min_val) * inv_range
 
         if tiling_mode == "REPEAT":
-            value = (value % 1.0 + 1.0) % 1.0
+            values = np.mod(values, 1.0)
+            values = np.mod(values + 1.0, 1.0)
         elif tiling_mode == "MIRROR":
-            wrapped = (value % 2.0 + 2.0) % 2.0
-            value = wrapped if wrapped <= 1.0 else 2.0 - wrapped
+            wrapped = np.mod(values, 2.0)
+            wrapped = np.mod(wrapped + 2.0, 2.0)
+            values = np.where(wrapped <= 1.0, wrapped, 2.0 - wrapped)
         else:  # NONE
-            value = max(0.0, min(1.0, value))
+            values = np.clip(values, 0.0, 1.0)
 
-        outputs.append(value)
-
-    return outputs
+        return values.tolist()
+    except Exception:
+        return _fallback_sample()
 
 
 def _update_formation_collection(self, _context):
