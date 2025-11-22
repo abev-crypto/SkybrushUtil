@@ -95,7 +95,8 @@ def build_vat_images_from_tracks(
     prefix = image_name_prefix or "VAT"
     pos_img = _create_image(f"{prefix}_Pos", frame_count, drone_count)
     col_img = _create_image(f"{prefix}_Color", frame_count, drone_count)
-
+    pos_img.colorspace_settings.name = "Non-Color"
+    
     rx = (pos_max[0] - pos_min[0]) or 1.0
     ry = (pos_max[1] - pos_min[1]) or 1.0
     rz = (pos_max[2] - pos_min[2]) or 1.0
@@ -111,9 +112,9 @@ def build_vat_images_from_tracks(
         pos_pixels[drone_idx, :, 1] = (track["y"] - pos_min[1]) / ry
         pos_pixels[drone_idx, :, 2] = (track["z"] - pos_min[2]) / rz
 
-        col_pixels[drone_idx, :, 0] = _normalize_color_values(track["r"]/ 255.0)
-        col_pixels[drone_idx, :, 1] = _normalize_color_values(track["g"]/ 255.0)
-        col_pixels[drone_idx, :, 2] = _normalize_color_values(track["b"]/ 255.0)
+        col_pixels[drone_idx, :, 0] = (track["r"])/ 255.0
+        col_pixels[drone_idx, :, 1] = (track["g"])/ 255.0
+        col_pixels[drone_idx, :, 2] = (track["b"])/ 255.0
 
     pos_img.pixels[:] = pos_pixels.ravel()
     col_img.pixels[:] = col_pixels.ravel()
@@ -264,13 +265,13 @@ def _create_gn_vat_group(
 
     n_tex_pos = nodes.new("GeometryNodeImageTexture")
     n_tex_pos.location = (100, 150)
-    n_tex_pos.interpolation = "Linear"
+    n_tex_pos.interpolation = "Closest"
     n_tex_pos.extension = "EXTEND"
     n_tex_pos.inputs["Image"].default_value = pos_img
 
     n_tex_col = nodes.new("GeometryNodeImageTexture")
     n_tex_col.location = (100, -50)
-    n_tex_col.interpolation = "Linear"
+    n_tex_col.interpolation = "Closest"
     n_tex_col.extension = "EXTEND"
     n_tex_col.inputs["Image"].default_value = col_img
 
