@@ -1,5 +1,7 @@
 from typing import Iterable, Sequence
 
+import numpy as np
+
 import bpy
 
 
@@ -13,45 +15,54 @@ def ms_to_frame(ms: float, fps: float) -> float:
     return (ms / 1000.0) * fps
 
 
-def _sample_row(track: Sequence[dict], target_ms: float) -> dict:
-    if not track:
-        return {"x": 0.0, "y": 0.0, "z": 0.0, "r": 0.0, "g": 0.0, "b": 0.0}
-    if target_ms <= track[0]["t_ms"]:
-        return track[0]
-    for i in range(1, len(track)):
-        prev_row = track[i - 1]
-        next_row = track[i]
-        if target_ms <= next_row["t_ms"]:
-            span = max(next_row["t_ms"] - prev_row["t_ms"], 1.0)
-            factor = (target_ms - prev_row["t_ms"]) / span
-            return {
-                key: prev_row[key] * (1.0 - factor) + next_row[key] * factor
+def _gather_samples(
+    tracks: Sequence[dict], fps: float, frame_count: int
+) -> list[dict[str, np.ndarray]]:
+    target_ms = (np.arange(frame_count, dtype=np.float32) / fps) * 1000.0
+    samples: list[dict[str, np.ndarray]] = []
+
+    for track in tracks:
+        data = track.get("data") or []
+        if not data:
+            zeros = np.zeros(frame_count, dtype=np.float32)
+            samples.append({key: zeros for key in ("x", "y", "z", "r", "g", "b")})
+            continue
+
+        times = np.array([row["t_ms"] for row in data], dtype=np.float32)
+
+        def _interp(values: np.ndarray) -> np.ndarray:
+            return np.interp(target_ms, times, values, left=values[0], right=values[-1])
+
+        samples.append(
+            {
+                key: _interp(
+                    np.array([row.get(key, 0.0) for row in data], dtype=np.float32)
+                )
                 for key in ("x", "y", "z", "r", "g", "b")
             }
-    return track[-1]
+        )
 
-
-def _gather_samples(tracks: Sequence[dict], fps: float, frame_count: int) -> list[list[dict]]:
-    samples: list[list[dict]] = []
-    for track in tracks:
-        frames: list[dict] = []
-        for frame in range(frame_count):
-            target_ms = (frame / fps) * 1000.0
-            frames.append(_sample_row(track["data"], target_ms))
-        samples.append(frames)
     return samples
 
 
-def _determine_bounds(samples: Iterable[Iterable[dict]]):
-    xs, ys, zs = [], [], []
-    for track in samples:
-        for row in track:
-            xs.append(row.get("x", 0.0))
-            ys.append(row.get("y", 0.0))
-            zs.append(row.get("z", 0.0))
-    if not xs:
+def _determine_bounds(samples: Iterable[dict[str, np.ndarray]]):
+    arrays = list(samples)
+    if not arrays:
         return (0.0, 0.0, 0.0), (1.0, 1.0, 1.0)
-    return (min(xs), min(ys), min(zs)), (max(xs), max(ys), max(zs))
+
+    xs = np.concatenate([track["x"] for track in arrays])
+    ys = np.concatenate([track["y"] for track in arrays])
+    zs = np.concatenate([track["z"] for track in arrays])
+
+    return (
+        float(xs.min(initial=0.0)),
+        float(ys.min(initial=0.0)),
+        float(zs.min(initial=0.0)),
+    ), (
+        float(xs.max(initial=1.0)),
+        float(ys.max(initial=1.0)),
+        float(zs.max(initial=1.0)),
+    )
 
 
 def _create_image(name: str, width: int, height: int):
@@ -61,11 +72,11 @@ def _create_image(name: str, width: int, height: int):
     return bpy.data.images.new(name=name, width=width, height=height, float_buffer=True)
 
 
-def _normalize_color_value(value: float) -> float:
+def _normalize_color_values(values: np.ndarray) -> np.ndarray:
     """Normalize color channel values to the 0-1 range."""
 
-    normalized = value / 255.0 if value > 1.0 else value
-    return max(0.0, min(1.0, normalized))
+    normalized = np.where(values > 1.0, values / 255.0, values)
+    return np.clip(normalized, 0.0, 1.0)
 
 
 def build_vat_images_from_tracks(
@@ -89,32 +100,23 @@ def build_vat_images_from_tracks(
     ry = (pos_max[1] - pos_min[1]) or 1.0
     rz = (pos_max[2] - pos_min[2]) or 1.0
 
-    pos_pixels = [0.0] * (frame_count * drone_count * 4)
-    col_pixels = [0.0] * (frame_count * drone_count * 4)
+    pos_pixels = np.empty((drone_count, frame_count, 4), dtype=np.float32)
+    col_pixels = np.empty((drone_count, frame_count, 4), dtype=np.float32)
+
+    pos_pixels[:, :, 3] = 1.0
+    col_pixels[:, :, 3] = 1.0
 
     for drone_idx, track in enumerate(samples):
-        for frame_idx, row in enumerate(track):
-            nx = (row["x"] - pos_min[0]) / rx
-            ny = (row["y"] - pos_min[1]) / ry
-            nz = (row["z"] - pos_min[2]) / rz
+        pos_pixels[drone_idx, :, 0] = (track["x"] - pos_min[0]) / rx
+        pos_pixels[drone_idx, :, 1] = (track["y"] - pos_min[1]) / ry
+        pos_pixels[drone_idx, :, 2] = (track["z"] - pos_min[2]) / rz
 
-            cr = row.get("r", 0.0)/ 255.0
-            cg = row.get("g", 0.0)/ 255.0
-            cb = row.get("b", 0.0)/ 255.0
+        col_pixels[drone_idx, :, 0] = _normalize_color_values(track["r"]/ 255.0)
+        col_pixels[drone_idx, :, 1] = _normalize_color_values(track["g"]/ 255.0)
+        col_pixels[drone_idx, :, 2] = _normalize_color_values(track["b"]/ 255.0)
 
-            idx = (drone_idx * frame_count + frame_idx) * 4
-            pos_pixels[idx + 0] = nx
-            pos_pixels[idx + 1] = ny
-            pos_pixels[idx + 2] = nz
-            pos_pixels[idx + 3] = 1.0
-
-            col_pixels[idx + 0] = cr
-            col_pixels[idx + 1] = cg
-            col_pixels[idx + 2] = cb
-            col_pixels[idx + 3] = 1.0
-
-    pos_img.pixels[:] = pos_pixels
-    col_img.pixels[:] = col_pixels
+    pos_img.pixels[:] = pos_pixels.ravel()
+    col_img.pixels[:] = col_pixels.ravel()
 
     return pos_img, col_img, pos_min, pos_max, duration, drone_count
 
