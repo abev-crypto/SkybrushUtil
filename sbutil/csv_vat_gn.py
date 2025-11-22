@@ -1,4 +1,3 @@
-import math
 from typing import Iterable, Sequence
 
 import bpy
@@ -8,10 +7,6 @@ __all__ = [
     "build_vat_images_from_tracks",
     "create_vat_animation_from_tracks",
 ]
-
-
-POS_IMAGE_NAME = "VAT_Pos"
-COL_IMAGE_NAME = "VAT_Color"
 
 
 def ms_to_frame(ms: float, fps: float) -> float:
@@ -66,13 +61,16 @@ def _create_image(name: str, width: int, height: int):
     return bpy.data.images.new(name=name, width=width, height=height, float_buffer=True)
 
 
-def _apply_gamma_curve(value: float) -> float:
-    """Replicate the former Shader Gamma node (power of 1/2.2)."""
-    value = max(0.0, min(1.0, value))
-    return math.pow(value, 1.0 / 2.2)
+def _normalize_color_value(value: float) -> float:
+    """Normalize color channel values to the 0-1 range."""
+
+    normalized = value / 255.0 if value > 1.0 else value
+    return max(0.0, min(1.0, normalized))
 
 
-def build_vat_images_from_tracks(tracks: Sequence[dict], fps: float):
+def build_vat_images_from_tracks(
+    tracks: Sequence[dict], fps: float, *, image_name_prefix: str = "VAT"
+):
     if not tracks:
         raise RuntimeError("No CSV tracks supplied for VAT generation")
 
@@ -83,8 +81,9 @@ def build_vat_images_from_tracks(tracks: Sequence[dict], fps: float):
     pos_min, pos_max = _determine_bounds(samples)
 
     drone_count = len(tracks)
-    pos_img = _create_image(POS_IMAGE_NAME, frame_count, drone_count)
-    col_img = _create_image(COL_IMAGE_NAME, frame_count, drone_count)
+    prefix = image_name_prefix or "VAT"
+    pos_img = _create_image(f"{prefix}_Pos", frame_count, drone_count)
+    col_img = _create_image(f"{prefix}_Color", frame_count, drone_count)
 
     rx = (pos_max[0] - pos_min[0]) or 1.0
     ry = (pos_max[1] - pos_min[1]) or 1.0
@@ -99,9 +98,9 @@ def build_vat_images_from_tracks(tracks: Sequence[dict], fps: float):
             ny = (row["y"] - pos_min[1]) / ry
             nz = (row["z"] - pos_min[2]) / rz
 
-            cr = row["r"] / 255.0 if row["r"] > 1.0 else row["r"]
-            cg = row["g"] / 255.0 if row["g"] > 1.0 else row["g"]
-            cb = row["b"] / 255.0 if row["b"] > 1.0 else row["b"]
+            cr = _normalize_color_value(row.get("r", 0.0))
+            cg = _normalize_color_value(row.get("g", 0.0))
+            cb = _normalize_color_value(row.get("b", 0.0))
 
             idx = (drone_idx * frame_count + frame_idx) * 4
             pos_pixels[idx + 0] = nx
@@ -109,9 +108,9 @@ def build_vat_images_from_tracks(tracks: Sequence[dict], fps: float):
             pos_pixels[idx + 2] = nz
             pos_pixels[idx + 3] = 1.0
 
-            col_pixels[idx + 0] = _apply_gamma_curve(cr)
-            col_pixels[idx + 1] = _apply_gamma_curve(cg)
-            col_pixels[idx + 2] = _apply_gamma_curve(cb)
+            col_pixels[idx + 0] = cr
+            col_pixels[idx + 1] = cg
+            col_pixels[idx + 2] = cb
             col_pixels[idx + 3] = 1.0
 
     pos_img.pixels[:] = pos_pixels
@@ -351,12 +350,14 @@ def create_vat_animation_from_tracks(
     *,
     start_frame: int,
     base_name: str,
+    storyboard_name: str | None = None,
 ):
     if not tracks:
         return None
 
+    image_name_prefix = f"{storyboard_name}_VAT" if storyboard_name else "VAT"
     pos_img, col_img, pos_min, pos_max, duration, drone_count = build_vat_images_from_tracks(
-        tracks, fps
+        tracks, fps, image_name_prefix=image_name_prefix
     )
 
     first_positions = []
