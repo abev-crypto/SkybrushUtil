@@ -1,3 +1,4 @@
+import math
 from typing import Iterable, Sequence
 
 import bpy
@@ -65,6 +66,12 @@ def _create_image(name: str, width: int, height: int):
     return bpy.data.images.new(name=name, width=width, height=height, float_buffer=True)
 
 
+def _apply_gamma_curve(value: float) -> float:
+    """Replicate the former Shader Gamma node (power of 1/2.2)."""
+    value = max(0.0, min(1.0, value))
+    return math.pow(value, 1.0 / 2.2)
+
+
 def build_vat_images_from_tracks(tracks: Sequence[dict], fps: float):
     if not tracks:
         raise RuntimeError("No CSV tracks supplied for VAT generation")
@@ -102,9 +109,9 @@ def build_vat_images_from_tracks(tracks: Sequence[dict], fps: float):
             pos_pixels[idx + 2] = nz
             pos_pixels[idx + 3] = 1.0
 
-            col_pixels[idx + 0] = cr
-            col_pixels[idx + 1] = cg
-            col_pixels[idx + 2] = cb
+            col_pixels[idx + 0] = _apply_gamma_curve(cr)
+            col_pixels[idx + 1] = _apply_gamma_curve(cg)
+            col_pixels[idx + 2] = _apply_gamma_curve(cb)
             col_pixels[idx + 3] = 1.0
 
     pos_img.pixels[:] = pos_pixels
@@ -113,12 +120,29 @@ def build_vat_images_from_tracks(tracks: Sequence[dict], fps: float):
     return pos_img, col_img, pos_min, pos_max, duration, drone_count
 
 
+def _remove_object_and_mesh(obj):
+    """Remove ``obj`` and its mesh data, tolerating already-removed datablocks."""
+    if obj is None:
+        return
+    try:
+        mesh_data = getattr(obj, "data", None)
+    except ReferenceError:
+        return
+    if mesh_data is not None:
+        try:
+            bpy.data.meshes.remove(mesh_data)
+        except ReferenceError:
+            pass
+    try:
+        bpy.data.objects.remove(obj)
+    except ReferenceError:
+        pass
+
+
 def _create_drone_points_object(drone_count: int, base_name: str, first_positions):
     obj = bpy.data.objects.get(base_name)
     if obj is not None:
-        if obj.data:
-            bpy.data.meshes.remove(obj.data)
-        bpy.data.objects.remove(obj)
+        _remove_object_and_mesh(obj)
 
     mesh = bpy.data.meshes.new(base_name + "_Mesh")
     verts = first_positions or [(0.0, 0.0, 0.0)] * drone_count
@@ -249,10 +273,6 @@ def _create_gn_vat_group(
     n_tex_col.extension = "EXTEND"
     n_tex_col.inputs["Image"].default_value = col_img
 
-    n_gamma_col = nodes.new("ShaderNodeGamma")
-    n_gamma_col.location = (300, -50)
-    n_gamma_col.inputs[1].default_value = 1.0 / 2.2
-
     n_vsub = nodes.new("ShaderNodeVectorMath")
     n_vsub.operation = "SUBTRACT"
     n_vsub.location = (300, 250)
@@ -272,7 +292,7 @@ def _create_gn_vat_group(
     n_store_col.location = (1100, 0)
     n_store_col.data_type = "FLOAT_COLOR"
     n_store_col.domain = "POINT"
-    n_store_col.name = "color"
+    n_store_col.inputs["Name"].default_value  = "color"
 
     links.new(n_input.outputs["Geometry"], n_setpos.inputs["Geometry"])
     links.new(n_setpos.outputs["Geometry"], n_store_col.inputs["Geometry"])
@@ -311,8 +331,7 @@ def _create_gn_vat_group(
 
     links.new(n_vadd.outputs["Vector"], n_setpos.inputs["Position"])
 
-    links.new(n_tex_col.outputs["Color"], n_gamma_col.inputs["Color"])
-    links.new(n_gamma_col.outputs["Color"], n_store_col.inputs["Value"])
+    links.new(n_tex_col.outputs["Color"], n_store_col.inputs["Value"])
 
     return ng
 
