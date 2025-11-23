@@ -158,7 +158,6 @@ def _create_drone_points_object(drone_count: int, base_name: str, first_position
 
 def _create_gn_vat_group(
     pos_img,
-    col_img,
     pos_min,
     pos_max,
     frame_count,
@@ -269,12 +268,6 @@ def _create_gn_vat_group(
     n_tex_pos.extension = "EXTEND"
     n_tex_pos.inputs["Image"].default_value = pos_img
 
-    n_tex_col = nodes.new("GeometryNodeImageTexture")
-    n_tex_col.location = (100, -50)
-    n_tex_col.interpolation = "Closest"
-    n_tex_col.extension = "EXTEND"
-    n_tex_col.inputs["Image"].default_value = col_img
-
     n_vsub = nodes.new("ShaderNodeVectorMath")
     n_vsub.operation = "SUBTRACT"
     n_vsub.location = (300, 250)
@@ -290,15 +283,8 @@ def _create_gn_vat_group(
     n_setpos = nodes.new("GeometryNodeSetPosition")
     n_setpos.location = (900, 100)
 
-    n_store_col = nodes.new("GeometryNodeStoreNamedAttribute")
-    n_store_col.location = (1100, 0)
-    n_store_col.data_type = "FLOAT_COLOR"
-    n_store_col.domain = "POINT"
-    n_store_col.inputs["Name"].default_value  = "color"
-
     links.new(n_input.outputs["Geometry"], n_setpos.inputs["Geometry"])
-    links.new(n_setpos.outputs["Geometry"], n_store_col.inputs["Geometry"])
-    links.new(n_store_col.outputs["Geometry"], n_output.inputs["Geometry"])
+    links.new(n_setpos.outputs["Geometry"], n_output.inputs["Geometry"])
 
     links.new(n_time.outputs["Frame"], n_sub.inputs[0])
     links.new(n_input.outputs["Start Frame"], n_sub.inputs[1])
@@ -320,7 +306,6 @@ def _create_gn_vat_group(
     links.new(n_div_index.outputs[0], n_combine_uv.inputs[1])
 
     links.new(n_combine_uv.outputs["Vector"], n_tex_pos.inputs["Vector"])
-    links.new(n_combine_uv.outputs["Vector"], n_tex_col.inputs["Vector"])
 
     links.new(n_input.outputs["Pos Max"], n_vsub.inputs[0])
     links.new(n_input.outputs["Pos Min"], n_vsub.inputs[1])
@@ -332,8 +317,6 @@ def _create_gn_vat_group(
     links.new(n_vmul.outputs["Vector"], n_vadd.inputs[1])
 
     links.new(n_vadd.outputs["Vector"], n_setpos.inputs["Position"])
-
-    links.new(n_tex_col.outputs["Color"], n_store_col.inputs["Value"])
 
     return ng
 
@@ -356,7 +339,7 @@ def create_vat_animation_from_tracks(
     storyboard_name: str | None = None,
 ):
     if not tracks:
-        return None
+        return None, None
 
     image_name_prefix = f"{storyboard_name}_VAT" if storyboard_name else "VAT"
     pos_img, col_img, pos_min, pos_max, duration, drone_count = build_vat_images_from_tracks(
@@ -374,7 +357,6 @@ def create_vat_animation_from_tracks(
     obj = _create_drone_points_object(drone_count, base_name, first_positions)
     node_group = _create_gn_vat_group(
         pos_img,
-        col_img,
         pos_min,
         pos_max,
         duration + 1,
@@ -384,4 +366,4 @@ def create_vat_animation_from_tracks(
     )
     _apply_gn_to_object(obj, node_group)
 
-    return obj
+    return obj, col_img
