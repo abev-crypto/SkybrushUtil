@@ -49,6 +49,7 @@ from sbstudio.plugin.utils import remove_if_unused, with_context
 from sbstudio.plugin.utils.collections import pick_unique_name
 from sbstudio.plugin.utils.color_ramp import update_color_ramp_from
 from sbstudio.plugin.utils.evaluator import get_position_of_object
+from sbstudio.plugin.utils.sampling import each_frame_in
 from sbstudio.plugin.utils.image import convert_from_srgb_to_linear
 from sbstudio.utils import constant, distance_sq_of, load_module, negate
 from bpy.path import abspath as bpy_abspath
@@ -3465,8 +3466,9 @@ class BakeLightEffectToKeysOperator(bpy.types.Operator):  # pragma: no cover - B
         view_layer = context.view_layer
         inserted = False
         try:
-            for frame in range(frame_start, frame_end + 1):
-                scene.frame_set(frame)
+            for frame, _ in each_frame_in(
+                range(frame_start, frame_end + 1), context=context
+            ):
                 if view_layer is not None:
                     view_layer.update()
                 for obj in drones:
