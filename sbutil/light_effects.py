@@ -19,7 +19,7 @@ from bpy.props import (
     PointerProperty,
     StringProperty,
 )
-from bpy.types import Operator, Panel, PropertyGroup
+from bpy.types import Image, ImageTexture, Operator, Panel, PropertyGroup
 from os.path import basename, join
 
 from bpy.app.handlers import persistent
@@ -2213,6 +2213,15 @@ class PatchedLightEffect(PropertyGroup):
         type=DynamicColorRamp,
     )
 
+    @property
+    def color_image(self) -> Optional[Image]:
+        return (
+            self.texture.image
+            if self.type in {"IMAGE", "CAT"}
+            and isinstance(self.texture, ImageTexture)
+            else None
+        )
+
     def update_sequence_total_duration(self) -> None:
         if not getattr(self, "sequence_mode", False):
             return
@@ -3099,8 +3108,9 @@ def patch_light_effect_class():
     """Inject loop properties into ``LightEffect`` using monkey patching."""
     if LightEffect is None:  # pragma: no cover - only runs inside Blender
         return
-            
+
     LightEffect.original_type = getattr(LightEffect, "type", None)
+    LightEffect._original_color_image = getattr(LightEffect, "color_image", None)
     LightEffect._original_apply_on_colors = getattr(LightEffect, "apply_on_colors", None)
     LightEffect._original_color_function_ref = getattr(
         LightEffect, "color_function_ref", None
@@ -3127,6 +3137,7 @@ def patch_light_effect_class():
     LightEffect.get_sequence_meshes = PatchedLightEffect.get_sequence_meshes
     LightEffect.get_sequence_delays = PatchedLightEffect.get_sequence_delays
     LightEffect.update_sequence_total_duration = PatchedLightEffect.update_sequence_total_duration
+    LightEffect.color_image = PatchedLightEffect.color_image
     LightEffect.apply_on_colors = PatchedLightEffect.apply_on_colors
     LightEffect.color_function_ref = PatchedLightEffect.color_function_ref
     LightEffect.draw_color_function_config = PatchedLightEffect.draw_color_function_config
@@ -3236,6 +3247,7 @@ def patch_light_effect_class():
         LightEffect.sequence_manual_delay
     )
     LightEffect.__annotations__["sequence_delays"] = LightEffect.sequence_delays
+    LightEffect.__annotations__["color_image"] = LightEffect.color_image
     LightEffect.__annotations__["output"] = LightEffect.output
     LightEffect.__annotations__["output_y"] = LightEffect.output_y
     LightEffect.__annotations__["target"] = LightEffect.target
@@ -3283,6 +3295,13 @@ def unpatch_light_effect_class():
     elif hasattr(LightEffect, "output_y"):
         delattr(LightEffect, "output_y")
         LightEffect.__annotations__.pop("output_y", None)
+    if getattr(LightEffect, "_original_color_image", None) is not None:
+        LightEffect.color_image = LightEffect._original_color_image
+        LightEffect.__annotations__["color_image"] = LightEffect._original_color_image
+        LightEffect._original_color_image = None
+    elif hasattr(LightEffect, "color_image"):
+        delattr(LightEffect, "color_image")
+        LightEffect.__annotations__.pop("color_image", None)
     if getattr(LightEffect, "_original_apply_on_colors", None) is not None:
         LightEffect.apply_on_colors = LightEffect._original_apply_on_colors
         LightEffect._original_apply_on_colors = None
