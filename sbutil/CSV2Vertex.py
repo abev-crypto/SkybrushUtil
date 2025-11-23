@@ -212,8 +212,15 @@ def _update_frame_range_from_storyboard(context):
         scene.frame_end = max(scene.frame_end, max_end)
 
 
-def _create_light_effect_for_storyboard(context, mesh_obj, storyboard_entry):
-    """Create a vertex color light effect aligned with ``storyboard_entry``."""
+def _create_light_effect_for_storyboard(
+    context,
+    mesh_obj,
+    storyboard_entry,
+    *,
+    effect_type: str = "VERTEX_COLOR",
+    color_image=None,
+):
+    """Create a light effect aligned with ``storyboard_entry``."""
 
     skybrush = getattr(context.scene, "skybrush", None)
     light_effects = getattr(skybrush, "light_effects", None)
@@ -246,10 +253,10 @@ def _create_light_effect_for_storyboard(context, mesh_obj, storyboard_entry):
 
     if hasattr(le_entry, "type"):
         try:
-            le_entry.type = "VERTEX_COLOR"
+            le_entry.type = effect_type
         except Exception:
             pass
-    if hasattr(le_entry, "output"):
+    if effect_type == "VERTEX_COLOR" and hasattr(le_entry, "output"):
         try:
             le_entry.output = OUTPUT_VERTEX_COLOR
         except Exception:
@@ -264,6 +271,23 @@ def _create_light_effect_for_storyboard(context, mesh_obj, storyboard_entry):
             le_entry.convert_srgb = True
         except Exception:
             pass
+
+    if color_image is not None and hasattr(le_entry, "texture"):
+        tex = getattr(le_entry, "texture", None)
+        try:
+            if tex is None:
+                tex = bpy.data.textures.new(
+                    name=f"{storyboard_entry.name}_ColorTex", type="IMAGE"
+                )
+                le_entry.texture = tex
+        except Exception:
+            tex = getattr(le_entry, "texture", None)
+
+        if tex is not None:
+            try:
+                tex.image = color_image
+            except Exception:
+                pass
 
     return le_entry
 
@@ -295,7 +319,7 @@ def import_csv_folder(context, folder, start_frame, *, use_vat: bool = False):
         first_positions.append((d0["x"], d0["y"], d0["z"]))
 
     if use_vat:
-        obj = csv_vat_gn.create_vat_animation_from_tracks(
+        obj, color_image = csv_vat_gn.create_vat_animation_from_tracks(
             tracks,
             fps,
             start_frame=start_frame,
@@ -303,6 +327,7 @@ def import_csv_folder(context, folder, start_frame, *, use_vat: bool = False):
             storyboard_name=folder_name,
         )
         key_entries = None
+        color_image_for_le = color_image
     else:
         # Create mesh and armature with N bones/vertices
         # Name it after the storyboard entry + "_CSV" for clarity
@@ -360,7 +385,13 @@ def import_csv_folder(context, folder, start_frame, *, use_vat: bool = False):
         entry = None
 
     if use_vat and entry is not None:
-        _create_light_effect_for_storyboard(context, obj, entry)
+        _create_light_effect_for_storyboard(
+            context,
+            obj,
+            entry,
+            effect_type="CAT",
+            color_image=color_image_for_le,
+        )
 
     _update_frame_range_from_storyboard(context)
 
