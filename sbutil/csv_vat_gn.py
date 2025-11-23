@@ -65,11 +65,11 @@ def _determine_bounds(samples: Iterable[dict[str, np.ndarray]]):
     )
 
 
-def _create_image(name: str, width: int, height: int):
+def _create_image(name: str, width: int, height: int, fb: bool):
     img = bpy.data.images.get(name)
     if img is not None:
         bpy.data.images.remove(img)
-    return bpy.data.images.new(name=name, width=width, height=height, float_buffer=True)
+    return bpy.data.images.new(name=name, width=width, height=height, float_buffer=fb)
 
 
 def _normalize_color_values(values: np.ndarray) -> np.ndarray:
@@ -93,8 +93,8 @@ def build_vat_images_from_tracks(
 
     drone_count = len(tracks)
     prefix = image_name_prefix or "VAT"
-    pos_img = _create_image(f"{prefix}_Pos", frame_count, drone_count)
-    col_img = _create_image(f"{prefix}_Color", frame_count, drone_count)
+    pos_img = _create_image(f"{prefix}_Pos", frame_count, drone_count, True)
+    col_img = _create_image(f"{prefix}_Color", frame_count, drone_count, False)
     pos_img.colorspace_settings.name = "Non-Color"
     
     rx = (pos_max[0] - pos_min[0]) or 1.0

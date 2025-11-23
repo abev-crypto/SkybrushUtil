@@ -101,9 +101,6 @@ def linear_to_srgb(value: float) -> float:
     if value <= 0.04045:
         return value / 12.92
     return ((value + 0.055) / 1.055) ** 2.4
-    if value < 0.0031308:
-        return 12.92 * value
-    return 1.055 * (value ** (1.0 / 2.4)) - 0.055
 
 
 def _mesh_object_poll(_self, obj):
@@ -2620,95 +2617,27 @@ class PatchedLightEffect(PropertyGroup):
             elif not self.contains_frame(frame):
                 return
 
-            time_fraction = (effective_frame - self.frame_start) / max(
-                self.duration - 1, 1
-            )
+            time_fraction = (effective_frame - self.frame_start) / max(self.duration - 1, 1)
             num_positions = len(positions)
             color_ramp = self.color_ramp
             color_image = self.color_image
-            color_function_ref = self.color_function_ref
-            if (
-                self.type == "FUNCTION"
-                and not getattr(self, "color_function_text", None)
-                and not getattr(getattr(self, "color_function", None), "name", "")
-            ):
-                return
-            st = get_state(self)
-            module = st.get("module", None)
-            if module is not None:
-                schema = st.get("config_schema", {})
-                if getattr(self, "color_function_text", None):
-                    ctx = module.__dict__
-                    for name, meta in schema.items():
-                        if meta.get("type") == "OBJECT":
-                            continue
-                        meta_type = meta.get("type")
-                        if meta_type == "ARRAY":
-                            value = self.get_dynamic_array_value(name, meta)
-                        elif meta_type == "COLOR_RAMP":
-                            value = self.get_dynamic_color_ramp_value(name, meta)
-                        else:
-                            value = self.get(name)
-                        obj_attr = meta.get("object_ref_attr")
-                        if obj_attr:
-                            obj_name = self.get(obj_attr)
-                            if obj_name:
-                                obj = bpy.data.objects.get(obj_name)
-                                if obj is not None:
-                                    obj_val = _get_object_property(
-                                        obj, meta.get("object_ref_type", "POS")
-                                    )
-                                    if obj_val is not None:
-                                        value = obj_val
-                        if isinstance(value, Iterable) and not isinstance(value, (str, bytes)):
-                            ctx[name.upper()] = tuple(value)
-                        else:
-                            ctx[name.upper()] = value
-                elif color_function_ref is not None:
-                    for name, meta in schema.items():
-                        if meta.get("type") == "OBJECT":
-                            continue
-                        meta_type = meta.get("type")
-                        if meta_type == "ARRAY":
-                            value = self.get_dynamic_array_value(name, meta)
-                        elif meta_type == "COLOR_RAMP":
-                            value = self.get_dynamic_color_ramp_value(name, meta)
-                        else:
-                            value = self.get(name)
-                        obj_attr = meta.get("object_ref_attr")
-                        if obj_attr:
-                            obj_name = self.get(obj_attr)
-                            if obj_name:
-                                obj = bpy.data.objects.get(obj_name)
-                                if obj is not None:
-                                    obj_val = _get_object_property(
-                                        obj, meta.get("object_ref_type", "POS")
-                                    )
-                                    if obj_val is not None:
-                                        value = obj_val
-                        if isinstance(value, Iterable) and not isinstance(value, (str, bytes)):
-                            setattr(module, name.upper(), tuple(value))
-                        else:
-                            setattr(module, name.upper(), value)
-            new_color = [0.0] * 4
-            outputs_x: Optional[list[Optional[float]]] | None = None
-            outputs_y: Optional[list[Optional[float]]] | None = None
-            common_output_x: Optional[float] = None
-            common_output_y: Optional[float] = None
-            vertex_colors: Optional[list[Optional[Sequence[float]]]] = None
-            cat_pixels: Optional[Sequence[float]] = None
-            cat_width = 0
-            cat_height = 0
-            try:
-                cat_frame_start = int(getattr(self, "frame_start", 1))
-            except (TypeError, ValueError):
-                cat_frame_start = 1
-            try:
-                cat_frame_duration = max(int(getattr(self, "duration", 1)), 1)
-            except (TypeError, ValueError):
-                cat_frame_duration = 1
-
+            condition = self._get_spatial_effect_predicate()
+            def finalized_color(position, new_color, color):
+                new_color[3] *= max(min(self._evaluate_influence_at(position, effective_frame, condition),1.0,),0.0,)
+                blend_in_place(new_color, color, BlendMode[self.blend_mode])
+            def l2srgb(direct_color):
+                nc = []
+                dc = list(direct_color) if isinstance(direct_color, Iterable) else [1.0, 1.0, 1.0, 1.0]
+                if len(dc) < 4:
+                    dc.extend([1.0] * (4 - len(dc)))
+                nc[:] = dc[:4]
+                if getattr(self, "convert_srgb", False):
+                    for idx in range(3):
+                        new_color[idx] = linear_to_srgb(new_color[idx])
+                return nc
+            
             if self.type == "VERTEX_COLOR":
+                vertex_colors: Optional[list[Optional[Sequence[float]]]] = None
                 cache_entries = _get_or_build_vertex_color_cache(
                     self,
                     getattr(self, "mesh", None),
@@ -2733,120 +2662,166 @@ class PatchedLightEffect(PropertyGroup):
                             else tuple(list(color) + [1.0])
                         )
                         vertex_colors[drone_index] = color_values
-                elif self.type == "CAT":
-                    if color_image is not None:
-                        cat_width, cat_height = color_image.size
-                        try:
-                            cat_pixels = self.get_image_pixels()
-                        except Exception:
-                            cat_pixels = None
-                else:
-                outputs_x, common_output_x = get_output_based_on_output_type(
-                    self.output, self.output_mapping_mode, self.output_function
-                )
+                for index, position in enumerate(positions):
+                    finalized_color(position, l2srgb(vertex_colors[index]), colors[index])
+                return
+            elif self.type == "CAT":
+                cat_pixels: Optional[Sequence[float]] = None
+                cat_width = 0
+                cat_height = 0
+                print(color_image)
                 if color_image is not None:
-                    outputs_y, common_output_y = get_output_based_on_output_type(
-                        self.output_y, self.output_mapping_mode_y, self.output_function_y
-                    )
-            condition = self._get_spatial_effect_predicate()
-            for index, position in enumerate(positions):
-                color = colors[index]
-                direct_color = None
-                if vertex_colors is not None and index < len(vertex_colors):
-                    direct_color = vertex_colors[index]
-                elif self.type == "CAT":
-                    if not cat_pixels or cat_width <= 0 or cat_height <= 0:
-                        continue
-                    if cat_height == 1:
-                        y = 0
-                    else:
-                        if mapping is not None and index < len(mapping):
-                            mapped_index = mapping[index]
+                    
+                    cat_width, cat_height = color_image.size
+                    cat_pixels = self.get_image_pixels()
+                    for index, position in enumerate(positions):
+                        if cat_height == 1:
+                            y = 0
                         else:
-                            mapped_index = None
-                        if mapped_index is None:
-                            mapped_index = index
-                        y = max(min(int(mapped_index), cat_height - 1), 0)
-                    frame_offset = effective_frame - cat_frame_start
-                    clamped_offset = max(min(int(frame_offset), cat_frame_duration - 1), 0)
-                    denom = max(cat_frame_duration - 1, 1)
-                    x = int((cat_width - 1) * clamped_offset / denom)
-                    offset = (y * cat_width + x) * 4
-                    direct_color = cat_pixels[offset : offset + 4]
-                if direct_color is None:
-                    if self.type == "VERTEX_COLOR":
-                        continue
-                    if common_output_x is not None:
-                        output_x = common_output_x
-                    else:
-                        assert outputs_x is not None
-                        if outputs_x[index] is None:
-                            continue
-                        output_x = outputs_x[index]
-                    assert isinstance(output_x, float)
-                    if color_image is not None:
-                        if common_output_y is not None:
-                            output_y = common_output_y
-                        else:
-                            assert outputs_y is not None
-                            if outputs_y[index] is None:
+                            if mapping is not None and index < len(mapping):
+                                mapped_index = mapping[index]
+                            else:
+                                mapped_index = None
+                            if mapped_index is None:
+                                mapped_index = index
+                            y = max(min(int(mapped_index), cat_height - 1), 0)
+                        frame_offset = effective_frame - self.frame_start
+                        clamped_offset = max(min(int(frame_offset), self.duration - 1), 0)
+                        denom = max(self.duration - 1, 1)
+                        x = int((cat_width - 1) * clamped_offset / denom)
+                        offset = (y * cat_width + x) * 4
+                        finalized_color(position, l2srgb(cat_pixels[offset : offset + 4]), colors[index])
+                return
+            elif self.type == "FUNCTION":
+                color_function_ref = self.color_function_ref
+                if (
+                    not getattr(self, "color_function_text", None)
+                    and not getattr(getattr(self, "color_function", None), "name", "")
+                ):
+                    return
+                st = get_state(self)
+                module = st.get("module", None)
+                if module is not None:
+                    schema = st.get("config_schema", {})
+                    if getattr(self, "color_function_text", None):
+                        ctx = module.__dict__
+                        for name, meta in schema.items():
+                            if meta.get("type") == "OBJECT":
                                 continue
-                            output_y = outputs_y[index]
-                        assert isinstance(output_y, float)
-                    if self.randomness != 0:
-                        offset_x = (random_seq.get_float(index) - 0.5) * self.randomness
-                        output_x = (offset_x + output_x) % 1.0
-                        if color_image is not None:
-                            offset_y = (random_seq.get_float(index) - 0.5) * self.randomness
-                            output_y = (offset_y + output_y) % 1.0
-                alpha = max(
-                    min(
-                        self._evaluate_influence_at(
-                            position, effective_frame, condition
-                        ),
-                        1.0,
-                    ),
-                    0.0,
+                            meta_type = meta.get("type")
+                            if meta_type == "ARRAY":
+                                value = self.get_dynamic_array_value(name, meta)
+                            elif meta_type == "COLOR_RAMP":
+                                value = self.get_dynamic_color_ramp_value(name, meta)
+                            else:
+                                value = self.get(name)
+                            obj_attr = meta.get("object_ref_attr")
+                            if obj_attr:
+                                obj_name = self.get(obj_attr)
+                                if obj_name:
+                                    obj = bpy.data.objects.get(obj_name)
+                                    if obj is not None:
+                                        obj_val = _get_object_property(
+                                            obj, meta.get("object_ref_type", "POS")
+                                        )
+                                        if obj_val is not None:
+                                            value = obj_val
+                            if isinstance(value, Iterable) and not isinstance(value, (str, bytes)):
+                                ctx[name.upper()] = tuple(value)
+                            else:
+                                ctx[name.upper()] = value
+                    elif color_function_ref is not None:
+                        for name, meta in schema.items():
+                            if meta.get("type") == "OBJECT":
+                                continue
+                            meta_type = meta.get("type")
+                            if meta_type == "ARRAY":
+                                value = self.get_dynamic_array_value(name, meta)
+                            elif meta_type == "COLOR_RAMP":
+                                value = self.get_dynamic_color_ramp_value(name, meta)
+                            else:
+                                value = self.get(name)
+                            obj_attr = meta.get("object_ref_attr")
+                            if obj_attr:
+                                obj_name = self.get(obj_attr)
+                                if obj_name:
+                                    obj = bpy.data.objects.get(obj_name)
+                                    if obj is not None:
+                                        obj_val = _get_object_property(
+                                            obj, meta.get("object_ref_type", "POS")
+                                        )
+                                        if obj_val is not None:
+                                            value = obj_val
+                            if isinstance(value, Iterable) and not isinstance(value, (str, bytes)):
+                                setattr(module, name.upper(), tuple(value))
+                            else:
+                                setattr(module, name.upper(), value)
+            outputs_x: Optional[list[Optional[float]]] | None = None
+            outputs_y: Optional[list[Optional[float]]] | None = None
+            common_output_x: Optional[float] = None
+            common_output_y: Optional[float] = None
+            new_color = [0.0] * 4
+            outputs_x, common_output_x = get_output_based_on_output_type(
+                self.output, self.output_mapping_mode, self.output_function
+            )
+            if color_image is not None:
+                outputs_y, common_output_y = get_output_based_on_output_type(
+                    self.output_y, self.output_mapping_mode_y, self.output_function_y
                 )
-                if direct_color is not None:
-                    dc = list(direct_color) if isinstance(direct_color, Iterable) else [1.0, 1.0, 1.0, 1.0]
-                    if len(dc) < 4:
-                        dc.extend([1.0] * (4 - len(dc)))
-                    new_color[:] = dc[:4]
-                    if getattr(self, "convert_srgb", False):
-                        for idx in range(3):
-                            new_color[idx] = linear_to_srgb(new_color[idx])
-                elif getattr(self, "color_function_text", None):
-                    ctx = st.get("module", ModuleType("_dummy")).__dict__
-                    ctx.update(
-                        frame=frame,
-                        time_fraction=time_fraction,
-                        drone_index=index,
-                        formation_index=(mapping[index] if mapping is not None else None),
-                        position=position,
-                        drone_count=num_positions,
-                    )
-                    try:
-                        new_color[:] = eval(
-                            f"color_function(frame=frame, time_fraction=time_fraction, drone_index=drone_index, formation_index=formation_index, position=position, drone_count=drone_count)",
-                            ctx,
-                        )
-                    except Exception as exc:
-                        raise RuntimeError("ERROR_COLOR_FUNCTION") from exc
-                elif color_function_ref is not None:
-                    try:
-                        new_color[:] = color_function_ref(
+            for index, position in enumerate(positions):
+                if common_output_x is not None:
+                    output_x = common_output_x
+                else:
+                    if outputs_x[index] is None:
+                        continue
+                    output_x = outputs_x[index]
+                if color_image is not None:
+                    if common_output_y is not None:
+                        output_y = common_output_y
+                    else:
+                        assert outputs_y is not None
+                        if outputs_y[index] is None:
+                            continue
+                        output_y = outputs_y[index]
+                    assert isinstance(output_y, float)
+                if self.randomness != 0:
+                    offset_x = (random_seq.get_float(index) - 0.5) * self.randomness
+                    output_x = (offset_x + output_x) % 1.0
+                    if color_image is not None:
+                        offset_y = (random_seq.get_float(index) - 0.5) * self.randomness
+                        output_y = (offset_y + output_y) % 1.0
+                if self.type == "FUNCTION":
+                    if getattr(self, "color_function_text", None):
+                        ctx = st.get("module", ModuleType("_dummy")).__dict__
+                        ctx.update(
                             frame=frame,
                             time_fraction=time_fraction,
                             drone_index=index,
-                            formation_index=(
-                                mapping[index] if mapping is not None else None
-                            ),
+                            formation_index=(mapping[index] if mapping is not None else None),
                             position=position,
                             drone_count=num_positions,
                         )
-                    except Exception as exc:
-                        raise RuntimeError("ERROR_COLOR_FUNCTION") from exc
+                        try:
+                            new_color[:] = eval(
+                                f"color_function(frame=frame, time_fraction=time_fraction, drone_index=drone_index, formation_index=formation_index, position=position, drone_count=drone_count)",
+                                ctx,
+                            )
+                        except Exception as exc:
+                            raise RuntimeError("ERROR_COLOR_FUNCTION") from exc
+                    elif color_function_ref is not None:
+                        try:
+                            new_color[:] = color_function_ref(
+                                frame=frame,
+                                time_fraction=time_fraction,
+                                drone_index=index,
+                                formation_index=(
+                                    mapping[index] if mapping is not None else None
+                                ),
+                                position=position,
+                                drone_count=num_positions,
+                            )
+                        except Exception as exc:
+                            raise RuntimeError("ERROR_COLOR_FUNCTION") from exc
                 elif color_image is not None:
                     width, height = color_image.size
                     pixels = self.get_image_pixels()
@@ -2875,8 +2850,8 @@ class PatchedLightEffect(PropertyGroup):
                     new_color[:] = color_ramp.evaluate(output_x)
                 else:
                     new_color[:] = (1.0, 1.0, 1.0, 1.0)
-                new_color[3] *= alpha
-                blend_in_place(new_color, color, BlendMode[self.blend_mode])
+                finalized_color(position, new_color, colors[index])
+            
 
         if not self.sequence_mode:
             apply_single_mode()
@@ -2902,7 +2877,6 @@ class PatchedLightEffect(PropertyGroup):
                 sequence_duration = max(int(original_duration), 1)
             except (TypeError, ValueError):
                 sequence_duration = 1
-        duration_span = max(sequence_duration - 1, 0)
         for index, mesh in enumerate(meshes):
             if index > 0:
                 delay = (
@@ -2911,7 +2885,6 @@ class PatchedLightEffect(PropertyGroup):
                     else self.sequence_delay
                 )
                 chunk_start += max(delay, 0)
-            chunk_end = chunk_start + duration_span
             self.frame_start = chunk_start
             self.duration = sequence_duration
             self.mesh = mesh
