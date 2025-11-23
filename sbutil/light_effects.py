@@ -2642,7 +2642,7 @@ class PatchedLightEffect(PropertyGroup):
                 nc[:] = dc[:4]
                 if getattr(self, "convert_srgb", False):
                     for idx in range(3):
-                        new_color[idx] = linear_to_srgb(new_color[idx])
+                        nc[idx] = linear_to_srgb(nc[idx])
                 return nc
             
             if self.type == "VERTEX_COLOR":
@@ -2678,7 +2678,6 @@ class PatchedLightEffect(PropertyGroup):
                 cat_pixels: Optional[Sequence[float]] = None
                 cat_width = 0
                 cat_height = 0
-                print(color_image)
                 if color_image is not None:
                     
                     cat_width, cat_height = color_image.size

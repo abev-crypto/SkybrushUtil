@@ -269,7 +269,7 @@ def _create_light_effect_for_storyboard(
             pass
     if hasattr(le_entry, "convert_srgb"):
         try:
-            le_entry.convert_srgb = True
+            le_entry.convert_srgb = False
         except Exception:
             pass
 
