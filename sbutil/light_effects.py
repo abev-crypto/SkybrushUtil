@@ -1164,6 +1164,40 @@ def _insert_emission_color_keyframe(obj, frame):
     return True
 
 
+def _get_emission_color(obj) -> Optional[tuple[float, float, float, float]]:
+    """Return the emission base color of ``obj`` if available."""
+
+    material = _get_primary_material(obj)
+    if material is None or not getattr(material, "use_nodes", False):
+        return None
+
+    node_tree = getattr(material, "node_tree", None)
+    if node_tree is None:
+        return None
+
+    emission = node_tree.nodes.get("Emission")
+    if emission is None:
+        emission = next(
+            (n for n in node_tree.nodes if getattr(n, "type", "") == "EMISSION"),
+            None,
+        )
+    if emission is None:
+        return None
+
+    socket = emission.inputs[0] if len(emission.inputs) else None
+    if socket is None or not hasattr(socket, "default_value"):
+        return None
+
+    value = socket.default_value
+    if value is None:
+        return None
+
+    data = list(value)
+    if len(data) < 4:
+        data.extend([1.0] * (4 - len(data)))
+    return tuple(float(x) for x in data[:4])
+
+
 def _guess_formation_index(obj):
     """Try to determine the formation index of ``obj`` if available."""
 
@@ -3430,6 +3464,20 @@ class BakeLightEffectToKeysOperator(bpy.types.Operator):  # pragma: no cover - B
     bl_label = "Bake Colors"
     bl_description = "Bake the active light effect into drone material color keyframes"
 
+    scope: EnumProperty(
+        name="Scope",
+        description="Choose whether to bake only the active effect or all visible ones",
+        items=[
+            ("ACTIVE", "Active only", "Bake the currently selected effect"),
+            (
+                "VISIBLE",
+                "All visible",
+                "Bake all light effects that are currently enabled",
+            ),
+        ],
+        default="ACTIVE",
+    )
+
     @classmethod
     def poll(cls, context):
         light_effects = getattr(getattr(context.scene, "skybrush", None), "light_effects", None)
@@ -3437,18 +3485,33 @@ class BakeLightEffectToKeysOperator(bpy.types.Operator):  # pragma: no cover - B
         return entry is not None
 
     def _compute_frame_range(self, entry):
-        try:
-            start = int(getattr(entry, "frame_start", 0))
-        except (TypeError, ValueError):
+        start = getattr(entry, "frame_start", None)
+        duration = getattr(entry, "duration", None)
+        if start is None or duration is None:
             return None
         try:
-            duration = int(getattr(entry, "duration", 0))
+            start_i = int(start)
+            duration_i = int(duration)
         except (TypeError, ValueError):
             return None
-        if duration <= 0:
+        if duration_i <= 0:
             return None
-        end = start + max(duration - 1, 0)
-        return start, end
+        end_i, _ = calculate_effective_sequence_span(entry)
+        if end_i is None:
+            end_i = start_i + max(duration_i - 1, 0)
+        return start_i, end_i
+
+    def _get_entries_to_bake(self, light_effects):
+        entries = list(getattr(light_effects, "entries", []))
+        if self.scope == "ACTIVE":
+            entry = getattr(light_effects, "active_entry", None)
+            return [entry] if entry is not None else []
+
+        return [
+            item
+            for item in entries
+            if getattr(item, "enabled", True)
+        ]
 
     def _gather_drones(self):
         drones_collection = bpy.data.collections.get("Drones")
@@ -3460,7 +3523,7 @@ class BakeLightEffectToKeysOperator(bpy.types.Operator):  # pragma: no cover - B
                 drones.append(obj)
         return drones
 
-    def _evaluate_effect(self, context, entry, drones, frame_start, frame_end):
+    def _evaluate_effect(self, context, drones, frame_start, frame_end):
         scene = context.scene
         original_frame = scene.frame_current
         view_layer = context.view_layer
@@ -3485,45 +3548,54 @@ class BakeLightEffectToKeysOperator(bpy.types.Operator):  # pragma: no cover - B
 
     def execute(self, context):
         light_effects = context.scene.skybrush.light_effects
-        entry = light_effects.active_entry
-        frame_range = self._compute_frame_range(entry)
-        if frame_range is None:
-            self.report({'ERROR'}, "Active light effect has invalid frame range")
+        entries = self._get_entries_to_bake(light_effects)
+        if not entries:
+            self.report({'ERROR'}, "No light effects are available for baking")
             return {'CANCELLED'}
+
+        ranges = [self._compute_frame_range(entry) for entry in entries]
+        if any(rng is None for rng in ranges):
+            self.report({'ERROR'}, "One or more light effects have invalid frame ranges")
+            return {'CANCELLED'}
+        frame_start = min(rng[0] for rng in ranges if rng is not None)
+        frame_end = max(rng[1] for rng in ranges if rng is not None)
 
         drones = self._gather_drones()
         if not drones:
             self.report({'ERROR'}, "No objects found in the 'Drones' collection")
             return {'CANCELLED'}
 
-        entries = list(getattr(light_effects, "entries", []))
+        all_entries = list(getattr(light_effects, "entries", []))
         original_states = {
             item.as_pointer(): bool(getattr(item, "enabled", True))
-            for item in entries
+            for item in all_entries
             if hasattr(item, "enabled")
         }
 
         try:
-            for item in entries:
-                if hasattr(item, "enabled"):
-                    item.enabled = item is entry
+            if self.scope == "ACTIVE":
+                for item in all_entries:
+                    if hasattr(item, "enabled"):
+                        item.enabled = item in entries
             if hasattr(context, "view_layer") and context.view_layer is not None:
                 context.view_layer.update()
             inserted = self._evaluate_effect(
-                context, entry, drones, frame_range[0], frame_range[1]
+                context, drones, frame_start, frame_end
             )
         except RuntimeError as exc:
             self.report({'ERROR'}, f"Failed to bake light effect: {exc}")
             return {'CANCELLED'}
         finally:
-            for item in entries:
-                if not hasattr(item, "enabled") or item is entry:
+            for item in all_entries:
+                if not hasattr(item, "enabled"):
                     continue
                 state = original_states.get(item.as_pointer())
                 if state is not None:
                     item.enabled = state
-            if hasattr(entry, "enabled"):
-                entry.enabled = False
+            if self.scope == "ACTIVE":
+                entry = entries[0]
+                if hasattr(entry, "enabled"):
+                    entry.enabled = False
             if hasattr(context, "view_layer") and context.view_layer is not None:
                 context.view_layer.update()
 
@@ -3531,6 +3603,282 @@ class BakeLightEffectToKeysOperator(bpy.types.Operator):  # pragma: no cover - B
             self.report({'WARNING'}, "No keyframes were inserted")
         else:
             self.report({'INFO'}, "Baked light effect into material keyframes")
+        return {'FINISHED'}
+
+
+class BakeLightEffectsToCatOperator(bpy.types.Operator):  # pragma: no cover - Blender UI
+    bl_idname = "skybrush.bake_light_effects_to_cat"
+    bl_label = "Bake to CAT"
+    bl_description = "Bake light effects into a Color Animation Texture"
+
+    scope: EnumProperty(
+        name="Scope",
+        description="Choose whether to bake only the active effect or all visible ones",
+        items=[
+            ("ACTIVE", "Active only", "Bake only the currently selected effect"),
+            (
+                "VISIBLE",
+                "All visible",
+                "Bake all light effects that are currently enabled",
+            ),
+        ],
+        default="ACTIVE",
+    )
+
+    @classmethod
+    def poll(cls, context):
+        light_effects = getattr(getattr(context.scene, "skybrush", None), "light_effects", None)
+        entry = getattr(light_effects, "active_entry", None) if light_effects else None
+        return entry is not None
+
+    def _get_entries_to_bake(self, light_effects):
+        entries = list(getattr(light_effects, "entries", []))
+        if self.scope == "ACTIVE":
+            entry = getattr(light_effects, "active_entry", None)
+            return [entry] if entry is not None else []
+        return [item for item in entries if getattr(item, "enabled", True)]
+
+    def _compute_frame_range(self, entry):
+        start = getattr(entry, "frame_start", None)
+        duration = getattr(entry, "duration", None)
+        if start is None or duration is None:
+            return None
+        try:
+            start_i = int(start)
+        except (TypeError, ValueError):
+            return None
+        end_i, _ = calculate_effective_sequence_span(entry)
+        if end_i is None:
+            try:
+                duration_i = max(int(duration), 1)
+            except (TypeError, ValueError):
+                return None
+            end_i = start_i + max(duration_i - 1, 0)
+        return start_i, end_i
+
+    def _gather_drones(self):
+        drones_collection = bpy.data.collections.get("Drones")
+        if drones_collection is None:
+            return []
+        drones = []
+        for obj in drones_collection.objects:
+            if _get_primary_material(obj) is not None:
+                drones.append(obj)
+        return drones
+
+    def _resolve_row_order(self, scene, drones, frame_start):
+        recognized = None
+        suggestion = _get_storyboard_range_for_frame(scene, frame_start)
+        if suggestion is not None:
+            _, _, storyboard_entry = suggestion
+            getter = getattr(storyboard_entry, "get_recognized_point_mapping", None)
+            if getter is not None:
+                recognized = getter()
+
+        if recognized:
+            total = len(drones)
+            order: list[Optional[int]] = []
+            used: set[int] = set()
+            for drone_idx in recognized:
+                try:
+                    idx = int(drone_idx)
+                except (TypeError, ValueError):
+                    idx = None
+                if idx is not None and 0 <= idx < total and idx not in used:
+                    order.append(idx)
+                    used.add(idx)
+                else:
+                    order.append(None)
+
+            remaining = [idx for idx in range(total) if idx not in used]
+            for pos, value in enumerate(order):
+                if value is None:
+                    order[pos] = remaining.pop(0) if remaining else 0
+
+            if len(order) < total:
+                order.extend(remaining)
+
+            return order[:total]
+
+        return list(range(len(drones)))
+
+    def _collect_colors(self, context, drones, rows, frame_start, frame_end):
+        scene = context.scene
+        view_layer = context.view_layer
+        original_frame = scene.frame_current
+        width = frame_end - frame_start + 1
+        height = len(rows)
+        data = np.zeros((height, width, 4), dtype=np.float32)
+
+        try:
+            for column, frame in enumerate(range(frame_start, frame_end + 1)):
+                scene.frame_set(frame)
+                if view_layer is not None:
+                    view_layer.update()
+                for row_index, drone_index in enumerate(rows):
+                    if drone_index is None or drone_index >= len(drones):
+                        continue
+                    color = _get_emission_color(drones[drone_index])
+                    if color is None:
+                        continue
+                    data[row_index, column, : len(color)] = color[:4]
+        finally:
+            scene.frame_set(original_frame)
+            if view_layer is not None:
+                view_layer.update()
+
+        return data, width, height
+
+    def _create_cat_entry(self, context, light_effects, entries, pixels, width, height, frame_start):
+        source = entries[0]
+        image_name = pick_unique_name(f"{source.name}_CAT", bpy.data.images)
+        image = bpy.data.images.new(
+            image_name, width=width, height=height, alpha=True, float_buffer=True
+        )
+        image.pixels.foreach_set(pixels.flatten().tolist())
+        image.frame_start = frame_start
+        image.frame_duration = width
+
+        texture_name = pick_unique_name(f"{source.name}_CAT", bpy.data.textures)
+        texture = bpy.data.textures.new(texture_name, type="IMAGE")
+        texture.image = image
+        if getattr(texture, "image_user", None):
+            texture.image_user.frame_start = frame_start
+            texture.image_user.frame_duration = width
+
+        new_entry = light_effects.append_new_entry(
+            pick_unique_name(f"{source.name} (CAT)", light_effects.entries),
+            frame_start,
+            width,
+            select=True,
+            context=context,
+        )
+        if new_entry is None:
+            raise RuntimeError("Failed to create CAT effect entry")
+
+        new_entry.type = "CAT"
+        new_entry.texture = texture
+        new_entry.duration = width
+        new_entry.frame_start = frame_start
+        if hasattr(new_entry, "blend_mode"):
+            try:
+                new_entry.blend_mode = getattr(source, "blend_mode", "NORMAL")
+            except Exception:
+                pass
+        if hasattr(new_entry, "convert_srgb") and hasattr(source, "convert_srgb"):
+            try:
+                new_entry.convert_srgb = source.convert_srgb
+            except Exception:
+                pass
+
+        for attr in (
+            "target",
+            "invert_target",
+            "formation_collection",
+            "uv_tiling_mode",
+        ):
+            if hasattr(new_entry, attr) and hasattr(source, attr):
+                try:
+                    setattr(new_entry, attr, getattr(source, attr))
+                except Exception:
+                    pass
+
+        return new_entry
+
+    def execute(self, context):
+        light_effects = context.scene.skybrush.light_effects
+        entries = self._get_entries_to_bake(light_effects)
+        if not entries:
+            self.report({'ERROR'}, "No light effects are available for baking")
+            return {'CANCELLED'}
+
+        ranges = [self._compute_frame_range(entry) for entry in entries]
+        if any(rng is None for rng in ranges):
+            self.report({'ERROR'}, "One or more light effects have invalid frame ranges")
+            return {'CANCELLED'}
+
+        frame_start = min(rng[0] for rng in ranges if rng is not None)
+        frame_end = max(rng[1] for rng in ranges if rng is not None)
+
+        drones = self._gather_drones()
+        if not drones:
+            self.report({'ERROR'}, "No objects found in the 'Drones' collection")
+            return {'CANCELLED'}
+
+        all_entries = list(getattr(light_effects, "entries", []))
+        original_states = {
+            item.as_pointer(): bool(getattr(item, "enabled", True))
+            for item in all_entries
+            if hasattr(item, "enabled")
+        }
+        original_blends = {}
+
+        try:
+            if self.scope == "ACTIVE":
+                for item in all_entries:
+                    if hasattr(item, "enabled"):
+                        item.enabled = item in entries
+                if hasattr(entries[0], "blend_mode"):
+                    original_blends[entries[0].as_pointer()] = getattr(
+                        entries[0], "blend_mode", "NORMAL"
+                    )
+                    try:
+                        entries[0].blend_mode = "NORMAL"
+                    except Exception:
+                        pass
+
+            if hasattr(context, "view_layer") and context.view_layer is not None:
+                context.view_layer.update()
+
+            rows = self._resolve_row_order(context.scene, drones, frame_start)
+            pixels, width, height = self._collect_colors(
+                context, drones, rows, frame_start, frame_end
+            )
+
+        except Exception as exc:  # pragma: no cover - Blender runtime
+            self.report({'ERROR'}, f"Failed to bake CAT: {exc}")
+            return {'CANCELLED'}
+        finally:
+            for item in all_entries:
+                if not hasattr(item, "enabled"):
+                    continue
+                state = original_states.get(item.as_pointer())
+                if state is not None:
+                    item.enabled = state
+            for ptr, blend in original_blends.items():
+                try:
+                    entry = next(
+                        (e for e in entries if e.as_pointer() == ptr), None
+                    )
+                    if entry is not None:
+                        entry.blend_mode = blend
+                except Exception:
+                    pass
+
+            if hasattr(context, "view_layer") and context.view_layer is not None:
+                context.view_layer.update()
+
+        try:
+            new_entry = self._create_cat_entry(
+                context, light_effects, entries, pixels, width, height, frame_start
+            )
+        except Exception as exc:  # pragma: no cover - Blender runtime
+            self.report({'ERROR'}, f"Failed to create CAT: {exc}")
+            return {'CANCELLED'}
+
+        for entry in entries:
+            if hasattr(entry, "enabled"):
+                entry.enabled = False
+
+        if hasattr(new_entry, "blend_mode") and self.scope == "ACTIVE":
+            ptr = entries[0].as_pointer()
+            if ptr in original_blends:
+                try:
+                    new_entry.blend_mode = original_blends[ptr]
+                except Exception:
+                    pass
+
+        self.report({'INFO'}, "Baked light effects into a Color Animation Texture")
         return {'FINISHED'}
 
 
@@ -5107,10 +5455,26 @@ class PatchedLightEffectsPanel(Panel):  # pragma: no cover - Blender UI code
             if not getattr(entry, "sequence_mode", False):
                 col.prop(entry, "frame_end")
             col.separator()
-            col.operator(
+            row_bake = col.row(align=True)
+            op_bake = row_bake.operator(
                 BakeLightEffectToKeysOperator.bl_idname,
                 text="Bake Colors",
             )
+            op_bake.scope = "ACTIVE"
+            op_bake_all = row_bake.operator(
+                BakeLightEffectToKeysOperator.bl_idname,
+                text="Bake Colors (All)",
+            )
+            op_bake_all.scope = "VISIBLE"
+            row_cat = col.row(align=True)
+            op_cat = row_cat.operator(
+                BakeLightEffectsToCatOperator.bl_idname, text="Bake to CAT"
+            )
+            op_cat.scope = "ACTIVE"
+            op_cat_all = row_cat.operator(
+                BakeLightEffectsToCatOperator.bl_idname, text="Bake CAT (All)"
+            )
+            op_cat_all.scope = "VISIBLE"
             col.separator()
             col.prop(entry, "fade_in_duration")
             col.prop(entry, "fade_out_duration")
@@ -5303,6 +5667,7 @@ def register():  # pragma: no cover - executed in Blender
     bpy.utils.register_class(UnembedColorFunctionOperator)
     bpy.utils.register_class(BakeColorRampOperator)
     bpy.utils.register_class(BakeLightEffectToKeysOperator)
+    bpy.utils.register_class(BakeLightEffectsToCatOperator)
     bpy.utils.register_class(BakeMeshUVToVertexColorOperator)
     bpy.utils.register_class(GeneratePathGradientMeshOperator)
     bpy.utils.register_class(SetupFollowCurveOperator)
@@ -5326,21 +5691,22 @@ def unregister():  # pragma: no cover - executed in Blender
 
     if _ensure_light_effects_initialized in bpy.app.handlers.depsgraph_update_pre:
         bpy.app.handlers.depsgraph_update_pre.remove(_ensure_light_effects_initialized)
-    bpy.utils.unregister_class(ToggleUvMeshPreviewOperator)
+    bpy.utils.unregister_class(ReloadLightEffectImageOperator)
+    bpy.utils.unregister_class(ClearLightEffectPixelCacheOperator)
+    bpy.utils.unregister_class(MergeSplitLightEffectsOperator)
+    bpy.utils.unregister_class(BakeColorRampSplitOperator)
     bpy.utils.unregister_class(ConvertCollectionToMeshOperator)
     bpy.utils.unregister_class(CreateTargetCollectionFromSelectionOperator)
+    bpy.utils.unregister_class(ToggleUvMeshPreviewOperator)
     bpy.utils.unregister_class(CreateBoundingBoxMeshOperator)
     bpy.utils.unregister_class(SetupFollowCurveOperator)
     bpy.utils.unregister_class(GeneratePathGradientMeshOperator)
-    bpy.utils.unregister_class(BakeColorRampOperator)
-    bpy.utils.unregister_class(BakeLightEffectToKeysOperator)
     bpy.utils.unregister_class(BakeMeshUVToVertexColorOperator)
+    bpy.utils.unregister_class(BakeLightEffectsToCatOperator)
+    bpy.utils.unregister_class(BakeLightEffectToKeysOperator)
+    bpy.utils.unregister_class(BakeColorRampOperator)
     bpy.utils.unregister_class(UnembedColorFunctionOperator)
     bpy.utils.unregister_class(EmbedColorFunctionOperator)
-    bpy.utils.unregister_class(BakeColorRampSplitOperator)
-    bpy.utils.unregister_class(MergeSplitLightEffectsOperator)
-    bpy.utils.unregister_class(ClearLightEffectPixelCacheOperator)
-    bpy.utils.unregister_class(ReloadLightEffectImageOperator)
     bpy.utils.unregister_class(RemoveDynamicColorRampPointOperator)
     bpy.utils.unregister_class(AddDynamicColorRampPointOperator)
     bpy.utils.unregister_class(RemoveDynamicArrayItemOperator)
