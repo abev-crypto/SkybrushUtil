@@ -3518,7 +3518,7 @@ class BakeLightEffectToKeysOperator(bpy.types.Operator):  # pragma: no cover - B
         inserted = False
         try:
             for frame, _ in each_frame_in(
-                range(frame_start, frame_end + 1), context=context
+                range(frame_start, frame_end + 1), context=context, redraw=True
             ):
                 if view_layer is not None:
                     view_layer.update()
@@ -3699,7 +3699,7 @@ class BakeLightEffectsToCatOperator(bpy.types.Operator):  # pragma: no cover - B
         data = np.zeros((height, width, 4), dtype=np.float32)
 
         try:
-            for column, frame in enumerate(range(frame_start, frame_end + 1)):
+            for column, (frame, time) in enumerate(each_frame_in(range(frame_start, frame_end + 1), context=context, redraw=True)):
                 scene.frame_set(frame)
                 if view_layer is not None:
                     view_layer.update()
