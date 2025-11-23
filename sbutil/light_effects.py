@@ -2408,193 +2408,199 @@ class PatchedLightEffect(PropertyGroup):
         ensure_color_function_initialized(self)
 
         def apply_single_mode(*, clamp_temporal_to_duration: bool = False) -> None:
-            def get_output_based_on_output_type(
-                output_type: str,
-                mapping_mode: str,
-                output_function,
-            ) -> tuple[Optional[list[Optional[float]]], Optional[float]]:
+            def _resolve_vertex_color_output():
+                if (
+                    self.type == "COLOR_RAMP"
+                    and self.target == "INSIDE_MESH"
+                    and getattr(self, "mesh", None)
+                ):
+                    sampled = sample_vertex_color_factors(self.mesh, positions)
+                    if sampled is not None:
+                        return sampled
+                return [None] * num_positions
 
-                outputs: Optional[list[Optional[float]]] = None
-                common_output: Optional[float] = None
-                order: Optional[list[int]] = None
+            def _resolve_mesh_uv_output(axis: int):
+                uv_source = getattr(self, "uv_mesh", None) or getattr(self, "mesh", None)
+                if uv_source is not None:
+                    sampled = sample_uv_factors(
+                        uv_source,
+                        positions,
+                        axis,
+                        getattr(self, "uv_tiling_mode", "NONE"),
+                    )
+                    if sampled is not None:
+                        return sampled
+                return [None] * num_positions
 
-                if output_type == "FIRST_COLOR":
-                    common_output = 0.0
-                elif output_type == "LAST_COLOR":
-                    common_output = 1.0
-                elif output_type == "TEMPORAL":
-                    common_output = time_fraction
-                elif output_type == OUTPUT_VERTEX_COLOR:
-                    outputs = None
-                    if (
-                        self.type == "COLOR_RAMP"
-                        and self.target == "INSIDE_MESH"
-                        and getattr(self, "mesh", None)
-                    ):
-                        sampled = sample_vertex_color_factors(self.mesh, positions)
-                        if sampled is not None:
-                            outputs = sampled
-                    if outputs is None:
-                        outputs = [None] * num_positions
-                elif output_type in {OUTPUT_MESH_UV_U, OUTPUT_MESH_UV_V}:
-                    outputs = None
-                    uv_source = getattr(self, "uv_mesh", None) or getattr(self, "mesh", None)
-                    if uv_source is not None:
-                        axis = 0 if output_type == OUTPUT_MESH_UV_U else 1
-                        sampled = sample_uv_factors(
-                            uv_source,
-                            positions,
-                            axis,
-                            getattr(self, "uv_tiling_mode", "NONE"),
+            def _resolve_baked_uv_output(axis: int):
+                cache_entries = _get_or_build_baked_uv_cache(
+                    self, positions, mapping, frame=effective_frame
+                )
+                outputs: list[Optional[float]] = [None] * num_positions
+                if cache_entries:
+                    for entry in cache_entries:
+                        drone_index = entry.get("drone_index")
+                        color = entry.get("color")
+                        if (
+                            drone_index is None
+                            or color is None
+                            or drone_index >= num_positions
+                            or axis >= len(color)
+                        ):
+                            continue
+                        outputs[drone_index] = float(color[axis])
+                return outputs
+
+            def _resolve_formation_uv_output(axis: int):
+                cache_entries = _get_or_build_formation_uv_cache(
+                    self, positions, mapping, frame=effective_frame
+                )
+                outputs: list[Optional[float]] = [None] * num_positions
+                if cache_entries:
+                    for entry in cache_entries:
+                        drone_index = entry.get("drone_index")
+                        uv = entry.get("uv")
+                        if (
+                            drone_index is None
+                            or uv is None
+                            or drone_index >= num_positions
+                        ):
+                            continue
+                        outputs[drone_index] = float(uv[axis])
+                return outputs
+
+            def _resolve_mapping_output(output_type: str, mapping_mode: str):
+                proportional = mapping_mode == "PROPORTIONAL"
+                if output_type == "DISTANCE":
+                    if self.mesh:
+                        position_of_mesh = get_position_of_object(self.mesh)
+                        sort_key = lambda idx: distance_sq_of(
+                            positions[idx], position_of_mesh
                         )
-                        if sampled is not None:
-                            outputs = sampled
-                    if outputs is None:
-                        outputs = [None] * num_positions
-                elif output_type in {OUTPUT_BAKED_UV_R, OUTPUT_BAKED_UV_G}:
-                    cache_entries = _get_or_build_baked_uv_cache(
-                        self, positions, mapping, frame=effective_frame
-                    )
-                    outputs = [None] * num_positions
-                    if cache_entries:
-                        axis = 0 if output_type == OUTPUT_BAKED_UV_R else 1
-                        for entry in cache_entries:
-                            drone_index = entry.get("drone_index")
-                            color = entry.get("color")
-                            if (
-                                drone_index is None
-                                or color is None
-                                or drone_index >= num_positions
-                                or axis >= len(color)
-                            ):
-                                continue
-                            outputs[drone_index] = float(color[axis])
-                elif output_type in {OUTPUT_FORMATION_UV_U, OUTPUT_FORMATION_UV_V}:
-                    cache_entries = _get_or_build_formation_uv_cache(
-                        self, positions, mapping, frame=effective_frame
-                    )
-                    outputs = [None] * num_positions
-                    if cache_entries:
-                        axis = 0 if output_type == OUTPUT_FORMATION_UV_U else 1
-                        for entry in cache_entries:
-                            drone_index = entry.get("drone_index")
-                            uv = entry.get("uv")
-                            if (
-                                drone_index is None
-                                or uv is None
-                                or drone_index >= num_positions
-                            ):
-                                continue
-                            outputs[drone_index] = float(uv[axis])
-                elif output_type_supports_mapping_mode(output_type):
-                    proportional = mapping_mode == "PROPORTIONAL"
-                    if output_type == "DISTANCE":
-                        if self.mesh:
-                            position_of_mesh = get_position_of_object(self.mesh)
-                            sort_key = lambda idx: distance_sq_of(positions[idx], position_of_mesh)
-                        else:
-                            sort_key = None
                     else:
-                        query_axes = (
-                            OUTPUT_TYPE_TO_AXIS_SORT_KEY.get(output_type)
-                            or OUTPUT_TYPE_TO_AXIS_SORT_KEY["default"]
+                        sort_key = None
+                else:
+                    query_axes = OUTPUT_TYPE_TO_AXIS_SORT_KEY.get(output_type) or OUTPUT_TYPE_TO_AXIS_SORT_KEY[
+                        "default"
+                    ]
+                    sort_key = (
+                        (lambda idx: query_axes(positions[idx])[0])
+                        if proportional
+                        else (lambda idx: query_axes(positions[idx]))
+                    )
+
+                outputs: list[float] = [1.0] * num_positions
+                order = list(range(num_positions))
+                if num_positions > 1:
+                    if proportional and sort_key is not None:
+                        evaluated_sort_keys = [sort_key(i) for i in order]
+                        min_value, max_value = (min(evaluated_sort_keys), max(evaluated_sort_keys))
+                        diff = max_value - min_value
+                        if diff > 0:
+                            outputs = [
+                                (value - min_value) / diff for value in evaluated_sort_keys
+                            ]
+                    else:
+                        if sort_key is not None:
+                            order.sort(key=sort_key)
+                        for u, v in enumerate(order):
+                            outputs[v] = u / (num_positions - 1)
+                return outputs
+
+            def _resolve_custom_output(output_function):
+                module = get_state(self).get("module")
+                if module is None:
+                    path = getattr(output_function, "path", None)
+                    module = (
+                        load_module(bpy_abspath(path))
+                        if path and path.lower().endswith(".py")
+                        else None
+                    )
+                func_name = getattr(output_function, "name", None)
+                if not func_name or module is None:
+                    return None, 1.0
+
+                fn_name = func_name
+                if getattr(self, "color_function_text", None):
+                    ctx = module.__dict__
+                    outputs: list[float] = []
+                    for index in range(num_positions):
+                        formation_index = mapping[index] if mapping is not None else None
+                        ctx.update(
+                            frame=frame,
+                            time_fraction=time_fraction,
+                            drone_index=index,
+                            formation_index=formation_index,
+                            position=positions[index],
+                            drone_count=num_positions,
                         )
-                        if proportional:
-                            sort_key = lambda idx: query_axes(positions[idx])[0]
-                        else:
-                            sort_key = lambda idx: query_axes(positions[idx])
-                    outputs = [1.0] * num_positions
-                    order = list(range(num_positions))
-                    if num_positions > 1:
-                        if proportional and sort_key is not None:
-                            evaluated_sort_keys = [sort_key(i) for i in order]
-                            min_value, max_value = (min(evaluated_sort_keys), max(evaluated_sort_keys))
-                            diff = max_value - min_value
-                            if diff > 0:
-                                outputs = [(value - min_value) / diff for value in evaluated_sort_keys]
-                        else:
-                            if sort_key is not None:
-                                order.sort(key=sort_key)
-                            assert outputs is not None
-                            for u, v in enumerate(order):
-                                outputs[v] = u / (num_positions - 1)
-                elif output_type == "INDEXED_BY_DRONES":
+                        outputs.append(
+                            eval(
+                                f"{fn_name}(frame=frame, time_fraction=time_fraction, drone_index=drone_index, formation_index=formation_index, position=position, drone_count=drone_count)",
+                                ctx,
+                            )
+                        )
+                    return outputs, None
+
+                fn = getattr(module, fn_name)
+                outputs = [
+                    fn(
+                        frame=frame,
+                        time_fraction=time_fraction,
+                        drone_index=index,
+                        formation_index=(mapping[index] if mapping is not None else None),
+                        position=positions[index],
+                        drone_count=num_positions,
+                    )
+                    for index in range(num_positions)
+                ]
+                return outputs, None
+
+            def get_output_based_on_output_type(
+                output_type: str, mapping_mode: str, output_function
+            ) -> tuple[Optional[list[Optional[float]]], Optional[float]]:
+                if output_type == "FIRST_COLOR":
+                    return None, 0.0
+                if output_type == "LAST_COLOR":
+                    return None, 1.0
+                if output_type == "TEMPORAL":
+                        return None, time_fraction
+                if output_type == OUTPUT_VERTEX_COLOR:
+                    return _resolve_vertex_color_output(), None
+                if output_type in {OUTPUT_MESH_UV_U, OUTPUT_MESH_UV_V}:
+                    axis = 0 if output_type == OUTPUT_MESH_UV_U else 1
+                    return _resolve_mesh_uv_output(axis), None
+                if output_type in {OUTPUT_BAKED_UV_R, OUTPUT_BAKED_UV_G}:
+                    axis = 0 if output_type == OUTPUT_BAKED_UV_R else 1
+                    return _resolve_baked_uv_output(axis), None
+                if output_type in {OUTPUT_FORMATION_UV_U, OUTPUT_FORMATION_UV_V}:
+                    axis = 0 if output_type == OUTPUT_FORMATION_UV_U else 1
+                    return _resolve_formation_uv_output(axis), None
+                if output_type_supports_mapping_mode(output_type):
+                    return _resolve_mapping_output(output_type, mapping_mode), None
+                if output_type == "INDEXED_BY_DRONES":
                     if num_positions > 1:
                         np_m1 = num_positions - 1
-                        outputs = [i / np_m1 for i in range(num_positions)]
-                    else:
-                        outputs = [0.0]
-                elif output_type == "INDEXED_BY_FORMATION":
+                        return [i / np_m1 for i in range(num_positions)], None
+                    return [0.0], None
+                if output_type == "INDEXED_BY_FORMATION":
                     if mapping is not None:
                         assert num_positions == len(mapping)
                         if None in mapping:
-                            sorted_valid_mapping = sorted(
-                                x for x in mapping if x is not None
-                            )
+                            sorted_valid_mapping = sorted(x for x in mapping if x is not None)
                             np_m1 = max(len(sorted_valid_mapping) - 1, 1)
-                            outputs = [
+                            return [
                                 None if x is None else sorted_valid_mapping.index(x) / np_m1
                                 for x in mapping
-                            ]
-                        else:
-                            np_m1 = max(num_positions - 1, 1)
-                            outputs = [None if x is None else x / np_m1 for x in mapping]
-                    else:
-                        outputs = [None] * num_positions
-                elif output_type == "GROUP":
-                    outputs = [output_function(idx, 0, 0) for idx in range(num_positions)]
-                elif output_type == "CUSTOM":
-                    module = get_state(self).get("module")
-                    if module is None:
-                        path = output_function.path
-                        module = (
-                            load_module(bpy_abspath(path))
-                            if path and path.lower().endswith(".py")
-                            else None
-                        )
-                    if self.output_function.name and module:
-                        fn_name = self.output_function.name
-                        if getattr(self, "color_function_text", None):
-                            ctx = module.__dict__
-                            outputs = []
-                            for index in range(num_positions):
-                                formation_index = (
-                                    mapping[index] if mapping is not None else None
-                                )
-                                ctx.update(
-                                    frame=frame,
-                                    time_fraction=time_fraction,
-                                    drone_index=index,
-                                    formation_index=formation_index,
-                                    position=positions[index],
-                                    drone_count=num_positions,
-                                )
-                                outputs.append(
-                                    eval(
-                                        f"{fn_name}(frame=frame, time_fraction=time_fraction, drone_index=drone_index, formation_index=formation_index, position=position, drone_count=drone_count)",
-                                        ctx,
-                                    )
-                                )
-                        else:
-                            fn = getattr(module, fn_name)
-                            outputs = [
-                                fn(
-                                    frame=frame,
-                                    time_fraction=time_fraction,
-                                    drone_index=index,
-                                    formation_index=(
-                                        mapping[index] if mapping is not None else None
-                                    ),
-                                    position=positions[index],
-                                    drone_count=num_positions,
-                                )
-                                for index in range(num_positions)
-                            ]
-                    else:
-                        common_output = 1.0
-                else:
-                    common_output = 1.0
-                return outputs, common_output
+                            ], None
+                        np_m1 = max(num_positions - 1, 1)
+                        return [None if x is None else x / np_m1 for x in mapping], None
+                    return [None] * num_positions, None
+                if output_type == "GROUP":
+                    return [output_function(idx, 0, 0) for idx in range(num_positions)], None
+                if output_type == "CUSTOM":
+                    return _resolve_custom_output(output_function)
+                return None, 1.0
 
             if not self.enabled:
                 return
@@ -2727,14 +2733,14 @@ class PatchedLightEffect(PropertyGroup):
                             else tuple(list(color) + [1.0])
                         )
                         vertex_colors[drone_index] = color_values
-            elif self.type == "CAT":
-                if color_image is not None:
-                    cat_width, cat_height = color_image.size
-                    try:
-                        cat_pixels = self.get_image_pixels()
-                    except Exception:
-                        cat_pixels = None
-            else:
+                elif self.type == "CAT":
+                    if color_image is not None:
+                        cat_width, cat_height = color_image.size
+                        try:
+                            cat_pixels = self.get_image_pixels()
+                        except Exception:
+                            cat_pixels = None
+                else:
                 outputs_x, common_output_x = get_output_based_on_output_type(
                     self.output, self.output_mapping_mode, self.output_function
                 )
@@ -2752,7 +2758,7 @@ class PatchedLightEffect(PropertyGroup):
                     if not cat_pixels or cat_width <= 0 or cat_height <= 0:
                         continue
                     if cat_height == 1:
-                        output_y = 0.0
+                        y = 0
                     else:
                         if mapping is not None and index < len(mapping):
                             mapped_index = mapping[index]
@@ -2760,20 +2766,11 @@ class PatchedLightEffect(PropertyGroup):
                             mapped_index = None
                         if mapped_index is None:
                             mapped_index = index
-                        output_y = max(
-                            min(float(mapped_index) / float(cat_height - 1), 1.0),
-                            0.0,
-                        )
-                    output_x = max(
-                        min(
-                            float(effective_frame - cat_frame_start)
-                            / float(max(cat_frame_duration - 1, 1)),
-                            1.0,
-                        ),
-                        0.0,
-                    )
-                    x = int((cat_width - 1) * output_x)
-                    y = int((cat_height - 1) * output_y)
+                        y = max(min(int(mapped_index), cat_height - 1), 0)
+                    frame_offset = effective_frame - cat_frame_start
+                    clamped_offset = max(min(int(frame_offset), cat_frame_duration - 1), 0)
+                    denom = max(cat_frame_duration - 1, 1)
+                    x = int((cat_width - 1) * clamped_offset / denom)
                     offset = (y * cat_width + x) * 4
                     direct_color = cat_pixels[offset : offset + 4]
                 if direct_color is None:
@@ -3736,15 +3733,10 @@ class BakeLightEffectsToCatOperator(bpy.types.Operator):  # pragma: no cover - B
             image_name, width=width, height=height, alpha=True, float_buffer=True
         )
         image.pixels.foreach_set(pixels.flatten().tolist())
-        image.frame_start = frame_start
-        image.frame_duration = width
 
         texture_name = pick_unique_name(f"{source.name}_CAT", bpy.data.textures)
         texture = bpy.data.textures.new(texture_name, type="IMAGE")
         texture.image = image
-        if getattr(texture, "image_user", None):
-            texture.image_user.frame_start = frame_start
-            texture.image_user.frame_duration = width
 
         new_entry = light_effects.append_new_entry(
             pick_unique_name(f"{source.name} (CAT)", light_effects.entries),
@@ -5592,10 +5584,6 @@ class PatchedLightEffectsPanel(Panel):  # pragma: no cover - Blender UI code
             elif entry.type == "VERTEX_COLOR":
                 col.prop(entry, "convert_srgb")
             elif entry.type == "CAT":
-                if entry.texture and getattr(entry.texture, "image_user", None):
-                    image_user = entry.texture.image_user
-                    col.prop(image_user, "frame_start", text="Image Start")
-                    col.prop(image_user, "frame_duration", text="Image Duration")
                 col.prop(entry, "convert_srgb")
             if (
                 entry.type == "IMAGE"

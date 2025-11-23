@@ -219,6 +219,7 @@ def _create_light_effect_for_storyboard(
     *,
     effect_type: str = "VERTEX_COLOR",
     color_image=None,
+    assign_mesh: bool = True,
 ):
     """Create a light effect aligned with ``storyboard_entry``."""
 
@@ -261,7 +262,7 @@ def _create_light_effect_for_storyboard(
             le_entry.output = OUTPUT_VERTEX_COLOR
         except Exception:
             pass
-    if hasattr(le_entry, "mesh"):
+    if assign_mesh and hasattr(le_entry, "mesh"):
         try:
             le_entry.mesh = mesh_obj
         except Exception:
@@ -391,6 +392,7 @@ def import_csv_folder(context, folder, start_frame, *, use_vat: bool = False):
             entry,
             effect_type="CAT",
             color_image=color_image_for_le,
+            assign_mesh=False,
         )
 
     _update_frame_range_from_storyboard(context)
