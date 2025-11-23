@@ -3665,28 +3665,25 @@ class BakeLightEffectsToCatOperator(bpy.types.Operator):  # pragma: no cover - B
 
         if recognized:
             total = len(drones)
-            order: list[Optional[int]] = []
-            used: set[int] = set()
-            for drone_idx in recognized:
-                try:
-                    idx = int(drone_idx)
-                except (TypeError, ValueError):
-                    idx = None
-                if idx is not None and 0 <= idx < total and idx not in used:
-                    order.append(idx)
-                    used.add(idx)
-                else:
-                    order.append(None)
+            order: list[Optional[int]] = [None] * total
+            used_drones: set[int] = set()
 
-            remaining = [idx for idx in range(total) if idx not in used]
+            for drone_idx, color_idx in enumerate(recognized):
+                try:
+                    idx = int(color_idx)
+                except (TypeError, ValueError):
+                    continue
+
+                if 0 <= idx < total and idx < len(order) and order[idx] is None:
+                    order[idx] = drone_idx
+                    used_drones.add(drone_idx)
+
+            remaining_drones = [idx for idx in range(total) if idx not in used_drones]
             for pos, value in enumerate(order):
                 if value is None:
-                    order[pos] = remaining.pop(0) if remaining else 0
+                    order[pos] = remaining_drones.pop(0) if remaining_drones else 0
 
-            if len(order) < total:
-                order.extend(remaining)
-
-            return order[:total]
+            return order
 
         return list(range(len(drones)))
 
