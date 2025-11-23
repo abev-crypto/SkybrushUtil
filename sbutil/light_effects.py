@@ -2093,6 +2093,7 @@ class PatchedLightEffect(PropertyGroup):
             ("IMAGE", "Image", "", 2),
             ("FUNCTION", "Function", "", 3),
             ("VERTEX_COLOR", "Vertex color", "", 4),
+            ("CAT", "Color animation texture", "", 5),
         ],
         default="COLOR_RAMP",
     )
@@ -2654,6 +2655,17 @@ class PatchedLightEffect(PropertyGroup):
             common_output_x: Optional[float] = None
             common_output_y: Optional[float] = None
             vertex_colors: Optional[list[Optional[Sequence[float]]]] = None
+            cat_pixels: Optional[Sequence[float]] = None
+            cat_width = 0
+            cat_height = 0
+            try:
+                cat_frame_start = int(getattr(self, "frame_start", 1))
+            except (TypeError, ValueError):
+                cat_frame_start = 1
+            try:
+                cat_frame_duration = max(int(getattr(self, "duration", 1)), 1)
+            except (TypeError, ValueError):
+                cat_frame_duration = 1
 
             if self.type == "VERTEX_COLOR":
                 cache_entries = _get_or_build_vertex_color_cache(
@@ -2680,6 +2692,13 @@ class PatchedLightEffect(PropertyGroup):
                             else tuple(list(color) + [1.0])
                         )
                         vertex_colors[drone_index] = color_values
+            elif self.type == "CAT":
+                if color_image is not None:
+                    cat_width, cat_height = color_image.size
+                    try:
+                        cat_pixels = self.get_image_pixels()
+                    except Exception:
+                        cat_pixels = None
             else:
                 outputs_x, common_output_x = get_output_based_on_output_type(
                     self.output, self.output_mapping_mode, self.output_function
@@ -2694,6 +2713,34 @@ class PatchedLightEffect(PropertyGroup):
                 direct_color = None
                 if vertex_colors is not None and index < len(vertex_colors):
                     direct_color = vertex_colors[index]
+                elif self.type == "CAT":
+                    if not cat_pixels or cat_width <= 0 or cat_height <= 0:
+                        continue
+                    if cat_height == 1:
+                        output_y = 0.0
+                    else:
+                        if mapping is not None and index < len(mapping):
+                            mapped_index = mapping[index]
+                        else:
+                            mapped_index = None
+                        if mapped_index is None:
+                            mapped_index = index
+                        output_y = max(
+                            min(float(mapped_index) / float(cat_height - 1), 1.0),
+                            0.0,
+                        )
+                    output_x = max(
+                        min(
+                            float(effective_frame - cat_frame_start)
+                            / float(max(cat_frame_duration - 1, 1)),
+                            1.0,
+                        ),
+                        0.0,
+                    )
+                    x = int((cat_width - 1) * output_x)
+                    y = int((cat_height - 1) * output_y)
+                    offset = (y * cat_width + x) * 4
+                    direct_color = cat_pixels[offset : offset + 4]
                 if direct_color is None:
                     if self.type == "VERTEX_COLOR":
                         continue
@@ -5011,7 +5058,7 @@ class PatchedLightEffectsPanel(Panel):  # pragma: no cover - Blender UI code
                 if entry.type == "COLOR_RAMP":
                     row = layout.box()
                     row.template_color_ramp(entry.texture, "color_ramp")
-                elif entry.type == "IMAGE":
+                elif entry.type in {"IMAGE", "CAT"}:
                     row = layout.row()
 
                     col = row.column()
@@ -5177,6 +5224,12 @@ class PatchedLightEffectsPanel(Panel):  # pragma: no cover - Blender UI code
                     col.prop(entry, "formation_collection")
                 col.prop(entry, "convert_srgb")
             elif entry.type == "VERTEX_COLOR":
+                col.prop(entry, "convert_srgb")
+            elif entry.type == "CAT":
+                if entry.texture and getattr(entry.texture, "image_user", None):
+                    image_user = entry.texture.image_user
+                    col.prop(image_user, "frame_start", text="Image Start")
+                    col.prop(image_user, "frame_duration", text="Image Duration")
                 col.prop(entry, "convert_srgb")
             if (
                 entry.type == "IMAGE"
