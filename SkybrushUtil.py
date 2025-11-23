@@ -18,6 +18,7 @@ from sbstudio.plugin.operators import RecalculateTransitionsOperator
 from sbstudio.plugin.operators.base import StoryboardOperator
 from sbutil import formation_patch
 from sbutil import light_effects as light_effects_patch
+from sbutil import recalculate_transitions_patch
 from sbutil import CSV2Vertex
 from sbutil import reflow_vertex
 from sbutil import drone_check_gn
@@ -1343,6 +1344,7 @@ def try_patch():
             bpy.app.timers.unregister(try_patch)
             return None
         patch_recalculate_operator()
+        recalculate_transitions_patch.patch_recalculate_transitions()
         formation_patch.patch_create_formation_operator()
         storyboard_patch.patch_storyboard_entry_removal()
         light_effects_patch.patch_light_effect_collection()
@@ -1369,6 +1371,7 @@ def _on_load_post(_dummy):
 def _restore_originals():
     try:
         unpatch_recalculate_operator()
+        recalculate_transitions_patch.unpatch_recalculate_transitions()
         formation_patch.unpatch_create_formation_operator()
         storyboard_patch.unpatch_storyboard_entry_removal()
         light_effects_patch.unpatch_light_effect_collection()
