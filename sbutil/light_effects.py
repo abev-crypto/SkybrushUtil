@@ -139,6 +139,7 @@ _delayed_id_property_updates: dict[tuple[int, str], tuple[object, object]] = {}
 _pending_dynamic_array_updates: dict[
     int, tuple[str, int, list]
 ] = {}
+_pending_dynamic_color_ramp_updates: dict[int, list] = {}
 
 
 def _copy_patched_light_effect_properties(source, target) -> None:
@@ -324,6 +325,33 @@ def _try_assign_dynamic_array(
         _store_pending_dynamic_array(array, item_type, item_length, sanitized)
         return False
     _clear_pending_dynamic_array(array)
+    return True
+
+
+def _store_pending_dynamic_color_ramp(ramp, points: Sequence[dict]) -> None:
+    values = [_as_dict(point) for point in points]
+    _pending_dynamic_color_ramp_updates[ramp.as_pointer()] = values
+
+
+def _clear_pending_dynamic_color_ramp(ramp) -> None:
+    _pending_dynamic_color_ramp_updates.pop(ramp.as_pointer(), None)
+
+
+def _apply_dynamic_color_ramp_points(ramp, points: Sequence[dict]) -> None:
+    ramp.points.clear()
+    for entry in points:
+        point = ramp.points.add()
+        point.position = entry["position"]
+        point.color = entry["color"]
+
+
+def _apply_color_ramp_points_with_fallback(ramp, points: Sequence[dict]) -> bool:
+    try:
+        _apply_dynamic_color_ramp_points(ramp, points)
+    except (AttributeError, RuntimeError, ReferenceError):
+        _store_pending_dynamic_color_ramp(ramp, points)
+        return False
+    _clear_pending_dynamic_color_ramp(ramp)
     return True
 
 
@@ -1338,7 +1366,31 @@ def _assign_vertex_colors(mesh, assignments: list[tuple[int, tuple[float, float,
 
 
 def _normalize_float_sequence(values, length, fill_value=0.0):
-    result = [float(v) for v in values]
+    """Return ``length`` floats copied from ``values`` with graceful fallbacks."""
+
+    try:
+        seq = list(values)
+    except TypeError:
+        seq = [values]
+
+    result: list[float] = []
+    for value in seq:
+        try:
+            result.append(float(value))
+            continue
+        except (TypeError, ValueError):
+            pass
+
+        if isinstance(value, (str, bytes)):
+            continue
+
+        if hasattr(value, "__iter__"):
+            try:
+                result.extend(float(item) for item in value)
+                continue
+            except (TypeError, ValueError):
+                continue
+
     if len(result) < length:
         result.extend([fill_value] * (length - len(result)))
     return result[:length]
@@ -2079,13 +2131,9 @@ class DynamicColorRamp(PropertyGroup):
     name: StringProperty(name="Name", default="")
     points: CollectionProperty(type=DynamicColorRampPoint)
 
-    def set_from_python(self, data):
+    def set_from_python(self, data) -> bool:
         points = _convert_color_ramp_points(data)
-        self.points.clear()
-        for entry in points:
-            point = self.points.add()
-            point.position = entry["position"]
-            point.color = entry["color"]
+        return _apply_color_ramp_points_with_fallback(self, points)
 
     def append_point(self, position: float, color):
         data = self.to_storage_list()
@@ -2366,12 +2414,30 @@ class PatchedLightEffect(PropertyGroup):
         if ramp is None:
             ramp = self.dynamic_color_ramps.add()
             ramp.name = name
-        ramp.set_from_python(self.get(name, meta.get("default", [])))
-        _set_id_property(self, name, ramp.to_storage_list())
+        pointer = ramp.as_pointer()
+        pending = _pending_dynamic_color_ramp_updates.get(pointer)
+        if pending is not None:
+            sanitized = pending
+        else:
+            sanitized = _convert_color_ramp_points(self.get(name, meta.get("default", [])))
+        _set_id_property(self, name, sanitized)
+        if not _apply_color_ramp_points_with_fallback(ramp, sanitized):
+            return ramp
         return ramp
 
     def get_dynamic_color_ramp_value(self, name: str, meta: dict | None = None):
         ramp = self.ensure_dynamic_color_ramp(name, meta)
+        pending = _pending_dynamic_color_ramp_updates.get(ramp.as_pointer())
+        if pending is not None:
+            values: list[tuple[float, tuple[float, float, float, float]]] = []
+            for point in pending:
+                position = float(point.get("position", 0.0))
+                color_values = tuple(
+                    float(channel)
+                    for channel in point.get("color", (1.0, 1.0, 1.0, 1.0))
+                )
+                values.append((position, color_values))
+            return values
         return ramp.to_script_value()
 
     @property
@@ -3595,6 +3661,10 @@ class BakeLightEffectToKeysOperator(bpy.types.Operator):  # pragma: no cover - B
                 entry = entries[0]
                 if hasattr(entry, "enabled"):
                     entry.enabled = False
+            elif self.scope == "VISIBLE":
+                for entry in entries:
+                    if hasattr(entry, "enabled"):
+                        entry.enabled = False
             if hasattr(context, "view_layer") and context.view_layer is not None:
                 context.view_layer.update()
 
@@ -5132,7 +5202,15 @@ def draw_dynamic_color_ramp(pg, layout, name: str, meta: dict) -> None:
     box = layout.box()
     header = box.row(align=True)
     header.label(text=name.upper())
-    add_op = header.operator(
+    buttons = header.row(align=True)
+    refresh_row = buttons.row(align=True)
+    if ramp.as_pointer() in _pending_dynamic_color_ramp_updates:
+        refresh_row.alert = True
+    refresh = refresh_row.operator(
+        "skybrush.dynamic_color_ramp_refresh", text="", icon="FILE_REFRESH"
+    )
+    refresh.property_name = name
+    add_op = buttons.operator(
         "skybrush.dynamic_color_ramp_point_add", text="", icon="ADD"
     )
     add_op.property_name = name
@@ -5351,6 +5429,38 @@ class RemoveDynamicColorRampPointOperator(Operator):  # pragma: no cover - Blend
             entry[self.property_name] = ramp.to_storage_list()
             return {'FINISHED'}
         return {'CANCELLED'}
+
+
+class RefreshDynamicColorRampOperator(Operator):  # pragma: no cover - Blender UI
+    bl_idname = "skybrush.dynamic_color_ramp_refresh"
+    bl_label = "Refresh Color Ramp"
+
+    property_name: StringProperty(name="Property Name", default="")
+
+    @classmethod
+    def poll(cls, context):
+        entry = getattr(context.scene.skybrush.light_effects, "active_entry", None)
+        return entry is not None and entry.type == "FUNCTION"
+
+    def execute(self, context):
+        entry = context.scene.skybrush.light_effects.active_entry
+        schema = get_state(entry).get("config_schema", {})
+        meta = schema.get(self.property_name) or _as_dict(
+            entry.get("_config_schema", {})
+        ).get(self.property_name, {})
+        if hasattr(meta, "items") and not isinstance(meta, dict):
+            meta = _as_dict(meta)
+        ramp = entry.ensure_dynamic_color_ramp(self.property_name, meta)
+        payload = _pending_dynamic_color_ramp_updates.pop(ramp.as_pointer(), None)
+        if payload is not None:
+            sanitized = payload
+        else:
+            sanitized = _convert_color_ramp_points(entry.get(self.property_name, []))
+        if not _apply_color_ramp_points_with_fallback(ramp, sanitized):
+            self.report({"WARNING"}, "Unable to update color ramp; try again")
+            return {'CANCELLED'}
+        _set_id_property(entry, self.property_name, sanitized)
+        return {'FINISHED'}
 
 
 class PatchedLightEffectsPanel(Panel):  # pragma: no cover - Blender UI code
@@ -5662,6 +5772,7 @@ def register():  # pragma: no cover - executed in Blender
     bpy.utils.register_class(RemoveDynamicArrayItemOperator)
     bpy.utils.register_class(AddDynamicColorRampPointOperator)
     bpy.utils.register_class(RemoveDynamicColorRampPointOperator)
+    bpy.utils.register_class(RefreshDynamicColorRampOperator)
     bpy.utils.register_class(EmbedColorFunctionOperator)
     bpy.utils.register_class(UnembedColorFunctionOperator)
     bpy.utils.register_class(BakeColorRampOperator)
@@ -5708,6 +5819,7 @@ def unregister():  # pragma: no cover - executed in Blender
     bpy.utils.unregister_class(EmbedColorFunctionOperator)
     bpy.utils.unregister_class(RemoveDynamicColorRampPointOperator)
     bpy.utils.unregister_class(AddDynamicColorRampPointOperator)
+    bpy.utils.unregister_class(RefreshDynamicColorRampOperator)
     bpy.utils.unregister_class(RemoveDynamicArrayItemOperator)
     bpy.utils.unregister_class(AddDynamicArrayItemOperator)
     bpy.utils.unregister_class(RefreshDynamicConfigOperator)
