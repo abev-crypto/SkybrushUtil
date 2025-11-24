@@ -3693,7 +3693,7 @@ class BakeLightEffectsToCatOperator(bpy.types.Operator):  # pragma: no cover - B
             for pos, value in enumerate(order):
                 if value is None:
                     order[pos] = remaining_drones.pop(0) if remaining_drones else 0
-
+            print(order)
             return order
 
         return list(range(len(drones)))

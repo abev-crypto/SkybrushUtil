@@ -1328,7 +1328,7 @@ def _draw_recalculate_key_handling(self, context):
     layout.separator()
     col = layout.column()
     col.use_property_split = True
-    col.prop(scene, "handle_keys_on_recalculate", text="Export && Apply Keys")
+    col.prop(scene, "handle_keys_on_recalculate", text="Export & Apply Keys")
 
 
 def _draw_auto_proximity_toggle(self, context):  # pragma: no cover - Blender UI
@@ -1378,7 +1378,7 @@ def try_patch():
             bpy.app.timers.unregister(try_patch)
             return None
         patch_recalculate_operator()
-        #recalculate_transitions_patch.patch_recalculate_transitions()
+        recalculate_transitions_patch.patch_recalculate_transitions()
         formation_patch.patch_create_formation_operator()
         storyboard_patch.patch_storyboard_entry_removal()
         light_effects_patch.patch_light_effect_collection()
@@ -1405,7 +1405,7 @@ def _on_load_post(_dummy):
 def _restore_originals():
     try:
         unpatch_recalculate_operator()
-        #recalculate_transitions_patch.unpatch_recalculate_transitions()
+        recalculate_transitions_patch.unpatch_recalculate_transitions()
         formation_patch.unpatch_create_formation_operator()
         storyboard_patch.unpatch_storyboard_entry_removal()
         light_effects_patch.unpatch_light_effect_collection()
@@ -1612,7 +1612,7 @@ def register():
         description=(
             "Export keyframes before recalculation and re-apply them afterwards"
         ),
-        default=True,
+        default=False,
     )
     light_effects_patch.register()
     CSV2Vertex.register()
