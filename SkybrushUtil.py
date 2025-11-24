@@ -9,6 +9,7 @@ bl_info = {
 }
 
 import bpy
+import importlib
 from bpy.app.handlers import persistent
 from bpy.props import BoolProperty, StringProperty
 from bpy.types import Panel, Operator, PropertyGroup, AddonPreferences
@@ -1257,6 +1258,9 @@ class Patched_RTOP(StoryboardOperator):
     def execute(self, context):
         blend_dir = os.path.dirname(bpy.data.filepath) if bpy.data.filepath else os.getcwd()
         storyboard = context.scene.skybrush.storyboard
+        scene = context.scene
+
+        handle_keys = getattr(scene, "handle_keys_on_recalculate", True)
 
         tb = context.scene.time_bind
         original_index = tb.active_index
@@ -1264,25 +1268,27 @@ class Patched_RTOP(StoryboardOperator):
 
         targets = _entries_for_scope(storyboard, context.scene, self.scope)
         prefixes = [sb.name.split("_")[0] for sb in targets]
-        for pref in prefixes:
-            print(pref)
-            export_key(context, blend_dir, pref)
+        if handle_keys:
+            for pref in prefixes:
+                print(pref)
+                export_key(context, blend_dir, pref)
 
         tb.active_index = original_index
         result = self._original_execute(context)
 
-        for pref in prefixes:
-            sb_entry = next(
-                (sb for sb in storyboard.entries if sb.name.startswith(pref)),
-                None,
-            )
-            if not sb_entry:
-                continue
-            apply_key(
-                os.path.join(blend_dir, pref + KeydataStr),
-                sb_entry.frame_start,
-                sb_entry.duration,
-            )
+        if handle_keys:
+            for pref in prefixes:
+                sb_entry = next(
+                    (sb for sb in storyboard.entries if sb.name.startswith(pref)),
+                    None,
+                )
+                if not sb_entry:
+                    continue
+                apply_key(
+                    os.path.join(blend_dir, pref + KeydataStr),
+                    sb_entry.frame_start,
+                    sb_entry.duration,
+                )
 
         return result
 
@@ -1290,11 +1296,39 @@ class Patched_RTOP(StoryboardOperator):
 def patch_recalculate_operator():
     RecalculateTransitionsOperator._original_execute = RecalculateTransitionsOperator.execute
     RecalculateTransitionsOperator.execute = Patched_RTOP.execute
+    panel = _get_storyboard_editor_panel()
+    if panel and not getattr(panel, "_SBUTIL_KEYS_DRAW_APPENDED", False):
+        panel.append(_draw_recalculate_key_handling)
+        panel._SBUTIL_KEYS_DRAW_APPENDED = True
 
 def unpatch_recalculate_operator():
     if RecalculateTransitionsOperator._original_execute:
         RecalculateTransitionsOperator.execute = RecalculateTransitionsOperator._original_execute
         RecalculateTransitionsOperator._original_execute = None
+    panel = _get_storyboard_editor_panel()
+    if panel and getattr(panel, "_SBUTIL_KEYS_DRAW_APPENDED", False):
+        try:
+            panel.remove(_draw_recalculate_key_handling)
+        except Exception:
+            pass
+        panel._SBUTIL_KEYS_DRAW_APPENDED = False
+
+
+def _get_storyboard_editor_panel():
+    module_spec = importlib.util.find_spec("sbstudio.plugin.panels.storyboard_editor")
+    if module_spec is None:
+        return None
+    module = importlib.import_module("sbstudio.plugin.panels.storyboard_editor")
+    return getattr(module, "StoryboardEditor", None)
+
+
+def _draw_recalculate_key_handling(self, context):
+    scene = context.scene
+    layout = self.layout
+    layout.separator()
+    col = layout.column()
+    col.use_property_split = True
+    col.prop(scene, "handle_keys_on_recalculate", text="Export && Apply Keys")
 
 
 def _draw_auto_proximity_toggle(self, context):  # pragma: no cover - Blender UI
@@ -1573,6 +1607,13 @@ def register():
         description="Run full proximity check when frame changes",
         default=False,
     )
+    bpy.types.Scene.handle_keys_on_recalculate = BoolProperty(
+        name="Export && Apply Keys on Recalc",
+        description=(
+            "Export keyframes before recalculation and re-apply them afterwards"
+        ),
+        default=True,
+    )
     light_effects_patch.register()
     CSV2Vertex.register()
     reflow_vertex.register()
@@ -1591,6 +1632,8 @@ def unregister():
     del bpy.types.Scene.shift_prefix_list
     if hasattr(bpy.types.Scene, "auto_proximity_check"):
         del bpy.types.Scene.auto_proximity_check
+    if hasattr(bpy.types.Scene, "handle_keys_on_recalculate"):
+        del bpy.types.Scene.handle_keys_on_recalculate
     light_effects_patch.unregister()
     CSV2Vertex.unregister()
     reflow_vertex.unregister()
