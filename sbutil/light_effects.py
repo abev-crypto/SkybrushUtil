@@ -139,7 +139,9 @@ _delayed_id_property_updates: dict[tuple[int, str], tuple[object, object]] = {}
 _pending_dynamic_array_updates: dict[
     int, tuple[str, int, list]
 ] = {}
+_pending_dynamic_array_creations: dict[int, set[str]] = {}
 _pending_dynamic_color_ramp_updates: dict[int, list] = {}
+_pending_dynamic_color_ramp_creations: dict[int, set[str]] = {}
 
 
 def _copy_patched_light_effect_properties(source, target) -> None:
@@ -316,6 +318,25 @@ def _clear_pending_dynamic_array(array) -> None:
     _pending_dynamic_array_updates.pop(array.as_pointer(), None)
 
 
+def _store_pending_dynamic_array_creation(entry, name: str) -> None:
+    pending = _pending_dynamic_array_creations.setdefault(entry.as_pointer(), set())
+    pending.add(name)
+
+
+def _clear_pending_dynamic_array_creation(entry, name: str) -> None:
+    pending = _pending_dynamic_array_creations.get(entry.as_pointer())
+    if pending is None:
+        return
+    pending.discard(name)
+    if not pending:
+        _pending_dynamic_array_creations.pop(entry.as_pointer(), None)
+
+
+def _is_pending_dynamic_array_creation(entry, name: str) -> bool:
+    pending = _pending_dynamic_array_creations.get(entry.as_pointer())
+    return pending is not None and name in pending
+
+
 def _try_assign_dynamic_array(
     entry, name: str, array, item_type: str, item_length: int, sanitized: Sequence
 ) -> bool:
@@ -335,6 +356,25 @@ def _store_pending_dynamic_color_ramp(ramp, points: Sequence[dict]) -> None:
 
 def _clear_pending_dynamic_color_ramp(ramp) -> None:
     _pending_dynamic_color_ramp_updates.pop(ramp.as_pointer(), None)
+
+
+def _store_pending_dynamic_color_ramp_creation(entry, name: str) -> None:
+    pending = _pending_dynamic_color_ramp_creations.setdefault(entry.as_pointer(), set())
+    pending.add(name)
+
+
+def _clear_pending_dynamic_color_ramp_creation(entry, name: str) -> None:
+    pending = _pending_dynamic_color_ramp_creations.get(entry.as_pointer())
+    if pending is None:
+        return
+    pending.discard(name)
+    if not pending:
+        _pending_dynamic_color_ramp_creations.pop(entry.as_pointer(), None)
+
+
+def _is_pending_dynamic_color_ramp_creation(entry, name: str) -> bool:
+    pending = _pending_dynamic_color_ramp_creations.get(entry.as_pointer())
+    return pending is not None and name in pending
 
 
 def _apply_dynamic_color_ramp_points(ramp, points: Sequence[dict]) -> None:
@@ -2359,14 +2399,19 @@ class PatchedLightEffect(PropertyGroup):
                 return array
         return None
 
-    def ensure_dynamic_array(self, name: str, meta: dict | None = None) -> DynamicArrayProperty:
+    def ensure_dynamic_array(self, name: str, meta: dict | None = None) -> DynamicArrayProperty | None:
         meta = meta or get_state(self).get("config_schema", {}).get(name, {})
         if hasattr(meta, "items") and not isinstance(meta, dict):
             meta = _as_dict(meta)
         array = self._get_dynamic_array(name)
         if array is None:
-            array = self.dynamic_arrays.add()
-            array.name = name
+            try:
+                array = self.dynamic_arrays.add()
+                array.name = name
+                _clear_pending_dynamic_array_creation(self, name)
+            except (AttributeError, RuntimeError):
+                _store_pending_dynamic_array_creation(self, name)
+                return None
 
         pointer = array.as_pointer()
         pending = _pending_dynamic_array_updates.get(pointer)
@@ -2398,6 +2443,16 @@ class PatchedLightEffect(PropertyGroup):
 
     def get_dynamic_array_value(self, name: str, meta: dict | None = None):
         array = self.ensure_dynamic_array(name, meta)
+        if array is None:
+            meta = meta or get_state(self).get("config_schema", {}).get(name, {})
+            if hasattr(meta, "items") and not isinstance(meta, dict):
+                meta = _as_dict(meta)
+            return list(
+                _sanitize_array_value(
+                    self.get(name, meta.get("default", [])),
+                    meta,
+                )
+            )
         return array.to_script_value()
 
     def _get_dynamic_color_ramp(self, name: str) -> DynamicColorRamp | None:
@@ -2406,14 +2461,19 @@ class PatchedLightEffect(PropertyGroup):
                 return ramp
         return None
 
-    def ensure_dynamic_color_ramp(self, name: str, meta: dict | None = None) -> DynamicColorRamp:
+    def ensure_dynamic_color_ramp(self, name: str, meta: dict | None = None) -> DynamicColorRamp | None:
         meta = meta or get_state(self).get("config_schema", {}).get(name, {})
         if hasattr(meta, "items") and not isinstance(meta, dict):
             meta = _as_dict(meta)
         ramp = self._get_dynamic_color_ramp(name)
         if ramp is None:
-            ramp = self.dynamic_color_ramps.add()
-            ramp.name = name
+            try:
+                ramp = self.dynamic_color_ramps.add()
+                ramp.name = name
+                _clear_pending_dynamic_color_ramp_creation(self, name)
+            except (AttributeError, RuntimeError):
+                _store_pending_dynamic_color_ramp_creation(self, name)
+                return None
         pointer = ramp.as_pointer()
         pending = _pending_dynamic_color_ramp_updates.get(pointer)
         if pending is not None:
@@ -2427,6 +2487,15 @@ class PatchedLightEffect(PropertyGroup):
 
     def get_dynamic_color_ramp_value(self, name: str, meta: dict | None = None):
         ramp = self.ensure_dynamic_color_ramp(name, meta)
+        if ramp is None:
+            meta = meta or get_state(self).get("config_schema", {}).get(name, {})
+            if hasattr(meta, "items") and not isinstance(meta, dict):
+                meta = _as_dict(meta)
+            points = _convert_color_ramp_points(self.get(name, meta.get("default", [])))
+            return [
+                (float(point["position"]), tuple(float(v) for v in point["color"]))
+                for point in points
+            ]
         pending = _pending_dynamic_color_ramp_updates.get(ramp.as_pointer())
         if pending is not None:
             values: list[tuple[float, tuple[float, float, float, float]]] = []
@@ -3736,35 +3805,16 @@ class BakeLightEffectsToCatOperator(bpy.types.Operator):  # pragma: no cover - B
         return drones
 
     def _resolve_row_order(self, scene, drones, frame_start):
-        recognized = None
+        mapping  = None
         suggestion = _get_storyboard_range_for_frame(scene, frame_start)
         if suggestion is not None:
             _, _, storyboard_entry = suggestion
-            getter = getattr(storyboard_entry, "get_recognized_point_mapping", None)
+            getter = getattr(storyboard_entry, "get_mapping", None)
             if getter is not None:
-                recognized = getter()
+                mapping  = getter()
 
-        if recognized:
-            total = len(drones)
-            order: list[Optional[int]] = [None] * total
-            used_drones: set[int] = set()
-
-            for drone_idx, color_idx in enumerate(recognized):
-                try:
-                    idx = int(color_idx)
-                except (TypeError, ValueError):
-                    continue
-
-                if 0 <= idx < total and idx < len(order) and order[idx] is None:
-                    order[idx] = drone_idx
-                    used_drones.add(drone_idx)
-
-            remaining_drones = [idx for idx in range(total) if idx not in used_drones]
-            for pos, value in enumerate(order):
-                if value is None:
-                    order[pos] = remaining_drones.pop(0) if remaining_drones else 0
-            print(order)
-            return order
+        if mapping :
+            return mapping
 
         return list(range(len(drones)))
 
@@ -3775,23 +3825,22 @@ class BakeLightEffectsToCatOperator(bpy.types.Operator):  # pragma: no cover - B
         width = frame_end - frame_start + 1
         height = len(rows)
         data = np.zeros((height, width, 4), dtype=np.float32)
-
-        try:
-            for column, (frame, time) in enumerate(each_frame_in(range(frame_start, frame_end + 1), context=context, redraw=True)):
-                scene.frame_set(frame)
-                if view_layer is not None:
-                    view_layer.update()
-                for row_index, drone_index in enumerate(rows):
-                    if drone_index is None or drone_index >= len(drones):
-                        continue
-                    color = _get_emission_color(drones[drone_index])
-                    if color is None:
-                        continue
-                    data[row_index, column, : len(color)] = color[:4]
-        finally:
-            scene.frame_set(original_frame)
+        print(drones)
+        print(rows)
+        for column, (frame, time) in enumerate(each_frame_in(range(frame_start, frame_end + 1), context=context, redraw=True)):
+            scene.frame_set(frame)
             if view_layer is not None:
                 view_layer.update()
+            for row_index, drone_index in enumerate(rows):
+                if row_index is None or row_index >= len(drones):
+                    continue
+                color = _get_emission_color(drones[row_index])
+                if color is None:
+                    continue
+                data[drone_index, column, : len(color)] = color[:4]
+        scene.frame_set(original_frame)
+        if view_layer is not None:
+            view_layer.update()
 
         return data, width, height
 
@@ -5158,14 +5207,19 @@ def draw_dynamic_array(pg, layout, name: str, meta: dict) -> None:
     header = box.row()
     header.label(text=name.upper())
     buttons = header.row(align=True)
-    pointer = array.as_pointer()
     refresh_row = buttons.row(align=True)
-    if pointer in _pending_dynamic_array_updates:
+    pending_creation = _is_pending_dynamic_array_creation(pg, name)
+    pointer = array.as_pointer() if array is not None else None
+    if pointer in _pending_dynamic_array_updates or pending_creation:
         refresh_row.alert = True
     refresh = refresh_row.operator(
         "skybrush.dynamic_config_refresh", text="", icon="FILE_REFRESH"
     )
     refresh.property_name = name
+    if array is None:
+        buttons.enabled = False
+        box.label(text="Waiting for Blender to allow edits", icon="INFO")
+        return
     add_op = buttons.operator(
         "skybrush.dynamic_array_item_add", text="", icon="ADD"
     )
@@ -5204,12 +5258,18 @@ def draw_dynamic_color_ramp(pg, layout, name: str, meta: dict) -> None:
     header.label(text=name.upper())
     buttons = header.row(align=True)
     refresh_row = buttons.row(align=True)
-    if ramp.as_pointer() in _pending_dynamic_color_ramp_updates:
+    pending_creation = _is_pending_dynamic_color_ramp_creation(pg, name)
+    pointer = ramp.as_pointer() if ramp is not None else None
+    if pointer in _pending_dynamic_color_ramp_updates or pending_creation:
         refresh_row.alert = True
     refresh = refresh_row.operator(
         "skybrush.dynamic_color_ramp_refresh", text="", icon="FILE_REFRESH"
     )
     refresh.property_name = name
+    if ramp is None:
+        buttons.enabled = False
+        box.label(text="Waiting for Blender to allow edits", icon="INFO")
+        return
     add_op = buttons.operator(
         "skybrush.dynamic_color_ramp_point_add", text="", icon="ADD"
     )
@@ -5262,6 +5322,12 @@ class RefreshDynamicConfigOperator(Operator):  # pragma: no cover - Blender UI
         if hasattr(meta, "items") and not isinstance(meta, dict):
             meta = _as_dict(meta)
         array = entry.ensure_dynamic_array(self.property_name, meta)
+        if array is None:
+            self.report(
+                {"WARNING"},
+                "Unable to access array; try again when editing is allowed",
+            )
+            return {'CANCELLED'}
         pointer = array.as_pointer()
 
         payload = _pending_dynamic_array_updates.pop(pointer, None)
@@ -5318,6 +5384,12 @@ class AddDynamicArrayItemOperator(Operator):  # pragma: no cover - Blender UI
         if hasattr(meta, "items") and not isinstance(meta, dict):
             meta = _as_dict(meta)
         array = entry.ensure_dynamic_array(self.property_name, meta)
+        if array is None:
+            self.report(
+                {"WARNING"},
+                "Unable to create array in this context; try refresh later",
+            )
+            return {'CANCELLED'}
         array.append_default(meta)
         sanitized = array.to_storage_list()
         item_type = array.item_type or meta.get("item_type", "FLOAT")
@@ -5356,6 +5428,12 @@ class RemoveDynamicArrayItemOperator(Operator):  # pragma: no cover - Blender UI
         if hasattr(meta, "items") and not isinstance(meta, dict):
             meta = _as_dict(meta)
         array = entry.ensure_dynamic_array(self.property_name, meta)
+        if array is None:
+            self.report(
+                {"WARNING"},
+                "Unable to edit array in this context; try refresh later",
+            )
+            return {'CANCELLED'}
         if 0 <= self.index < len(array.values):
             array.values.remove(self.index)
             sanitized = array.to_storage_list()
@@ -5451,6 +5529,9 @@ class RefreshDynamicColorRampOperator(Operator):  # pragma: no cover - Blender U
         if hasattr(meta, "items") and not isinstance(meta, dict):
             meta = _as_dict(meta)
         ramp = entry.ensure_dynamic_color_ramp(self.property_name, meta)
+        if ramp is None:
+            self.report({"WARNING"}, "Unable to access color ramp; try again later")
+            return {'CANCELLED'}
         payload = _pending_dynamic_color_ramp_updates.pop(ramp.as_pointer(), None)
         if payload is not None:
             sanitized = payload
@@ -5761,6 +5842,10 @@ def unpatch_light_effects_panel():
 def register():  # pragma: no cover - executed in Blender
     global _selection_tracker_active
     _selection_tracker_active = False
+    _pending_dynamic_array_updates.clear()
+    _pending_dynamic_array_creations.clear()
+    _pending_dynamic_color_ramp_updates.clear()
+    _pending_dynamic_color_ramp_creations.clear()
 
     bpy.utils.register_class(SequenceDelayEntry)
     bpy.utils.register_class(DynamicArrayValue)
@@ -5830,4 +5915,8 @@ def unregister():  # pragma: no cover - executed in Blender
     bpy.utils.unregister_class(SequenceDelayEntry)
 
     _delayed_id_property_updates.clear()
+    _pending_dynamic_array_updates.clear()
+    _pending_dynamic_array_creations.clear()
+    _pending_dynamic_color_ramp_updates.clear()
+    _pending_dynamic_color_ramp_creations.clear()
 
