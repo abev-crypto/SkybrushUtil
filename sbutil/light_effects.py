@@ -2222,6 +2222,17 @@ class PatchedLightEffect(PropertyGroup):
             else None
         )
 
+    @color_image.setter
+    def color_image(self, image: Optional[Image]) -> None:
+        texture = getattr(self, "texture", None)
+        if isinstance(texture, ImageTexture):
+            texture.image = image
+        elif texture is not None and hasattr(texture, "image"):
+            try:
+                texture.image = image
+            except Exception:
+                pass
+
     def update_sequence_total_duration(self) -> None:
         if not getattr(self, "sequence_mode", False):
             return
