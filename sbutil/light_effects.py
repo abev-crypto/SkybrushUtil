@@ -4036,6 +4036,18 @@ class GeneratePathGradientMeshOperator(bpy.types.Operator):  # pragma: no cover 
                     for obj in getattr(context, "selected_objects", [])
                     if obj is not None
                 ]
+                if len(selected) == 0:
+                    if not _selection_tracker_active:
+                        selection_order.register_selection_order_tracker()
+                        _selection_tracker_active = True
+                    self.report(
+                        {'INFO'},
+                        "Selection order tracking enabled. Select objects in the"
+                        " desired order and run the operator again to create the"
+                        " curve.",
+                    )
+                    return {'FINISHED'}
+
                 if len(selected) >= 2:
                     if not _selection_tracker_active:
                         selection_order.register_selection_order_tracker()
