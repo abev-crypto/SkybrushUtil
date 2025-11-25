@@ -735,6 +735,7 @@ def _pick_transition_keys(fcurve, start_frame, end_frame):
     return None
 
 _STAGGER_BACKUP_PROP = "sbutil_copyloc_stagger_backup"
+_stagger_backup_cache: dict[int, list[dict[str, float]]] = {}
 
 
 def _build_stagger_offsets(count, max_offset, layers):
@@ -779,7 +780,12 @@ def _backup_keyframe_positions(fcurve, keys):
     if not backup:
         return False
 
-    fcurve[_STAGGER_BACKUP_PROP] = backup
+    pointer = fcurve.as_pointer()
+    try:
+        fcurve[_STAGGER_BACKUP_PROP] = backup
+        _stagger_backup_cache.pop(pointer, None)
+    except (TypeError, RuntimeError):
+        _stagger_backup_cache[pointer] = backup
     return True
 
 class DRONE_OT_StaggerCopyLocationInfluence(Operator):
@@ -818,9 +824,11 @@ class DRONE_OT_StaggerCopyLocationInfluence(Operator):
             self.report({'ERROR'}, "No drones available for adjustment")
             return {'CANCELLED'}
 
-        max_offset = max(0, int(getattr(context.scene, "copyloc_stagger_frames", 0)))
+        scene = context.scene
+        current_frame = scene.frame_current
+        max_offset = max(0, int(getattr(scene, "copyloc_stagger_frames", 0)))
 
-        layers = max(1, int(getattr(context.scene, "copyloc_stagger_layers", 2)))
+        layers = max(1, int(getattr(scene, "copyloc_stagger_layers", 2)))
         offsets = _build_stagger_offsets(len(targets), max_offset, layers)
 
         targets_sorted = sorted(
@@ -841,6 +849,13 @@ class DRONE_OT_StaggerCopyLocationInfluence(Operator):
                     f'constraints["{const.name}"].influence'
                 )
                 if not fcurve:
+                    continue
+
+                try:
+                    influence_value = float(fcurve.evaluate(current_frame))
+                except Exception:
+                    influence_value = float(getattr(const, "influence", 0.0))
+                if abs(influence_value) <= 1e-4 or abs(influence_value - 1.0) <= 1e-4:
                     continue
 
                 key_pair = _pick_transition_keys(
@@ -928,7 +943,13 @@ class DRONE_OT_RestoreCopyLocationInfluence(Operator):
                 if not fcurve:
                     continue
 
-                backup = fcurve.get(_STAGGER_BACKUP_PROP)
+                pointer = fcurve.as_pointer()
+                try:
+                    backup = fcurve.get(_STAGGER_BACKUP_PROP)
+                except (TypeError, RuntimeError, AttributeError):
+                    backup = None
+                if not backup:
+                    backup = _stagger_backup_cache.get(pointer)
                 if not backup:
                     continue
 
@@ -944,6 +965,7 @@ class DRONE_OT_RestoreCopyLocationInfluence(Operator):
                         del fcurve[_STAGGER_BACKUP_PROP]
                     except Exception:
                         pass
+                    _stagger_backup_cache.pop(pointer, None)
                     restored += 1
                 except Exception:
                     continue
