@@ -519,24 +519,57 @@ class DRONE_OT_ApplyProximityLimit(Operator):
         curr_frame = scene.frame_current
         entries = sorted(storyboard.entries, key=lambda e: e.frame_start)
 
-        prev_start = entries[0].frame_start if entries else 0
-        next_start = scene.frame_end
+        previous_entry = None
+        next_entry = None
         for entry in entries:
             if entry.frame_start <= curr_frame:
-                prev_start = entry.frame_start
+                previous_entry = entry
             elif entry.frame_start > curr_frame:
-                next_start = entry.frame_start
+                next_entry = entry
                 break
 
-        depsgraph = context.evaluated_depsgraph_get()
-        objects = list(drones_collection.objects)
-        pair_count = 0
+        def frame_end(entry):
+            if hasattr(entry, "frame_end"):
+                return int(entry.frame_end)
+            duration = getattr(entry, "duration", None)
+            if duration is None:
+                return int(entry.frame_start)
+            return int(entry.frame_start) + int(duration) - 1
 
-        for i, obj1 in enumerate(objects):
-            loc1 = obj1.evaluated_get(depsgraph).matrix_world.translation
-            for obj2 in objects[i + 1:]:
-                loc2 = obj2.evaluated_get(depsgraph).matrix_world.translation
+        start_frame = max(curr_frame, scene.frame_start)
+        if previous_entry:
+            start_frame = max(frame_end(previous_entry) + 1, start_frame)
+
+        end_frame = int(scene.frame_end)
+        if next_entry:
+            end_frame = int(next_entry.frame_start)
+
+        depsgraph = context.evaluated_depsgraph_get()
+        all_drones = list(drones_collection.objects)
+        selected_drones = [
+            obj for obj in context.selected_objects if obj in drones_collection.objects
+        ]
+        targets = selected_drones if selected_drones else all_drones
+
+        evaluated_positions = {
+            obj: obj.evaluated_get(depsgraph).matrix_world.translation for obj in all_drones
+        }
+
+        pair_count = 0
+        processed_pairs: set[tuple[str, str]] = set()
+
+        for obj1 in targets:
+            loc1 = evaluated_positions[obj1]
+            for obj2 in all_drones:
+                if obj1 == obj2:
+                    continue
+                pair_key = tuple(sorted((obj1.name, obj2.name)))
+                if pair_key in processed_pairs:
+                    continue
+
+                loc2 = evaluated_positions[obj2]
                 if (loc1 - loc2).length < threshold:
+                    processed_pairs.add(pair_key)
                     pair_count += 1
                     cname = f"Limit_{obj2.name}"
                     const = obj1.constraints.get(cname)
@@ -546,12 +579,14 @@ class DRONE_OT_ApplyProximityLimit(Operator):
                         const.limit_mode = 'LIMITDIST_ONSURFACE'
                     const.target = obj2
                     const.distance = threshold
-                    start, end = prev_start, next_start
+                    start, end = start_frame, end_frame
                     if end - start >= 2:
-                        const.influence = 0.0
-                        const.keyframe_insert('influence', frame=start)
+                        pre_start = start - 1
+                        if pre_start >= scene.frame_start:
+                            const.influence = 0.0
+                            const.keyframe_insert('influence', frame=pre_start)
                         const.influence = 1.0
-                        const.keyframe_insert('influence', frame=start + 1)
+                        const.keyframe_insert('influence', frame=start)
                         const.keyframe_insert('influence', frame=end - 1)
                         const.influence = 0.0
                         const.keyframe_insert('influence', frame=end)
