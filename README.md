@@ -53,7 +53,8 @@ It provides non-destructive JSON workflows, animation transfer tools, LightEffec
 - **ApplyProximityLimit**: auto-limit distance during storyboard range.
 - **RemoveProximityLimit**: clear all distance constraints.
 - **LinearizeCopyLoc**: makes CopyLocation curves linear.
-- **Stagger CopyLoc Transition**: offsets Copy Location influence keys per drone to stagger transitions.
+- **Stagger CopyLoc Transition**: offsets Copy Location influence keys per drone to stagger transitions with configurable layers.
+- **Restore CopyLoc Keys**: returns influence keys to their last pre-staggered positions.
 - **ReflowVertices**: smooth vertex distribution while respecting axis locks.
 
 ---

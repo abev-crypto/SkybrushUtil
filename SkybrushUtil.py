@@ -734,17 +734,53 @@ def _pick_transition_keys(fcurve, start_frame, end_frame):
 
     return None
 
+_STAGGER_BACKUP_PROP = "sbutil_copyloc_stagger_backup"
 
-def _build_stagger_offsets(count, max_offset):
+
+def _build_stagger_offsets(count, max_offset, layers):
+    layers = max(1, layers)
+    max_offset = max(0, max_offset)
+    if count <= 0:
+        return []
+
+    step = max_offset / max(1, layers - 1) if layers > 1 else 0
+    levels = [0.0]
+    for level in range(1, layers):
+        magnitude = step * level
+        levels.append(magnitude)
+        if len(levels) >= layers:
+            break
+        levels.append(-magnitude)
+        if len(levels) >= layers:
+            break
+
     offsets = []
     for idx in range(count):
-        if idx == 0:
-            offsets.append(0)
-            continue
-        magnitude = min(max_offset, (idx + 1) // 2)
-        offsets.append(magnitude if idx % 2 else -magnitude)
+        base = levels[idx % len(levels)] if levels else 0.0
+        if idx // len(levels) % 2 == 1 and base != 0:
+            base = -base
+        offsets.append(base)
     return offsets
 
+
+def _backup_keyframe_positions(fcurve, keys):
+    backup = []
+    for key in keys:
+        try:
+            index = next(
+                idx
+                for idx, candidate in enumerate(fcurve.keyframe_points)
+                if candidate == key
+            )
+        except StopIteration:
+            continue
+        backup.append({"index": int(index), "frame": float(key.co.x)})
+
+    if not backup:
+        return False
+
+    fcurve[_STAGGER_BACKUP_PROP] = backup
+    return True
 
 class DRONE_OT_StaggerCopyLocationInfluence(Operator):
     """Offset Copy Location influence keys to stagger transitions"""
@@ -783,7 +819,9 @@ class DRONE_OT_StaggerCopyLocationInfluence(Operator):
             return {'CANCELLED'}
 
         max_offset = max(0, int(getattr(context.scene, "copyloc_stagger_frames", 0)))
-        offsets = _build_stagger_offsets(len(targets), max_offset)
+
+        layers = max(1, int(getattr(context.scene, "copyloc_stagger_layers", 2)))
+        offsets = _build_stagger_offsets(len(targets), max_offset, layers)
 
         targets_sorted = sorted(
             targets, key=lambda obj: tuple(obj.matrix_world.translation)
@@ -812,6 +850,8 @@ class DRONE_OT_StaggerCopyLocationInfluence(Operator):
                     continue
 
                 start_key, end_key = key_pair
+
+                _backup_keyframe_positions(fcurve, key_pair)
                 available = (end_key.co.x - start_key.co.x) / 2
                 if available <= 0:
                     continue
@@ -849,6 +889,70 @@ class DRONE_OT_StaggerCopyLocationInfluence(Operator):
             return {'CANCELLED'}
 
         self.report({'INFO'}, f"Adjusted {adjusted} Copy Location key pairs")
+        return {'FINISHED'}
+
+class DRONE_OT_RestoreCopyLocationInfluence(Operator):
+    """Restore Copy Location influence keys to their last staggered backup"""
+
+    bl_idname = "drone.restore_copyloc_influence"
+    bl_label = "Restore CopyLoc Keys"
+    bl_description = (
+        "Reset Copy Location influence keys to the positions saved before the "
+        "last stagger operation"
+    )
+
+    def execute(self, context):
+        drones_collection = bpy.data.collections.get("Drones")
+        if not drones_collection:
+            self.report({'ERROR'}, "Drones collection not found")
+            return {'CANCELLED'}
+
+        collection_objects = list(drones_collection.objects)
+        drone_names = {obj.name for obj in collection_objects}
+        selected = [obj for obj in context.selected_objects if obj.name in drone_names]
+        targets = selected if selected else collection_objects
+
+        restored = 0
+        for obj in targets:
+            anim = obj.animation_data
+            if not anim or not anim.action:
+                continue
+
+            for const in obj.constraints:
+                if const.type != 'COPY_LOCATION':
+                    continue
+
+                fcurve = anim.action.fcurves.find(
+                    f'constraints["{const.name}"].influence'
+                )
+                if not fcurve:
+                    continue
+
+                backup = fcurve.get(_STAGGER_BACKUP_PROP)
+                if not backup:
+                    continue
+
+                try:
+                    points = fcurve.keyframe_points
+                    for item in backup:
+                        idx = int(item.get("index", -1))
+                        frame = float(item.get("frame", 0))
+                        if 0 <= idx < len(points):
+                            points[idx].co.x = frame
+                    fcurve.update()
+                    try:
+                        del fcurve[_STAGGER_BACKUP_PROP]
+                    except Exception:
+                        pass
+                    restored += 1
+                except Exception:
+                    continue
+
+        if not restored:
+            self.report({'WARNING'}, "No backup data found to restore")
+            return {'CANCELLED'}
+
+        self.report({'INFO'}, f"Restored {restored} Copy Location curves")
         return {'FINISHED'}
 
 class LIGHTEFFECT_OTadd_prefix_le_tex(bpy.types.Operator):
@@ -1736,8 +1840,12 @@ class DRONE_PT_Utilities(Panel):
             "drone.linearize_copyloc_influence", text="Linearize CopyLoc"
         )
         layout.prop(context.scene, "copyloc_stagger_frames")
+        layout.prop(context.scene, "copyloc_stagger_layers")
         layout.operator(
             "drone.stagger_copyloc_influence", text="Stagger CopyLoc Transition"
+        )
+        layout.operator(
+            "drone.restore_copyloc_influence", text="Restore CopyLoc Keys"
         )
         layout.operator("mesh.reflow_vertices", text="Reflow Vertices")
         layout.operator("mesh.repel_from_neighbors", text="Repel From Neighbors")
@@ -1793,6 +1901,7 @@ classes = (
     DRONE_OT_RemoveProximityLimit,
     DRONE_OT_LinearizeCopyLocationInfluence,
     DRONE_OT_StaggerCopyLocationInfluence,
+    DRONE_OT_RestoreCopyLocationInfluence,
     LIGHTEFFECT_OTadd_prefix_le_tex,
     TIMEBIND_OT_goto_startframe,
     TimeBindEntry,
@@ -1841,6 +1950,15 @@ def register():
         default=2,
         min=0,
     )
+    bpy.types.Scene.copyloc_stagger_layers = bpy.props.IntProperty(
+        name="CopyLoc Layers",
+        description=(
+            "Number of offset layers to cycle when staggering Copy Location "
+            "influence keys"
+        ),
+        default=2,
+        min=1,
+    )
     light_effects_patch.register()
     CSV2Vertex.register()
     reflow_vertex.register()
@@ -1863,6 +1981,8 @@ def unregister():
         del bpy.types.Scene.handle_keys_on_recalculate
     if hasattr(bpy.types.Scene, "copyloc_stagger_frames"):
         del bpy.types.Scene.copyloc_stagger_frames
+    if hasattr(bpy.types.Scene, "copyloc_stagger_layers"):
+        del bpy.types.Scene.copyloc_stagger_layers
     light_effects_patch.unregister()
     CSV2Vertex.unregister()
     reflow_vertex.unregister()
