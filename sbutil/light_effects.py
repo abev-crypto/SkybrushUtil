@@ -5473,11 +5473,22 @@ class AddDynamicColorRampPointOperator(Operator):  # pragma: no cover - Blender 
         if hasattr(meta, "items") and not isinstance(meta, dict):
             meta = _as_dict(meta)
         ramp = entry.ensure_dynamic_color_ramp(self.property_name, meta)
-        default_point = meta.get(
-            "default_point", {"position": 0.5, "color": [1.0, 1.0, 1.0, 1.0]}
+        if ramp is None:
+            self.report({"WARNING"}, "Unable to access color ramp; try again later")
+            return {'CANCELLED'}
+        points = _convert_color_ramp_points(ramp.to_storage_list())
+        default_point = _as_dict(meta.get("default_point")) or _default_color_ramp_point(points)
+        points.append(
+            {
+                "position": float(default_point.get("position", 0.5)),
+                "color": _normalize_float_sequence(
+                    default_point.get("color", (1.0, 1.0, 1.0, 1.0)), 4, 1.0
+                ),
+            }
         )
-        ramp.append_point(default_point.get("position", 0.5), default_point.get("color", [1.0, 1.0, 1.0, 1.0]))
-        entry[self.property_name] = ramp.to_storage_list()
+
+        _apply_color_ramp_points_with_fallback(ramp, points)
+        _set_id_property(entry, self.property_name, points)
         return {'FINISHED'}
 
 
