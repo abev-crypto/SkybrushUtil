@@ -50,9 +50,10 @@ It provides non-destructive JSON workflows, animation transfer tools, LightEffec
 - Supports suffix-based properties (`_COLOR`, `_POS`, `_ROT`, `_SCL`, `_MAT`).
 
 ### 6. Utility Tools
-- **ApplyProximityLimit**: auto-limit distance during storyboard range.  
-- **RemoveProximityLimit**: clear all distance constraints.  
-- **LinearizeCopyLoc**: makes CopyLocation curves linear.  
+- **ApplyProximityLimit**: auto-limit distance during storyboard range.
+- **RemoveProximityLimit**: clear all distance constraints.
+- **LinearizeCopyLoc**: makes CopyLocation curves linear.
+- **Stagger CopyLoc Transition**: offsets Copy Location influence keys per drone to stagger transitions.
 - **ReflowVertices**: smooth vertex distribution while respecting axis locks.
 
 ---
