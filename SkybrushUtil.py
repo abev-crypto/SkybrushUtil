@@ -538,7 +538,7 @@ class DRONE_OT_ApplyProximityLimit(Operator):
 
         start_frame = max(curr_frame, scene.frame_start)
         if previous_entry:
-            start_frame = max(frame_end(previous_entry) + 1, start_frame)
+            start_frame = max(int(previous_entry.frame_start), int(scene.frame_start))
 
         end_frame = int(scene.frame_end)
         if next_entry:
