@@ -678,6 +678,284 @@ class DRONE_OT_LinearizeCopyLocationInfluence(Operator):
                     key.handle_right_type = 'VECTOR'
         return {'FINISHED'}
 
+
+def _find_active_transition_range(scene):
+    storyboard = getattr(getattr(scene, "skybrush", None), "storyboard", None)
+    if storyboard is None:
+        return None
+
+    entries = sorted(storyboard.entries, key=lambda e: e.frame_start)
+    if len(entries) < 2:
+        return None
+
+    frame = scene.frame_current
+    for idx, entry in enumerate(entries):
+        start = entry.frame_start
+        end = start + entry.duration
+        if start <= frame < end:
+            if idx + 1 < len(entries):
+                next_entry = entries[idx + 1]
+                return end, next_entry.frame_start
+            return None
+
+    for idx in range(len(entries) - 1):
+        transition_start = entries[idx].frame_start + entries[idx].duration
+        transition_end = entries[idx + 1].frame_start
+        if transition_start <= frame <= transition_end:
+            return transition_start, transition_end
+        if frame < transition_start:
+            return transition_start, transition_end
+
+    return None
+
+
+def _pick_transition_keys(fcurve, start_frame, end_frame):
+    keys = sorted(fcurve.keyframe_points, key=lambda k: k.co.x)
+    if len(keys) < 2:
+        return None
+
+    inside = [k for k in keys if start_frame <= k.co.x <= end_frame]
+    if len(inside) >= 2:
+        return inside[0], inside[-1]
+    if len(inside) == 1:
+        single = inside[0]
+        before = next((k for k in reversed(keys) if k.co.x < single.co.x), None)
+        after = next((k for k in keys if k.co.x > single.co.x), None)
+        if before or after:
+            return before or single, after or single
+
+    before_start = next((k for k in reversed(keys) if k.co.x <= start_frame), None)
+    after_end = next((k for k in keys if k.co.x >= end_frame), None)
+    if before_start and after_end and before_start != after_end:
+        return before_start, after_end
+
+    if keys[0] != keys[-1]:
+        return keys[0], keys[-1]
+
+    return None
+
+
+_STAGGER_BACKUP_PROP = "sbutil_copyloc_stagger_backup"
+
+
+def _build_stagger_offsets(count, max_offset, layers):
+    layers = max(1, layers)
+    max_offset = max(0, max_offset)
+    if count <= 0:
+        return []
+
+    step = max_offset / max(1, layers - 1) if layers > 1 else 0
+    levels = [0.0]
+    for level in range(1, layers):
+        magnitude = step * level
+        levels.append(magnitude)
+        if len(levels) >= layers:
+            break
+        levels.append(-magnitude)
+        if len(levels) >= layers:
+            break
+
+    offsets = []
+    for idx in range(count):
+        base = levels[idx % len(levels)] if levels else 0.0
+        if idx // len(levels) % 2 == 1 and base != 0:
+            base = -base
+        offsets.append(base)
+    return offsets
+
+
+def _backup_keyframe_positions(fcurve, keys):
+    backup = []
+    for key in keys:
+        try:
+            index = next(
+                idx
+                for idx, candidate in enumerate(fcurve.keyframe_points)
+                if candidate == key
+            )
+        except StopIteration:
+            continue
+        backup.append({"index": int(index), "frame": float(key.co.x)})
+
+    if not backup:
+        return False
+
+    fcurve[_STAGGER_BACKUP_PROP] = backup
+    return True
+
+
+class DRONE_OT_StaggerCopyLocationInfluence(Operator):
+    """Offset Copy Location influence keys to stagger transitions"""
+
+    bl_idname = "drone.stagger_copyloc_influence"
+    bl_label = "Stagger CopyLoc Transition"
+    bl_description = (
+        "Shift Copy Location influence start/end keys around the current "
+        "transition so nearby drones move alternately"
+    )
+
+    def execute(self, context):
+        drones_collection = bpy.data.collections.get("Drones")
+        if not drones_collection:
+            self.report({'ERROR'}, "Drones collection not found")
+            return {'CANCELLED'}
+
+        transition_range = _find_active_transition_range(context.scene)
+        if not transition_range:
+            self.report({'ERROR'}, "No valid storyboard transition found")
+            return {'CANCELLED'}
+
+        transition_start, transition_end = transition_range
+        if transition_end <= transition_start:
+            self.report({'ERROR'}, "Transition range is too small to adjust")
+            return {'CANCELLED'}
+
+        collection_objects = list(drones_collection.objects)
+        drone_names = {obj.name for obj in collection_objects}
+        selected = [
+            obj for obj in context.selected_objects if obj.name in drone_names
+        ]
+        targets = selected if selected else collection_objects
+        if not targets:
+            self.report({'ERROR'}, "No drones available for adjustment")
+            return {'CANCELLED'}
+
+        max_offset = max(0, int(getattr(context.scene, "copyloc_stagger_frames", 0)))
+        layers = max(1, int(getattr(context.scene, "copyloc_stagger_layers", 2)))
+        offsets = _build_stagger_offsets(len(targets), max_offset, layers)
+
+        targets_sorted = sorted(
+            targets, key=lambda obj: tuple(obj.matrix_world.translation)
+        )
+
+        adjusted = 0
+        for offset, obj in zip(offsets, targets_sorted):
+            anim = obj.animation_data
+            if not anim or not anim.action:
+                continue
+
+            for const in obj.constraints:
+                if const.type != 'COPY_LOCATION':
+                    continue
+
+                fcurve = anim.action.fcurves.find(
+                    f'constraints["{const.name}"].influence'
+                )
+                if not fcurve:
+                    continue
+
+                key_pair = _pick_transition_keys(
+                    fcurve, transition_start, transition_end
+                )
+                if key_pair is None:
+                    continue
+
+                start_key, end_key = key_pair
+                _backup_keyframe_positions(fcurve, key_pair)
+                available = (end_key.co.x - start_key.co.x) / 2
+                if available <= 0:
+                    continue
+
+                effective_shift = min(abs(offset), max_offset, available)
+                if effective_shift == 0:
+                    continue
+                effective_shift *= 1 if offset >= 0 else -1
+
+                new_start = start_key.co.x + effective_shift
+                new_end = end_key.co.x - effective_shift
+
+                new_start = max(transition_start, min(new_start, transition_end))
+                new_end = max(transition_start, min(new_end, transition_end))
+
+                if new_start >= new_end:
+                    midpoint = (start_key.co.x + end_key.co.x) / 2
+                    new_start = midpoint - 0.001
+                    new_end = midpoint + 0.001
+                    if new_start >= new_end:
+                        continue
+
+                start_key.co.x = new_start
+                end_key.co.x = new_end
+                for key in (start_key, end_key):
+                    key.interpolation = 'LINEAR'
+                    key.handle_left_type = 'VECTOR'
+                    key.handle_right_type = 'VECTOR'
+
+                fcurve.update()
+                adjusted += 1
+
+        if not adjusted:
+            self.report({'WARNING'}, "No Copy Location keys found to adjust")
+            return {'CANCELLED'}
+
+        self.report({'INFO'}, f"Adjusted {adjusted} Copy Location key pairs")
+        return {'FINISHED'}
+
+
+class DRONE_OT_RestoreCopyLocationInfluence(Operator):
+    """Restore Copy Location influence keys to their last staggered backup"""
+
+    bl_idname = "drone.restore_copyloc_influence"
+    bl_label = "Restore CopyLoc Keys"
+    bl_description = (
+        "Reset Copy Location influence keys to the positions saved before the "
+        "last stagger operation"
+    )
+
+    def execute(self, context):
+        drones_collection = bpy.data.collections.get("Drones")
+        if not drones_collection:
+            self.report({'ERROR'}, "Drones collection not found")
+            return {'CANCELLED'}
+
+        collection_objects = list(drones_collection.objects)
+        drone_names = {obj.name for obj in collection_objects}
+        selected = [obj for obj in context.selected_objects if obj.name in drone_names]
+        targets = selected if selected else collection_objects
+
+        restored = 0
+        for obj in targets:
+            anim = obj.animation_data
+            if not anim or not anim.action:
+                continue
+
+            for const in obj.constraints:
+                if const.type != 'COPY_LOCATION':
+                    continue
+
+                fcurve = anim.action.fcurves.find(
+                    f'constraints["{const.name}"].influence'
+                )
+                if not fcurve:
+                    continue
+
+                backup = fcurve.get(_STAGGER_BACKUP_PROP)
+                if not backup:
+                    continue
+
+                try:
+                    points = fcurve.keyframe_points
+                    for item in backup:
+                        idx = int(item.get("index", -1))
+                        frame = float(item.get("frame", 0))
+                        if 0 <= idx < len(points):
+                            points[idx].co.x = frame
+                    fcurve.update()
+                    try:
+                        del fcurve[_STAGGER_BACKUP_PROP]
+                    except Exception:
+                        pass
+                    restored += 1
+                except Exception:
+                    continue
+
+        if not restored:
+            self.report({'WARNING'}, "No backup data found to restore")
+            return {'CANCELLED'}
+
+        self.report({'INFO'}, f"Restored {restored} Copy Location curves")
+        return {'FINISHED'}
+
 class LIGHTEFFECT_OTadd_prefix_le_tex(bpy.types.Operator):
     bl_idname = "drone.add_prefix"
     bl_label = "Add Prefix"
@@ -1562,6 +1840,14 @@ class DRONE_PT_Utilities(Panel):
         layout.operator(
             "drone.linearize_copyloc_influence", text="Linearize CopyLoc"
         )
+        layout.prop(context.scene, "copyloc_stagger_frames")
+        layout.prop(context.scene, "copyloc_stagger_layers")
+        layout.operator(
+            "drone.stagger_copyloc_influence", text="Stagger CopyLoc Transition"
+        )
+        layout.operator(
+            "drone.restore_copyloc_influence", text="Restore CopyLoc Keys"
+        )
         layout.operator("mesh.reflow_vertices", text="Reflow Vertices")
         layout.operator("mesh.repel_from_neighbors", text="Repel From Neighbors")
         layout.separator()
@@ -1615,6 +1901,8 @@ classes = (
     DRONE_OT_ApplyProximityLimit,
     DRONE_OT_RemoveProximityLimit,
     DRONE_OT_LinearizeCopyLocationInfluence,
+    DRONE_OT_StaggerCopyLocationInfluence,
+    DRONE_OT_RestoreCopyLocationInfluence,
     LIGHTEFFECT_OTadd_prefix_le_tex,
     TIMEBIND_OT_goto_startframe,
     TimeBindEntry,
@@ -1654,6 +1942,24 @@ def register():
         ),
         default=False,
     )
+    bpy.types.Scene.copyloc_stagger_frames = bpy.props.IntProperty(
+        name="CopyLoc Offset Frames",
+        description=(
+            "Maximum number of frames to shift Copy Location influence keys "
+            "when staggering transitions"
+        ),
+        default=2,
+        min=0,
+    )
+    bpy.types.Scene.copyloc_stagger_layers = bpy.props.IntProperty(
+        name="CopyLoc Layers",
+        description=(
+            "Number of offset layers to cycle when staggering Copy Location "
+            "influence keys"
+        ),
+        default=2,
+        min=1,
+    )
     light_effects_patch.register()
     CSV2Vertex.register()
     reflow_vertex.register()
@@ -1674,6 +1980,10 @@ def unregister():
         del bpy.types.Scene.auto_proximity_check
     if hasattr(bpy.types.Scene, "handle_keys_on_recalculate"):
         del bpy.types.Scene.handle_keys_on_recalculate
+    if hasattr(bpy.types.Scene, "copyloc_stagger_frames"):
+        del bpy.types.Scene.copyloc_stagger_frames
+    if hasattr(bpy.types.Scene, "copyloc_stagger_layers"):
+        del bpy.types.Scene.copyloc_stagger_layers
     light_effects_patch.unregister()
     CSV2Vertex.unregister()
     reflow_vertex.unregister()
