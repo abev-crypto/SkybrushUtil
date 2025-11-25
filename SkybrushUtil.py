@@ -546,8 +546,9 @@ class DRONE_OT_ApplyProximityLimit(Operator):
 
         depsgraph = context.evaluated_depsgraph_get()
         all_drones = list(drones_collection.objects)
+        drone_names = {obj.name for obj in all_drones}
         selected_drones = [
-            obj for obj in context.selected_objects if obj in drones_collection.objects
+            obj for obj in context.selected_objects if obj.name in drone_names
         ]
         targets = selected_drones if selected_drones else all_drones
 
@@ -615,10 +616,12 @@ class DRONE_OT_RemoveProximityLimit(Operator):
             self.report({'ERROR'}, "Drones collection not found")
             return {'CANCELLED'}
 
+        all_drones = list(drones_collection.objects)
+        drone_names = {obj.name for obj in all_drones}
         selected = [
-            obj for obj in context.selected_objects if obj in drones_collection.objects
+            obj for obj in context.selected_objects if obj.name in drone_names
         ]
-        targets = selected if selected else list(drones_collection.objects)
+        targets = selected if selected else all_drones
 
         removed = 0
         for obj in targets:
@@ -649,10 +652,12 @@ class DRONE_OT_LinearizeCopyLocationInfluence(Operator):
             self.report({'ERROR'}, "Drones collection not found")
             return {'CANCELLED'}
 
+        collection_objects = list(drones_collection.objects)
+        drone_names = {obj.name for obj in collection_objects}
         selected = [
-            obj for obj in context.selected_objects if obj in drones_collection.objects
+            obj for obj in context.selected_objects if obj.name in drone_names
         ]
-        targets = selected if selected else drones_collection.objects
+        targets = selected if selected else collection_objects
 
         for obj in targets:
             anim = obj.animation_data
