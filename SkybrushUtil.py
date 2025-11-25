@@ -734,7 +734,6 @@ def _pick_transition_keys(fcurve, start_frame, end_frame):
 
     return None
 
-
 _STAGGER_BACKUP_PROP = "sbutil_copyloc_stagger_backup"
 
 
@@ -783,7 +782,6 @@ def _backup_keyframe_positions(fcurve, keys):
     fcurve[_STAGGER_BACKUP_PROP] = backup
     return True
 
-
 class DRONE_OT_StaggerCopyLocationInfluence(Operator):
     """Offset Copy Location influence keys to stagger transitions"""
 
@@ -821,6 +819,7 @@ class DRONE_OT_StaggerCopyLocationInfluence(Operator):
             return {'CANCELLED'}
 
         max_offset = max(0, int(getattr(context.scene, "copyloc_stagger_frames", 0)))
+
         layers = max(1, int(getattr(context.scene, "copyloc_stagger_layers", 2)))
         offsets = _build_stagger_offsets(len(targets), max_offset, layers)
 
@@ -851,6 +850,7 @@ class DRONE_OT_StaggerCopyLocationInfluence(Operator):
                     continue
 
                 start_key, end_key = key_pair
+
                 _backup_keyframe_positions(fcurve, key_pair)
                 available = (end_key.co.x - start_key.co.x) / 2
                 if available <= 0:
@@ -890,7 +890,6 @@ class DRONE_OT_StaggerCopyLocationInfluence(Operator):
 
         self.report({'INFO'}, f"Adjusted {adjusted} Copy Location key pairs")
         return {'FINISHED'}
-
 
 class DRONE_OT_RestoreCopyLocationInfluence(Operator):
     """Restore Copy Location influence keys to their last staggered backup"""
