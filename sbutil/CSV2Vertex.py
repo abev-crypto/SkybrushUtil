@@ -169,67 +169,6 @@ def ensure_mesh_with_armature(name="CSV_Tracks", count=1, first_positions=None):
 
     return obj
 
-
-def _create_grid_positions(count, spacing=1.0):
-    """Return a list of XY-plane grid positions for ``count`` items."""
-
-    if count <= 0:
-        return []
-
-    side = math.ceil(math.sqrt(count))
-    half = (side - 1) / 2.0
-    positions = []
-    for idx in range(count):
-        row = idx // side
-        col = idx % side
-        x = (col - half) * spacing
-        y = (row - half) * spacing
-        positions.append((x, y, 0.0))
-    return positions
-
-
-def create_grid_mid_pose(context, frame_start, base_name="MidPose", spacing=1.0):
-    """Create and add a grid-formation storyboard entry at ``frame_start``.
-
-    The grid will have as many vertices as there are drone objects in the
-    "Drones" collection. The formation is appended to the storyboard with a
-    duration of 1 frame.
-    """
-
-    drones = bpy.data.collections.get("Drones")
-    drone_count = len(drones.objects) if drones else 0
-    if drone_count == 0:
-        return None
-
-    positions = _create_grid_positions(drone_count, spacing=spacing)
-    mesh = bpy.data.meshes.new(f"{base_name}_mesh")
-    mesh.from_pydata(positions, [], [])
-    mesh.update()
-
-    obj = bpy.data.objects.new(base_name, mesh)
-    bpy.context.scene.collection.objects.link(obj)
-
-    vg = obj.vertex_groups.new(name="Drones")
-    vg.add(range(len(mesh.vertices)), 1.0, "REPLACE")
-    if hasattr(obj, "skybrush"):
-        obj.skybrush.formation_vertex_group = "Drones"
-
-    bpy.ops.object.select_all(action="DESELECT")
-    obj.select_set(True)
-    context.view_layer.objects.active = obj
-
-    try:
-        bpy.ops.skybrush.create_formation(name=obj.name, contents="SELECTED_OBJECTS")
-        bpy.ops.skybrush.append_formation_to_storyboard()
-        storyboard = context.scene.skybrush.storyboard
-        entry = storyboard.entries[-1]
-        entry.name = base_name
-        entry.frame_start = frame_start
-        entry.duration = 1
-        return entry
-    except Exception:
-        return None
-
 # ---------- Utilities for Replacement ----------
 
 def clear_drone_keys(start_frame, duration):
@@ -368,10 +307,11 @@ def import_csv_folder(context, folder, start_frame, *, use_vat: bool = False):
     folder_name, _gap = split_name_and_gap(folder_name, fps)
     tracks = build_tracks_from_folder(folder)
     if not tracks:
-        return None, 0, None
+        return None, 0
 
-    # Determine total animation duration strictly from the CSV content
-    duration = calculate_duration_from_tracks(tracks, fps)
+    # Determine total duration in frames
+    max_t_ms = max(tr["data"][-1]["t_ms"] for tr in tracks if tr["data"])
+    duration = int(ms_to_frame(max_t_ms, fps))
 
     # Build initial positions array
     first_positions = []
@@ -528,7 +468,7 @@ class CSVVA_OT_Import(Operator):
             created = []
             next_start = base_start
             key_data_collection = []
-            for idx, d in enumerate(subdirs):
+            for d in subdirs:
                 sub_path = os.path.join(folder, d)
                 base_name, gap_frames = split_name_and_gap(d, context.scene.render.fps)
                 sf = next_start
@@ -542,15 +482,6 @@ class CSVVA_OT_Import(Operator):
                     created.append(obj)
                     if key_entries:
                         key_data_collection.append((key_entries, sf, obj, sub_path))
-
-                    if gap_frames >= 2 and idx < len(subdirs) - 1:
-                        mid_offset = max(1, int(round(gap_frames / 2)))
-                        mid_frame = sf + dur + mid_offset
-                        create_grid_mid_pose(
-                            context,
-                            mid_frame,
-                            base_name=f"{base_name}_MidPose",
-                        )
                     next_start = max(next_start, sf + dur + gap_frames)
             if not created:
                 self.report({"ERROR"}, "No CSV/TSV files found in subfolders")
