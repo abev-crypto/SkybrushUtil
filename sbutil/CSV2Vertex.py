@@ -2,6 +2,7 @@ import bpy
 from bpy.props import BoolProperty, CollectionProperty, IntProperty, StringProperty
 from bpy.types import Operator, Panel, PropertyGroup, UIList
 import csv, os, re, math
+from mathutils import Vector
 
 from sbutil import csv_vat_gn
 from sbutil.light_effects import OUTPUT_VERTEX_COLOR
@@ -188,7 +189,22 @@ def _create_grid_positions(count, spacing=1.0):
     return positions
 
 
-def create_grid_mid_pose(context, frame_start, base_name="MidPose", spacing=1.0):
+def _world_bounds(obj):
+    if obj is None:
+        return None
+    coords = [obj.matrix_world @ Vector(corner) for corner in obj.bound_box]
+    min_v = Vector((min(c.x for c in coords), min(c.y for c in coords), min(c.z for c in coords)))
+    max_v = Vector((max(c.x for c in coords), max(c.y for c in coords), max(c.z for c in coords)))
+    return min_v, max_v
+
+
+def create_grid_mid_pose(
+    context,
+    frame_start,
+    base_name="MidPose",
+    spacing=1.0,
+    reference_obj=None,
+):
     """Create and add a grid-formation storyboard entry at ``frame_start``.
 
     The grid will have as many vertices as there are drone objects in the
@@ -201,13 +217,32 @@ def create_grid_mid_pose(context, frame_start, base_name="MidPose", spacing=1.0)
     if drone_count == 0:
         return None
 
-    positions = _create_grid_positions(drone_count, spacing=spacing)
+    ref_spacing = spacing
+    ref_center = Vector((0.0, 0.0, 0.0))
+    z_offset = spacing
+    bounds = _world_bounds(reference_obj)
+    if bounds:
+        min_v, max_v = bounds
+        ref_center = (min_v + max_v) * 0.5
+        dims = max_v - min_v
+        max_dim = max(dims.x, dims.y, dims.z)
+        side = max(1, math.ceil(math.sqrt(drone_count)))
+        if side > 1 and max_dim > 0:
+            ref_spacing = max_dim / (side - 1)
+        elif max_dim > 0:
+            ref_spacing = max_dim
+        z_offset = dims.z * 0.5 if dims.z > 0 else max_dim * 0.25
+
+    positions = _create_grid_positions(drone_count, spacing=ref_spacing)
     mesh = bpy.data.meshes.new(f"{base_name}_mesh")
     mesh.from_pydata(positions, [], [])
     mesh.update()
 
     obj = bpy.data.objects.new(base_name, mesh)
     bpy.context.scene.collection.objects.link(obj)
+
+    obj.rotation_euler[0] = math.radians(90)
+    obj.location = ref_center + Vector((0.0, 0.0, z_offset))
 
     vg = obj.vertex_groups.new(name="Drones")
     vg.add(range(len(mesh.vertices)), 1.0, "REPLACE")
@@ -552,6 +587,7 @@ class CSVVA_OT_Import(Operator):
                             context,
                             mid_frame,
                             base_name=f"{base_name}_MidPose",
+                            reference_obj=obj,
                         )
 
                     next_start = max(next_start, sf + dur + gap_frames)
@@ -665,11 +701,11 @@ class CSVVA_OT_Preview(Operator):
 
             frame_mismatch = False
             checked = False
+            display_duration = duration
             if existing_entry:
-                frame_mismatch = (
-                    existing_entry.frame_start != start_frame
-                    or existing_entry.duration != duration
-                )
+                start_frame = existing_entry.frame_start
+                frame_mismatch = existing_entry.duration != duration
+                display_duration = existing_entry.duration
                 checked = frame_mismatch
             else:
                 checked = True
@@ -678,13 +714,13 @@ class CSVVA_OT_Preview(Operator):
             item.name = base_name
             item.folder = path
             item.start_frame = start_frame
-            item.duration = duration
+            item.duration = display_duration
             item.checked = checked
             item.exists = existing_entry is not None
             item.frame_mismatch = frame_mismatch
             created += 1
 
-            next_start = max(next_start, start_frame + duration + gap_frames)
+            next_start = max(next_start, start_frame + display_duration + gap_frames)
 
         if not created:
             self.report({"ERROR"}, "No valid CSV folders found")
