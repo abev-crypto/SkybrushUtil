@@ -1,7 +1,7 @@
 bl_info = {
     "name": "SkyBrushUtil",
     "author": "ABEYUYA",
-    "version": (2, 3, 1),
+    "version": (3, 0, 0),
     "blender": (4, 3, 2),
     "location": "3D View > Sidebar > SBUtil",
     "description": "SkybrushTransfarUtil",
