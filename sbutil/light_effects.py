@@ -148,6 +148,10 @@ def _copy_patched_light_effect_properties(source, target) -> None:
     """Copy add-on specific light effect properties from ``source`` to ``target``."""
 
     property_names = (
+        "cat_frame_offset",
+        "cat_speed",
+        "cat_texture_index",
+        "cat_texture_split",
         "loop_count",
         "loop_method",
         "color_function_text",
@@ -2217,6 +2221,31 @@ class PatchedLightEffect(PropertyGroup):
         ],
         default="COLOR_RAMP",
     )
+    cat_frame_offset = IntProperty(
+        name="CAT Offset",
+        description="Frame offset applied when sampling CAT textures",
+        default=0,
+    )
+    cat_speed = FloatProperty(
+        name="CAT Speed",
+        description="Playback speed multiplier for CAT textures",
+        default=1.0,
+        soft_min=0.0,
+    )
+    cat_texture_split = IntProperty(
+        name="Texture Split",
+        description="Number of horizontal segments in the CAT texture",
+        default=1,
+        min=1,
+    )
+    cat_texture_index = IntProperty(
+        name="Texture Index",
+        description=(
+            "Index of the texture segment to play when the texture is split"
+        ),
+        default=0,
+        min=0,
+    )
     loop_count = IntProperty(name="Loop Count", default=0, min=0)
     loop_method = EnumProperty(
         name="Loop Method",
@@ -2825,9 +2854,20 @@ class PatchedLightEffect(PropertyGroup):
                 cat_width = 0
                 cat_height = 0
                 if color_image is not None:
-                    
+
                     cat_width, cat_height = color_image.size
                     cat_pixels = self.get_image_pixels()
+                    segment_count = max(int(getattr(self, "cat_texture_split", 1)), 1)
+                    segment_index = max(
+                        min(int(getattr(self, "cat_texture_index", 0)), segment_count - 1),
+                        0,
+                    )
+                    segment_width = max((cat_width + segment_count - 1) // segment_count, 1)
+                    segment_start = min(segment_index * segment_width, max(cat_width - 1, 0))
+                    segment_width = min(segment_width, cat_width - segment_start) or 1
+                    cat_offset = float(getattr(self, "cat_frame_offset", 0) or 0)
+                    cat_speed = max(float(getattr(self, "cat_speed", 1.0) or 0.0), 0.0)
+                    denom = max(self.duration - 1, 1)
                     for index, position in enumerate(positions):
                         if cat_height == 1:
                             y = 0
@@ -2840,10 +2880,16 @@ class PatchedLightEffect(PropertyGroup):
                                 mapped_index = index
                             y = max(min(int(mapped_index), cat_height - 1), 0)
                         frame_offset = effective_frame - self.frame_start
-                        clamped_offset = max(min(int(frame_offset), self.duration - 1), 0)
-                        denom = max(self.duration - 1, 1)
-                        x = int((cat_width - 1) * clamped_offset / denom)
-                        offset = (y * cat_width + x) * 4
+                        progress = (max(min(frame_offset, self.duration - 1), 0)) / denom
+                        base_position = (
+                            (segment_width - 1) * progress if segment_width > 1 else 0.0
+                        )
+                        adjusted_position = base_position * cat_speed + cat_offset
+                        wrapped_position = (
+                            adjusted_position % segment_width if segment_width > 0 else 0.0
+                        )
+                        x = int(segment_start + wrapped_position)
+                        offset = (y * cat_width + min(x, cat_width - 1)) * 4
                         finalized_color(position, l2srgb(cat_pixels[offset : offset + 4]), colors[index])
                 return
             elif self.type == "FUNCTION":
@@ -5798,6 +5844,11 @@ class PatchedLightEffectsPanel(Panel):  # pragma: no cover - Blender UI code
                 col.prop(entry, "convert_srgb")
             elif entry.type == "CAT":
                 col.prop(entry, "convert_srgb")
+                col.prop(entry, "cat_frame_offset")
+                col.prop(entry, "cat_speed")
+                row_cat_tex = col.row(align=True)
+                row_cat_tex.prop(entry, "cat_texture_split")
+                row_cat_tex.prop(entry, "cat_texture_index")
             if (
                 entry.type == "IMAGE"
                 and output_type_supports_mapping_mode(entry.output_y)
