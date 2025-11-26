@@ -4673,7 +4673,7 @@ class CreateBoundingBoxMeshOperator(bpy.types.Operator):  # pragma: no cover - B
                 scene.collection.children.link(collection)
             except RuntimeError:
                 pass
-        elif collection not in scene.collection.children:
+        elif not any(child is collection for child in scene.collection.children):
             try:
                 scene.collection.children.link(collection)
             except RuntimeError:

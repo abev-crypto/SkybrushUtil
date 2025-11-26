@@ -538,7 +538,7 @@ class DRONE_OT_ApplyProximityLimit(Operator):
 
         start_frame = max(curr_frame, scene.frame_start)
         if previous_entry:
-            start_frame = max(int(previous_entry.frame_start), int(scene.frame_start))
+            start_frame = frame_end(previous_entry)
 
         end_frame = int(scene.frame_end)
         if next_entry:
@@ -581,20 +581,44 @@ class DRONE_OT_ApplyProximityLimit(Operator):
                     const.target = obj2
                     const.distance = threshold
                     start, end = start_frame, end_frame
-                    if end - start >= 2:
+                    frame_values: list[tuple[int, float]] = []
+                    span = end - start
+                    if span >= 2:
                         pre_start = start - 1
                         if pre_start >= scene.frame_start:
-                            const.influence = 0.0
-                            const.keyframe_insert('influence', frame=pre_start)
-                        const.influence = 1.0
-                        const.keyframe_insert('influence', frame=start)
-                        const.keyframe_insert('influence', frame=end - 1)
-                        const.influence = 0.0
-                        const.keyframe_insert('influence', frame=end)
+                            frame_values.append((pre_start, 0.0))
+                        frame_values.append((start, 1.0))
+                        frame_values.append((end - 1, 1.0))
+                        frame_values.append((end, 0.0))
                     else:
-                        const.influence = 1.0
-                        const.keyframe_insert('influence', frame=start)
-                        const.keyframe_insert('influence', frame=end)
+                        frame_values.append((start, 1.0))
+                        frame_values.append((end, 0.0))
+
+                    cons_fcurve = None
+                    anim = getattr(obj1, "animation_data", None)
+                    if anim and anim.action:
+                        try:
+                            cons_fcurve = anim.action.fcurves.find(
+                                f'constraints["{const.name}"].influence'
+                            )
+                        except Exception:
+                            cons_fcurve = None
+
+                    for frame, value in frame_values:
+                        const.influence = value
+                        const.keyframe_insert('influence', frame=frame)
+
+                    if cons_fcurve is not None:
+                        allowed_frames = [float(frame) for frame, _val in frame_values]
+                        indices_to_remove = [
+                            idx
+                            for idx, key in enumerate(cons_fcurve.keyframe_points)
+                            if not any(abs(key.co.x - allowed) <= 1e-3 for allowed in allowed_frames)
+                        ]
+                        for idx in reversed(indices_to_remove):
+                            key = cons_fcurve.keyframe_points[idx]
+                            cons_fcurve.keyframe_points.remove(key)
+                        cons_fcurve.update()
 
         self.report({'INFO'}, f"Applied proximity constraints to {pair_count} pairs")
         return {'FINISHED'}
