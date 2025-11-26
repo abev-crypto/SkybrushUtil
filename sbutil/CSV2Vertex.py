@@ -805,11 +805,6 @@ class CSVVA_OT_Update(Operator):
             self.report({"ERROR"}, "Nothing was updated")
             return {"CANCELLED"}
 
-        try:
-            bpy.ops.skybrush.recalculate_transitions(scope="ALL")
-        except Exception:
-            pass
-
         current_frame = context.scene.frame_current
         for key_entries, start_frame in key_data_collection:
             context.scene.frame_set(start_frame)
@@ -819,7 +814,10 @@ class CSVVA_OT_Update(Operator):
             )
         context.scene.frame_set(current_frame)
 
-        self.report({"INFO"}, f"Updated {processed} formation(s)")
+        self.report(
+            {"INFO"},
+            f"Updated {processed} formation(s). Recalculate transitions manually if needed.",
+        )
         return {"FINISHED"}
 
 class CSVVA_PT_UI(Panel):
