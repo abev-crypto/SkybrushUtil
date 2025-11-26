@@ -19,6 +19,7 @@ from sbstudio.plugin.operators import RecalculateTransitionsOperator
 from sbstudio.plugin.operators.base import StoryboardOperator
 from sbutil import formation_patch
 from sbutil import light_effects as light_effects_patch
+from sbutil import light_effects_result_patch
 from sbutil import recalculate_transitions_patch
 from sbutil import CSV2Vertex
 from sbutil import reflow_vertex
@@ -1747,6 +1748,7 @@ def try_patch():
         light_effects_patch.patch_light_effect_collection()
         light_effects_patch.patch_light_effect_class()
         light_effects_patch.patch_light_effects_panel()
+        light_effects_result_patch.patch_light_effect_results()
         patch_safety_check_panel()
         print("patch success!")
     except Exception as e:
@@ -1774,6 +1776,7 @@ def _restore_originals():
         light_effects_patch.unpatch_light_effect_collection()
         light_effects_patch.unpatch_light_effects_panel()
         light_effects_patch.unpatch_light_effect_class()
+        light_effects_result_patch.unpatch_light_effect_results()
         unpatch_safety_check_panel()
     except:
         return
