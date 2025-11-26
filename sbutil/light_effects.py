@@ -2807,6 +2807,21 @@ class PatchedLightEffect(PropertyGroup):
             color_ramp = self.color_ramp
             color_image = self.color_image
             condition = self._get_spatial_effect_predicate()
+
+            def _prepare_output_array(
+                outputs: Optional[list[Optional[float]]], common_value: Optional[float]
+            ) -> tuple[np.ndarray, np.ndarray]:
+                if common_value is not None:
+                    array = np.full(num_positions, common_value, dtype=float)
+                else:
+                    array = np.full(num_positions, np.nan, dtype=float)
+                    if outputs is not None:
+                        for idx, value in enumerate(outputs):
+                            if value is None:
+                                continue
+                            array[idx] = float(value)
+                return array, np.isfinite(array)
+
             def finalized_color(position, new_color, color):
                 new_color[3] *= max(min(self._evaluate_influence_at(position, effective_frame, condition),1.0,),0.0,)
                 blend_in_place(new_color, color, BlendMode[self.blend_mode])
@@ -2969,28 +2984,68 @@ class PatchedLightEffect(PropertyGroup):
                 outputs_y, common_output_y = get_output_based_on_output_type(
                     self.output_y, self.output_mapping_mode_y, self.output_function_y
                 )
+
+            outputs_x_arr, valid_x_mask = _prepare_output_array(outputs_x, common_output_x)
+            outputs_y_arr: Optional[np.ndarray] = None
+            valid_y_mask: Optional[np.ndarray] = None
+            if color_image is not None:
+                outputs_y_arr, valid_y_mask = _prepare_output_array(
+                    outputs_y, common_output_y
+                )
+
+            if self.randomness != 0:
+                random_offsets_x = np.fromiter(
+                    (random_seq.get_float(i) for i in range(num_positions)),
+                    float,
+                    count=num_positions,
+                )
+                outputs_x_arr = (outputs_x_arr + (random_offsets_x - 0.5) * self.randomness) % 1.0
+                valid_x_mask = np.isfinite(outputs_x_arr)
+                if color_image is not None and outputs_y_arr is not None:
+                    random_offsets_y = np.fromiter(
+                        (random_seq.get_float(i) for i in range(num_positions)),
+                        float,
+                        count=num_positions,
+                    )
+                    outputs_y_arr = (outputs_y_arr + (random_offsets_y - 0.5) * self.randomness) % 1.0
+                    valid_y_mask = np.isfinite(outputs_y_arr)
+
+            precomputed_colors: dict[int, Sequence[float]] = {}
+            if color_image is not None and outputs_y_arr is not None and valid_y_mask is not None:
+                width, height = color_image.size
+                pixels = np.asarray(self.get_image_pixels(), dtype=float).reshape(-1, 4)
+                valid_indices = np.nonzero(valid_x_mask & valid_y_mask)[0]
+                if valid_indices.size:
+                    x_indices = np.clip(
+                        (outputs_x_arr[valid_indices] * (width - 1)).astype(int),
+                        0,
+                        width - 1,
+                    )
+                    y_indices = np.clip(
+                        (outputs_y_arr[valid_indices] * (height - 1)).astype(int),
+                        0,
+                        height - 1,
+                    )
+                    offsets = y_indices * width + x_indices
+                    sampled = pixels[offsets]
+                    convert = getattr(self, "convert_srgb", False)
+                    for idx, color in zip(valid_indices, sampled):
+                        color_list = list(color)
+                        if convert:
+                            for c_idx in range(3):
+                                color_list[c_idx] = linear_to_srgb(color_list[c_idx])
+                        precomputed_colors[int(idx)] = color_list
+
             for index, position in enumerate(positions):
-                if common_output_x is not None:
-                    output_x = common_output_x
-                else:
-                    if outputs_x[index] is None:
-                        continue
-                    output_x = outputs_x[index]
+                if not valid_x_mask[index]:
+                    continue
+                output_x = float(outputs_x_arr[index])
                 if color_image is not None:
-                    if common_output_y is not None:
-                        output_y = common_output_y
-                    else:
-                        assert outputs_y is not None
-                        if outputs_y[index] is None:
-                            continue
-                        output_y = outputs_y[index]
-                    assert isinstance(output_y, float)
-                if self.randomness != 0:
-                    offset_x = (random_seq.get_float(index) - 0.5) * self.randomness
-                    output_x = (offset_x + output_x) % 1.0
-                    if color_image is not None:
-                        offset_y = (random_seq.get_float(index) - 0.5) * self.randomness
-                        output_y = (offset_y + output_y) % 1.0
+                    assert outputs_y_arr is not None
+                    assert valid_y_mask is not None
+                    if not valid_y_mask[index]:
+                        continue
+                    output_y = float(outputs_y_arr[index])
                 if self.type == "FUNCTION":
                     if getattr(self, "color_function_text", None):
                         ctx = st.get("module", ModuleType("_dummy")).__dict__
@@ -3024,15 +3079,10 @@ class PatchedLightEffect(PropertyGroup):
                         except Exception as exc:
                             raise RuntimeError("ERROR_COLOR_FUNCTION") from exc
                 elif color_image is not None:
-                    width, height = color_image.size
-                    pixels = self.get_image_pixels()
-                    x = int((width - 1) * output_x)
-                    y = int((height - 1) * output_y)
-                    offset = (y * width + x) * 4
-                    new_color[:] = pixels[offset : offset + 4]
-                    if getattr(self, "convert_srgb", False):
-                        for idx in range(3):
-                            new_color[idx] = linear_to_srgb(new_color[idx])
+                    precomputed_color = precomputed_colors.get(index)
+                    if precomputed_color is None:
+                        continue
+                    new_color[:] = precomputed_color
                 elif color_ramp:
                     loops = max(self.loop_count, 1)
                     if loops > 1 or self.loop_method != "FORWARD":
