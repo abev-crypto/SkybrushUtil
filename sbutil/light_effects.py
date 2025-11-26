@@ -142,6 +142,7 @@ _pending_dynamic_array_updates: dict[
 _pending_dynamic_array_creations: dict[int, set[str]] = {}
 _pending_dynamic_color_ramp_updates: dict[int, list] = {}
 _pending_dynamic_color_ramp_creations: dict[int, set[str]] = {}
+_light_effect_enable_backups: dict[int, dict[int, bool]] = {}
 
 
 def _copy_patched_light_effect_properties(source, target) -> None:
@@ -5057,6 +5058,101 @@ class ClearLightEffectPixelCacheOperator(bpy.types.Operator):  # pragma: no cove
         return {'FINISHED'}
 
 
+class DisableAllLightEffectsOperator(bpy.types.Operator):  # pragma: no cover - Blender UI
+    bl_idname = "skybrush.disable_all_light_effects"
+    bl_label = "Disable All"
+    bl_description = "Disable every light effect while remembering their previous state"
+
+    @classmethod
+    def poll(cls, context):
+        light_effects = getattr(getattr(context.scene, "skybrush", None), "light_effects", None)
+        if not light_effects:
+            return False
+
+        entries = getattr(light_effects, "entries", None)
+        if not entries:
+            return False
+
+        return any(hasattr(entry, "enabled") for entry in entries)
+
+    def execute(self, context):
+        light_effects = context.scene.skybrush.light_effects
+        entries = list(getattr(light_effects, "entries", []))
+        if not entries:
+            self.report({'ERROR'}, "No light effects are available")
+            return {'CANCELLED'}
+
+        supported_entries = [entry for entry in entries if hasattr(entry, "enabled")]
+        if not supported_entries:
+            self.report({'ERROR'}, "Light effects do not support an enabled flag")
+            return {'CANCELLED'}
+
+        _light_effect_enable_backups[light_effects.as_pointer()] = {
+            entry.as_pointer(): bool(getattr(entry, "enabled", True))
+            for entry in supported_entries
+        }
+
+        for entry in supported_entries:
+            try:
+                entry.enabled = False
+            except Exception:
+                continue
+
+        if getattr(context, "view_layer", None) is not None:
+            context.view_layer.update()
+
+        self.report({'INFO'}, "Disabled all light effects")
+        return {'FINISHED'}
+
+
+class RestoreLightEffectEnableStatesOperator(bpy.types.Operator):  # pragma: no cover - Blender UI
+    bl_idname = "skybrush.restore_light_effect_enable_states"
+    bl_label = "Restore Previous States"
+    bl_description = "Restore light effects to the enablement captured before disabling them"
+
+    @classmethod
+    def poll(cls, context):
+        light_effects = getattr(getattr(context.scene, "skybrush", None), "light_effects", None)
+        if not light_effects:
+            return False
+
+        backup = _light_effect_enable_backups.get(light_effects.as_pointer())
+        return bool(backup)
+
+    def execute(self, context):
+        light_effects = context.scene.skybrush.light_effects
+        backup = _light_effect_enable_backups.get(light_effects.as_pointer())
+        if not backup:
+            self.report({'ERROR'}, "No saved light effect states to restore")
+            return {'CANCELLED'}
+
+        entries = list(getattr(light_effects, "entries", []))
+        restored = False
+        for entry in entries:
+            if not hasattr(entry, "enabled"):
+                continue
+            state = backup.get(entry.as_pointer())
+            if state is None:
+                continue
+            try:
+                entry.enabled = state
+                restored = True
+            except Exception:
+                continue
+
+        _light_effect_enable_backups.pop(light_effects.as_pointer(), None)
+
+        if getattr(context, "view_layer", None) is not None:
+            context.view_layer.update()
+
+        if not restored:
+            self.report({'WARNING'}, "No light effect states were restored")
+            return {'CANCELLED'}
+
+        self.report({'INFO'}, "Restored light effect enabled states")
+        return {'FINISHED'}
+
+
 class ReloadLightEffectImageOperator(bpy.types.Operator):  # pragma: no cover - Blender UI
     bl_idname = "skybrush.reload_light_effect_image"
     bl_label = "Reload Light Effect Image"
@@ -5637,9 +5733,18 @@ class PatchedLightEffectsPanel(Panel):  # pragma: no cover - Blender UI code
             MoveLightEffectDownOperator.bl_idname, icon="TRIA_DOWN", text=""
         )
 
-        layout.operator(
+        row_tools = layout.row(align=True)
+        row_tools.operator(
             ClearLightEffectPixelCacheOperator.bl_idname,
             icon="FILE_REFRESH",
+        )
+        row_tools.operator(
+            DisableAllLightEffectsOperator.bl_idname,
+            icon="HIDE_ON",
+        )
+        row_tools.operator(
+            RestoreLightEffectEnableStatesOperator.bl_idname,
+            icon="RECOVER_LAST",
         )
 
         entry = light_effects.active_entry
@@ -5908,6 +6013,7 @@ def register():  # pragma: no cover - executed in Blender
     _pending_dynamic_array_creations.clear()
     _pending_dynamic_color_ramp_updates.clear()
     _pending_dynamic_color_ramp_creations.clear()
+    _light_effect_enable_backups.clear()
 
     bpy.utils.register_class(SequenceDelayEntry)
     bpy.utils.register_class(DynamicArrayValue)
@@ -5935,6 +6041,8 @@ def register():  # pragma: no cover - executed in Blender
     bpy.utils.register_class(BakeColorRampSplitOperator)
     bpy.utils.register_class(MergeSplitLightEffectsOperator)
     bpy.utils.register_class(ClearLightEffectPixelCacheOperator)
+    bpy.utils.register_class(DisableAllLightEffectsOperator)
+    bpy.utils.register_class(RestoreLightEffectEnableStatesOperator)
     bpy.utils.register_class(ReloadLightEffectImageOperator)
     if _ensure_light_effects_initialized not in bpy.app.handlers.depsgraph_update_pre:
         bpy.app.handlers.depsgraph_update_pre.append(_ensure_light_effects_initialized)
@@ -5949,6 +6057,8 @@ def unregister():  # pragma: no cover - executed in Blender
     if _ensure_light_effects_initialized in bpy.app.handlers.depsgraph_update_pre:
         bpy.app.handlers.depsgraph_update_pre.remove(_ensure_light_effects_initialized)
     bpy.utils.unregister_class(ReloadLightEffectImageOperator)
+    bpy.utils.unregister_class(RestoreLightEffectEnableStatesOperator)
+    bpy.utils.unregister_class(DisableAllLightEffectsOperator)
     bpy.utils.unregister_class(ClearLightEffectPixelCacheOperator)
     bpy.utils.unregister_class(MergeSplitLightEffectsOperator)
     bpy.utils.unregister_class(BakeColorRampSplitOperator)
@@ -5981,4 +6091,5 @@ def unregister():  # pragma: no cover - executed in Blender
     _pending_dynamic_array_creations.clear()
     _pending_dynamic_color_ramp_updates.clear()
     _pending_dynamic_color_ramp_creations.clear()
+    _light_effect_enable_backups.clear()
 
