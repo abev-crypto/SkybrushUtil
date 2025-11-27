@@ -6,31 +6,29 @@ when the Skybrush plug-in is available, keeping the rest of the add-on usable
 on its own.
 """
 
-from __future__ import annotations
 
-try:  # pragma: no cover - Blender dependency
-    import bpy
-except Exception:  # pragma: no cover - allows import without Blender
-    bpy = None
+import bpy
+from bpy.types import Image
 
-try:  # pragma: no cover - Skybrush dependency
-    from sbstudio.plugin import colors as _colors_mod
-    from sbstudio.plugin.constants import Collections
-    from sbstudio.plugin.tasks import light_effects as _light_effects_mod
-    from sbstudio.plugin.utils.evaluator import get_position_of_object
-    from sbstudio.plugin.utils.image import find_image_by_name
-except Exception:  # pragma: no cover - optional dependency
-    _colors_mod = None
-    _light_effects_mod = None
-    Collections = None
-    get_position_of_object = None
-    find_image_by_name = None
+from sbstudio.model import color as _colors_mod
+from sbstudio.plugin.constants import Collections
+from sbstudio.plugin.tasks import light_effects as _light_effects_mod
+from sbstudio.plugin.utils.evaluator import get_position_of_object
 
-try:  # pragma: no cover - typing helpers
-    from sbstudio.model.types import MutableRGBAColor, RGBAColor
-except Exception:  # pragma: no cover - optional dependency
-    MutableRGBAColor = list  # type: ignore
-    RGBAColor = tuple  # type: ignore
+from sbstudio.model.types import MutableRGBAColor, RGBAColor
+
+def find_image_by_name(name: str) -> Image | None:
+    """Searches for an image in bpy.data.images by its name.
+
+    Args:
+        name: The name of the image to find.
+
+    Returns:
+        the image object, or None if not found.
+    """
+    for img in bpy.data.images:
+        if img.name == name:
+            return img
 
 __all__ = (
     "patch_light_effect_results",
@@ -54,9 +52,6 @@ def _patched_get_color_of_drone(drone) -> RGBAColor:
 
 
 def _get_color_from_result_image(drone) -> RGBAColor | None:
-    if bpy is None or Collections is None:
-        return None
-
     scene = bpy.context.scene
     image = bpy.data.images.get("Light effects result")
     if image is None:
@@ -84,9 +79,6 @@ def _get_color_from_result_image(drone) -> RGBAColor | None:
 
 
 def _patched_update_light_effects(scene, depsgraph):
-    if _light_effects_mod is None or bpy is None:
-        return
-
     _suspension_counter = getattr(_light_effects_mod, "_suspension_counter", 0)
     if _suspension_counter > 0:
         return
@@ -175,12 +167,6 @@ def _get_base_colors_for_frame(
 
 
 def _get_or_create_result_image(width: int, height: int, render_range: tuple[int, int]):
-    if bpy is None:
-        return None
-
-    if _light_effects_mod is None:
-        return None
-
     result_image = getattr(_light_effects_mod, "_result_image", None)
     stored_range = getattr(_light_effects_mod, "_render_range", None)
 
@@ -221,16 +207,13 @@ def _write_column(image, column: int, colors: list[MutableRGBAColor]) -> None:
 def patch_light_effect_results():
     """Apply the monkey patches when Skybrush is available."""
 
-    if _colors_mod is None or _light_effects_mod is None:
-        return
-
     if _ORIGINALS:
         return
 
-    _ORIGINALS["get_color_of_drone"] = _colors_mod.get_color_of_drone
+    #_ORIGINALS["get_color_of_drone"] = _colors_mod.get_color_of_drone
     _ORIGINALS["update_light_effects"] = _light_effects_mod.update_light_effects
 
-    _colors_mod.get_color_of_drone = _patched_get_color_of_drone
+    #_colors_mod.get_color_of_drone = _patched_get_color_of_drone
 
     _light_effects_mod._render_range = None
     _light_effects_mod._result_image = None
@@ -245,7 +228,7 @@ def patch_light_effect_results():
 def unpatch_light_effect_results():
     """Revert the monkey patches if they were applied."""
 
-    if not _ORIGINALS or _colors_mod is None or _light_effects_mod is None:
+    if not _ORIGINALS:
         return
 
     _colors_mod.get_color_of_drone = _ORIGINALS.get(  # type: ignore[assignment]

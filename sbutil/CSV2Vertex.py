@@ -371,20 +371,14 @@ def _create_light_effect_for_storyboard(
 
     if color_image is not None and hasattr(le_entry, "texture"):
         tex = getattr(le_entry, "texture", None)
-        try:
-            if tex is None:
-                tex = bpy.data.textures.new(
-                    name=f"{storyboard_entry.name}_ColorTex", type="IMAGE"
-                )
-                le_entry.texture = tex
-        except Exception:
-            tex = getattr(le_entry, "texture", None)
+        if tex is None:
+            tex = bpy.data.textures.new(
+                name=f"{storyboard_entry.name}_ColorTex", type="IMAGE"
+            )
+            le_entry.texture = tex
 
         if tex is not None:
-            try:
-                tex.image = color_image
-            except Exception:
-                pass
+            tex.image = color_image
 
     return le_entry
 
