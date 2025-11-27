@@ -51,7 +51,7 @@ from sbstudio.plugin.utils.color_ramp import update_color_ramp_from
 from sbstudio.plugin.utils.evaluator import get_position_of_object
 from sbstudio.plugin.utils.sampling import each_frame_in
 from sbstudio.plugin.utils.image import convert_from_srgb_to_linear
-from sbstudio.utils import constant, distance_sq_of, load_module, negate
+from sbstudio.utils import distance_sq_of, load_module
 from bpy.path import abspath as bpy_abspath
 from types import ModuleType
 from contextlib import contextmanager
@@ -164,6 +164,7 @@ def _copy_patched_light_effect_properties(source, target) -> None:
         "sequence_duration",
         "sequence_delay",
         "sequence_manual_delay",
+        "baked_target_indices",
     )
 
     for name in property_names:
@@ -2330,6 +2331,24 @@ class PatchedLightEffect(PropertyGroup):
         description="Storage for dynamic color ramp parameters",
         type=DynamicColorRamp,
     )
+    baked_target_indices = StringProperty(
+        name="Baked Target Indices",
+        description="Serialized list of drone indices for baked spatial targets",
+        default="",
+    )
+
+    def get_baked_target_indices(self) -> list[int]:
+        try:
+            data = json.loads(self.baked_target_indices or "[]")
+            if isinstance(data, list):
+                return [int(value) for value in data]
+        except Exception:
+            pass
+        return []
+
+    def set_baked_target_indices(self, indices: Iterable[int]) -> None:
+        unique_indices = sorted({int(value) for value in indices if value is not None})
+        self.baked_target_indices = json.dumps(unique_indices)
 
     @property
     def color_image(self) -> Optional[Image]:
@@ -2564,19 +2583,47 @@ class PatchedLightEffect(PropertyGroup):
         ensure_schema(self, schema)
         draw_dynamic(self, layout, schema)
 
-    def _get_spatial_effect_predicate(self):
-        if self.target == "COLLECTION" and getattr(self, "target_collection", None):
+    def _get_spatial_effect_predicate(self, index: Optional[int] = None):
+        predicate: Optional[Callable[[Coordinate3D, Optional[int]], bool]] = None
+
+        if self.target == "BAKED_MAP":
+            baked_indices = set(self.get_baked_target_indices())
+
+            def predicate(_pos, idx=None):
+                return idx is not None and idx in baked_indices
+
+        elif self.target == "COLLECTION" and getattr(self, "target_collection", None):
             positions = {
                 tuple(get_position_of_object(obj))
                 for obj in self.target_collection.objects
             }
-            if self.invert_target:
-                return lambda pos: tuple(pos) not in positions
-            return lambda pos: tuple(pos) in positions
-        original = getattr(LightEffect, "_original_get_spatial_effect_predicate", None)
-        if original is not None:
-            return original(self)
-        return constant(True)
+
+            def predicate(pos, _idx=None):
+                return tuple(pos) in positions
+
+        if predicate is None:
+            original = getattr(LightEffect, "_original_get_spatial_effect_predicate", None)
+            if original is not None:
+                base_predicate = original(self)
+                if base_predicate is not None:
+
+                    def predicate(pos, _idx=None, base_predicate=base_predicate):
+                        return base_predicate(pos)
+
+        if predicate is None:
+            predicate = lambda _pos, _idx=None: True
+
+        if self.invert_target:
+
+            def inverted(pos, idx=None, predicate=predicate):
+                return not predicate(pos, idx)
+
+            predicate = inverted
+
+        if index is not None:
+            return lambda pos, idx=index, predicate=predicate: predicate(pos, idx)
+
+        return predicate
 
     def apply_on_colors(
         self,
@@ -2822,8 +2869,13 @@ class PatchedLightEffect(PropertyGroup):
                             array[idx] = float(value)
                 return array, np.isfinite(array)
 
-            def finalized_color(position, new_color, color):
-                new_color[3] *= max(min(self._evaluate_influence_at(position, effective_frame, condition),1.0,),0.0,)
+            def finalized_color(index, position, new_color, color):
+                predicate = condition
+                if predicate is not None:
+                    predicate = partial(
+                        predicate, idx=_get_drone_number(mapping, index)
+                    )
+                new_color[3] *= max(min(self._evaluate_influence_at(position, effective_frame, predicate),1.0,),0.0,)
                 blend_in_place(new_color, color, BlendMode[self.blend_mode])
             def l2srgb(direct_color):
                 nc = []
@@ -2863,7 +2915,7 @@ class PatchedLightEffect(PropertyGroup):
                         )
                         vertex_colors[drone_index] = color_values
                 for index, position in enumerate(positions):
-                    finalized_color(position, l2srgb(vertex_colors[index]), colors[index])
+                    finalized_color(index, position, l2srgb(vertex_colors[index]), colors[index])
                 return
             elif self.type == "CAT":
                 cat_pixels: Optional[Sequence[float]] = None
@@ -2906,7 +2958,7 @@ class PatchedLightEffect(PropertyGroup):
                         )
                         x = int(segment_start + wrapped_position)
                         offset = (y * cat_width + min(x, cat_width - 1)) * 4
-                        finalized_color(position, l2srgb(cat_pixels[offset : offset + 4]), colors[index])
+                        finalized_color(index, position, l2srgb(cat_pixels[offset : offset + 4]), colors[index])
                 return
             elif self.type == "FUNCTION":
                 color_function_ref = self.color_function_ref
@@ -3101,7 +3153,7 @@ class PatchedLightEffect(PropertyGroup):
                     new_color[:] = color_ramp.evaluate(output_x)
                 else:
                     new_color[:] = (1.0, 1.0, 1.0, 1.0)
-                finalized_color(position, new_color, colors[index])
+                finalized_color(index, position, new_color, colors[index])
             
 
         if not self.sequence_mode:
@@ -3454,6 +3506,7 @@ def patch_light_effect_class():
             ("INSIDE_MESH", "Inside the mesh", "", 2),
             ("OUTSIDE_MESH", "Outside mesh", "", 3),
             ("COLLECTION", "Collection", "", 4),
+            ("BAKED_MAP", "Baked map", "", 5),
         ],
         default="ALL",
     )
@@ -3471,6 +3524,7 @@ def patch_light_effect_class():
     LightEffect.target_collection = PointerProperty(
         name="Collection", type=bpy.types.Collection
     )
+    LightEffect.baked_target_indices = PatchedLightEffect.baked_target_indices
     LightEffect._get_spatial_effect_predicate = (
         PatchedLightEffect._get_spatial_effect_predicate
     )
@@ -3499,6 +3553,9 @@ def patch_light_effect_class():
         LightEffect.formation_collection
     )
     LightEffect.__annotations__["target_collection"] = LightEffect.target_collection
+    LightEffect.__annotations__["baked_target_indices"] = (
+        LightEffect.baked_target_indices
+    )
     ensure_all_function_entries_initialized()
 
 def unpatch_light_effect_class():
@@ -3518,6 +3575,7 @@ def unpatch_light_effect_class():
         "sequence_delay",
         "sequence_manual_delay",
         "sequence_delays",
+        "baked_target_indices",
         "ensure_sequence_delay_entries",
         "get_sequence_meshes",
         "get_sequence_delays",
@@ -5350,6 +5408,62 @@ class ConvertCollectionToMeshOperator(bpy.types.Operator):  # pragma: no cover -
 
         return {'FINISHED'}
 
+
+class BakeSpatialTargetMapOperator(bpy.types.Operator):  # pragma: no cover - Blender UI
+    bl_idname = "skybrush.bake_spatial_target_map"
+    bl_label = "Bake Target Map"
+    bl_description = (
+        "Record drone indices that satisfy the current spatial target at the active frame"
+    )
+
+    @classmethod
+    def poll(cls, context):
+        entry = getattr(context.scene.skybrush.light_effects, "active_entry", None)
+        return entry is not None
+
+    def _gather_drones(self):
+        drones_collection = bpy.data.collections.get("Drones")
+        if drones_collection is None:
+            return []
+
+        drones = []
+        for obj in drones_collection.objects:
+            if _get_primary_material(obj) is not None:
+                drones.append(obj)
+        return drones
+
+    def execute(self, context):
+        entry = context.scene.skybrush.light_effects.active_entry
+        if entry is None:
+            self.report({'ERROR'}, "No active light effect entry")
+            return {'CANCELLED'}
+
+        drones = self._gather_drones()
+        if not drones:
+            self.report({'ERROR'}, "No objects found in the 'Drones' collection")
+            return {'CANCELLED'}
+
+        positions = [tuple(get_position_of_object(obj)) for obj in drones]
+        mapping = _build_formation_mapping(drones)
+        predicate = entry._get_spatial_effect_predicate()
+        if predicate is None:
+            predicate = lambda *_args, **_kwargs: True
+
+        baked_indices: list[int] = []
+        for idx, position in enumerate(positions):
+            drone_index = _get_drone_number(mapping, idx)
+            check_index = drone_index if drone_index is not None else idx
+            try:
+                matches = predicate(position, check_index)
+            except TypeError:
+                matches = predicate(position)
+            if matches:
+                baked_indices.append(check_index)
+
+        entry.set_baked_target_indices(baked_indices)
+        self.report({'INFO'}, f"Stored {len(baked_indices)} baked target indices")
+        return {'FINISHED'}
+
 def dyn_keys(pg):
     """Return dynamic ID property names for ``pg``."""
     # Ignore RNA slots and internal keys prefixed with ``_``
@@ -6018,6 +6132,15 @@ class PatchedLightEffectsPanel(Panel):  # pragma: no cover - Blender UI code
                 col.prop(entry, "uv_tiling_mode")
             col.prop(entry, "target")
             col.prop(entry, "invert_target")
+            if hasattr(entry, "baked_target_indices"):
+                row_bake = col.row(align=True)
+                row_bake.operator(
+                    BakeSpatialTargetMapOperator.bl_idname, text="Bake Target Map"
+                )
+                if entry.target == "BAKED_MAP":
+                    row_bake.label(
+                        text=f"Stored: {len(entry.get_baked_target_indices())}"
+                    )
             if entry.target == "COLLECTION":
                 row_target = col.row(align=True)
                 row_target.prop(entry, "target_collection")
@@ -6088,6 +6211,7 @@ def register():  # pragma: no cover - executed in Blender
     bpy.utils.register_class(ToggleUvMeshPreviewOperator)
     bpy.utils.register_class(CreateTargetCollectionFromSelectionOperator)
     bpy.utils.register_class(ConvertCollectionToMeshOperator)
+    bpy.utils.register_class(BakeSpatialTargetMapOperator)
     bpy.utils.register_class(BakeColorRampSplitOperator)
     bpy.utils.register_class(MergeSplitLightEffectsOperator)
     bpy.utils.register_class(ClearLightEffectPixelCacheOperator)
@@ -6113,6 +6237,7 @@ def unregister():  # pragma: no cover - executed in Blender
     bpy.utils.unregister_class(MergeSplitLightEffectsOperator)
     bpy.utils.unregister_class(BakeColorRampSplitOperator)
     bpy.utils.unregister_class(ConvertCollectionToMeshOperator)
+    bpy.utils.unregister_class(BakeSpatialTargetMapOperator)
     bpy.utils.unregister_class(CreateTargetCollectionFromSelectionOperator)
     bpy.utils.unregister_class(ToggleUvMeshPreviewOperator)
     bpy.utils.unregister_class(CreateBoundingBoxMeshOperator)
