@@ -6040,9 +6040,11 @@ class AddManualOutputEntryOperator(Operator):  # pragma: no cover - Blender UI
                     mapping = storyboard.get_mapping_at_frame(context.scene.frame_current)
                 except Exception:
                     mapping = None
-
-                if mapping is not None and 0 <= drone_index < len(mapping):
-                    mapped_drone_index = mapping[drone_index]
+                if mapping is not None:
+                    mapped_drone_index = next(
+                        (idx for idx, mapped in enumerate(mapping) if mapped == drone_index),
+                        None,
+                    )
                     if mapped_drone_index is not None:
                         drone_id = mapped_drone_index
 
