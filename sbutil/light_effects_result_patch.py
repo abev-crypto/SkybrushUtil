@@ -163,12 +163,14 @@ def _get_base_colors_for_frame(
             for row in range(height)
         ]
 
-    return [list(_colors_mod.get_color_of_drone(drone)) for drone in drones]
+    return [list(_patched_get_color_of_drone(drone)) for drone in drones]
 
+result_image: Image | None = None
+stored_range: tuple[int, int] | None = None
 
 def _get_or_create_result_image(width: int, height: int, render_range: tuple[int, int]):
-    result_image = getattr(_light_effects_mod, "_result_image", None)
-    stored_range = getattr(_light_effects_mod, "_render_range", None)
+    global result_image
+    global stored_range
 
     image = result_image
     if image is None or image.name not in bpy.data.images:
@@ -184,8 +186,8 @@ def _get_or_create_result_image(width: int, height: int, render_range: tuple[int
             bpy.data.images.remove(image)
         image = bpy.data.images.new(name="Light effects result", width=width, height=height)
 
-    _light_effects_mod._render_range = render_range
-    _light_effects_mod._result_image = image
+    result_image = render_range
+    stored_range = image
     return image
 
 
@@ -252,13 +254,6 @@ def patch_light_effect_results():
 
     #_colors_mod.get_color_of_drone = _patched_get_color_of_drone
 
-    _light_effects_mod._render_range = None
-    _light_effects_mod._result_image = None
-    _light_effects_mod.RESULT_IMAGE_NAME = "Light effects result"
-    _light_effects_mod._copy_previous_column = _copy_previous_column
-    _light_effects_mod._get_base_colors_for_frame = _get_base_colors_for_frame
-    _light_effects_mod._get_or_create_result_image = _get_or_create_result_image
-    _light_effects_mod._write_column = _write_column
     _light_effects_mod.update_light_effects = _patched_update_light_effects
     _reregister_update_light_effects()
 
@@ -275,8 +270,5 @@ def unpatch_light_effect_results():
     _light_effects_mod.update_light_effects = _ORIGINALS.get(
         "update_light_effects", _light_effects_mod.update_light_effects
     )
-
-    _light_effects_mod._render_range = None
-    _light_effects_mod._result_image = None
 
     _ORIGINALS.clear()
