@@ -578,48 +578,51 @@ class DRONE_OT_ApplyProximityLimit(Operator):
                     if not const or const.type != 'LIMIT_DISTANCE':
                         const = obj1.constraints.new('LIMIT_DISTANCE')
                         const.name = cname
-                        const.limit_mode = 'LIMITDIST_ONSURFACE'
+                    const.limit_mode = scene.proximity_limit_mode
                     const.target = obj2
                     const.distance = threshold
                     start, end = start_frame, end_frame
                     frame_values: list[tuple[int, float]] = []
                     span = end - start
-                    if span >= 2:
-                        pre_start = start - 1
-                        if pre_start >= scene.frame_start:
-                            frame_values.append((pre_start, 0.0))
-                        frame_values.append((start, 1.0))
-                        frame_values.append((end - 1, 1.0))
-                        frame_values.append((end, 0.0))
+                    if not scene.proximity_skip_influence_keys:
+                        if span >= 2:
+                            pre_start = start - 1
+                            if pre_start >= scene.frame_start:
+                                frame_values.append((pre_start, 0.0))
+                            frame_values.append((start, 1.0))
+                            frame_values.append((end - 1, 1.0))
+                            frame_values.append((end, 0.0))
+                        else:
+                            frame_values.append((start, 1.0))
+                            frame_values.append((end, 0.0))
+
+                        cons_fcurve = None
+                        anim = getattr(obj1, "animation_data", None)
+                        if anim and anim.action:
+                            try:
+                                cons_fcurve = anim.action.fcurves.find(
+                                    f'constraints["{const.name}"].influence'
+                                )
+                            except Exception:
+                                cons_fcurve = None
+
+                        for frame, value in frame_values:
+                            const.influence = value
+                            const.keyframe_insert('influence', frame=frame)
+
+                        if cons_fcurve is not None:
+                            allowed_frames = [float(frame) for frame, _val in frame_values]
+                            indices_to_remove = [
+                                idx
+                                for idx, key in enumerate(cons_fcurve.keyframe_points)
+                                if not any(abs(key.co.x - allowed) <= 1e-3 for allowed in allowed_frames)
+                            ]
+                            for idx in reversed(indices_to_remove):
+                                key = cons_fcurve.keyframe_points[idx]
+                                cons_fcurve.keyframe_points.remove(key)
+                            cons_fcurve.update()
                     else:
-                        frame_values.append((start, 1.0))
-                        frame_values.append((end, 0.0))
-
-                    cons_fcurve = None
-                    anim = getattr(obj1, "animation_data", None)
-                    if anim and anim.action:
-                        try:
-                            cons_fcurve = anim.action.fcurves.find(
-                                f'constraints["{const.name}"].influence'
-                            )
-                        except Exception:
-                            cons_fcurve = None
-
-                    for frame, value in frame_values:
-                        const.influence = value
-                        const.keyframe_insert('influence', frame=frame)
-
-                    if cons_fcurve is not None:
-                        allowed_frames = [float(frame) for frame, _val in frame_values]
-                        indices_to_remove = [
-                            idx
-                            for idx, key in enumerate(cons_fcurve.keyframe_points)
-                            if not any(abs(key.co.x - allowed) <= 1e-3 for allowed in allowed_frames)
-                        ]
-                        for idx in reversed(indices_to_remove):
-                            key = cons_fcurve.keyframe_points[idx]
-                            cons_fcurve.keyframe_points.remove(key)
-                        cons_fcurve.update()
+                        const.influence = 1.0
 
         self.report({'INFO'}, f"Applied proximity constraints to {pair_count} pairs")
         return {'FINISHED'}
@@ -1879,6 +1882,8 @@ class DRONE_PT_Utilities(Panel):
 
     def draw(self, context):
         layout = self.layout
+        layout.prop(context.scene, "proximity_limit_mode", text="Clamp Region")
+        layout.prop(context.scene, "proximity_skip_influence_keys")
         layout.operator(
             "drone.apply_proximity_limit", text="Apply Proximity Limit"
         )
@@ -1983,6 +1988,28 @@ def register():
         description="Run full proximity check when frame changes",
         default=False,
     )
+    bpy.types.Scene.proximity_limit_mode = bpy.props.EnumProperty(
+        name="Proximity Clamp Region",
+        description="Clamp region used by generated proximity Limit Distance constraints",
+        items=[
+            (
+                'LIMITDIST_ONSURFACE',
+                'On Surface',
+                'Keep objects exactly on the surface of the defined distance',
+            ),
+            (
+                'LIMITDIST_OUTSIDE',
+                'Outside',
+                'Keep objects outside the defined distance',
+            ),
+        ],
+        default='LIMITDIST_ONSURFACE',
+    )
+    bpy.types.Scene.proximity_skip_influence_keys = bpy.props.BoolProperty(
+        name="Skip Influence Keys",
+        description="Do not insert influence keyframes when applying proximity limits",
+        default=False,
+    )
     bpy.types.Scene.handle_keys_on_recalculate = BoolProperty(
         name="Export && Apply Keys on Recalc",
         description=(
@@ -2026,6 +2053,10 @@ def unregister():
     del bpy.types.Scene.shift_prefix_list
     if hasattr(bpy.types.Scene, "auto_proximity_check"):
         del bpy.types.Scene.auto_proximity_check
+    if hasattr(bpy.types.Scene, "proximity_limit_mode"):
+        del bpy.types.Scene.proximity_limit_mode
+    if hasattr(bpy.types.Scene, "proximity_skip_influence_keys"):
+        del bpy.types.Scene.proximity_skip_influence_keys
     if hasattr(bpy.types.Scene, "handle_keys_on_recalculate"):
         del bpy.types.Scene.handle_keys_on_recalculate
     if hasattr(bpy.types.Scene, "copyloc_stagger_frames"):
