@@ -85,6 +85,7 @@ OUTPUT_FORMATION_UV_U = "FORMATION_UV_U"
 OUTPUT_FORMATION_UV_V = "FORMATION_UV_V"
 OUTPUT_BAKED_UV_R = "BAKED_UV_R"
 OUTPUT_BAKED_UV_G = "BAKED_UV_G"
+OUTPUT_MANUAL = "MANUAL_SET"
 
 
 _selection_tracker_active = False
@@ -2207,6 +2208,14 @@ class DynamicColorRamp(PropertyGroup):
             for point in self.points
         ]
 
+
+class ManualOutputEntry(PropertyGroup):
+    drone_id: IntProperty(name="Drone ID", default=0, min=0)
+    output_value: FloatProperty(
+        name="Output X", default=0.0, min=0.0, max=1.0
+    )
+
+
 class PatchedLightEffect(PropertyGroup):
     type = EnumProperty(
         name="Effect Type",
@@ -2330,6 +2339,24 @@ class PatchedLightEffect(PropertyGroup):
         name="Dynamic Color Ramps",
         description="Storage for dynamic color ramp parameters",
         type=DynamicColorRamp,
+    )
+    manual_output_entries = CollectionProperty(
+        name="Manual Outputs",
+        description="Per-drone output values used by the manual output mode",
+        type=ManualOutputEntry,
+    )
+    manual_output_value = FloatProperty(
+        name="Output X Value",
+        description="Value stored for the selected drone when adding a manual output entry",
+        default=0.0,
+        min=0.0,
+        max=1.0,
+    )
+    manual_output_drone_id = IntProperty(
+        name="Drone ID",
+        description="Drone identifier associated with the manual output value",
+        default=0,
+        min=0,
     )
     baked_target_indices = StringProperty(
         name="Baked Target Indices",
@@ -2815,6 +2842,27 @@ class PatchedLightEffect(PropertyGroup):
                 ]
                 return outputs, None
 
+            def _resolve_manual_output():
+                entries = getattr(self, "manual_output_entries", None)
+                outputs: list[Optional[float]] = [None] * num_positions
+                if not entries:
+                    return outputs, None
+
+                value_map = {
+                    int(max(0, getattr(item, "drone_id", 0))): max(
+                        0.0, min(1.0, float(getattr(item, "output_value", 0.0)))
+                    )
+                    for item in entries
+                }
+
+                for idx in range(num_positions):
+                    drone_number = _get_drone_number(mapping, idx)
+                    key = drone_number if drone_number is not None else idx
+                    if key in value_map:
+                        outputs[idx] = value_map[key]
+
+                return outputs, None
+
             def get_output_based_on_output_type(
                 output_type: str, mapping_mode: str, output_function
             ) -> tuple[Optional[list[Optional[float]]], Optional[float]]:
@@ -2823,7 +2871,9 @@ class PatchedLightEffect(PropertyGroup):
                 if output_type == "LAST_COLOR":
                     return None, 1.0
                 if output_type == "TEMPORAL":
-                        return None, time_fraction
+                    return None, time_fraction
+                if output_type == OUTPUT_MANUAL:
+                    return _resolve_manual_output()
                 if output_type == OUTPUT_VERTEX_COLOR:
                     return _resolve_vertex_color_output(), None
                 if output_type in {OUTPUT_MESH_UV_U, OUTPUT_MESH_UV_V}:
@@ -3497,6 +3547,9 @@ def patch_light_effect_class():
     LightEffect.get_dynamic_color_ramp_value = PatchedLightEffect.get_dynamic_color_ramp_value
     LightEffect.dynamic_arrays = PatchedLightEffect.dynamic_arrays
     LightEffect.dynamic_color_ramps = PatchedLightEffect.dynamic_color_ramps
+    LightEffect.manual_output_entries = PatchedLightEffect.manual_output_entries
+    LightEffect.manual_output_value = PatchedLightEffect.manual_output_value
+    LightEffect.manual_output_drone_id = PatchedLightEffect.manual_output_drone_id
     LightEffect.original_output = getattr(LightEffect, "output", None)
     LightEffect.output = EnumProperty(
         name="Output X",
@@ -3519,6 +3572,7 @@ def patch_light_effect_class():
             (OUTPUT_MESH_UV_U, "Mesh UV (U)", "", 15),
             (OUTPUT_FORMATION_UV_U, "Formation UV (U)", "", 16),
             (OUTPUT_BAKED_UV_R, "Baked UV (R)", "", 17),
+            (OUTPUT_MANUAL, "Manual (Output X + Drone ID)", "", 18),
         ],
         default="LAST_COLOR",
     )
@@ -3544,6 +3598,7 @@ def patch_light_effect_class():
             (OUTPUT_MESH_UV_V, "Mesh UV (V)", "", 15),
             (OUTPUT_FORMATION_UV_V, "Formation UV (V)", "", 16),
             (OUTPUT_BAKED_UV_G, "Baked UV (G)", "", 17),
+            (OUTPUT_MANUAL, "Manual (Output X + Drone ID)", "", 18),
         ],
         default="LAST_COLOR",
     )
@@ -3603,6 +3658,9 @@ def patch_light_effect_class():
     )
     LightEffect.__annotations__["sequence_delays"] = LightEffect.sequence_delays
     LightEffect.__annotations__["color_image"] = LightEffect.color_image
+    LightEffect.__annotations__["manual_output_entries"] = LightEffect.manual_output_entries
+    LightEffect.__annotations__["manual_output_value"] = LightEffect.manual_output_value
+    LightEffect.__annotations__["manual_output_drone_id"] = LightEffect.manual_output_drone_id
     LightEffect.__annotations__["output"] = LightEffect.output
     LightEffect.__annotations__["output_y"] = LightEffect.output_y
     LightEffect.__annotations__["target"] = LightEffect.target
@@ -5942,6 +6000,50 @@ class RefreshDynamicColorRampOperator(Operator):  # pragma: no cover - Blender U
         return {'FINISHED'}
 
 
+class AddManualOutputEntryOperator(Operator):  # pragma: no cover - Blender UI
+    bl_idname = "skybrush.manual_output_add"
+    bl_label = "Store Output / Drone Pair"
+    bl_description = "Store the current Output X value together with the target drone ID"
+
+    @classmethod
+    def poll(cls, context):
+        entry = getattr(context.scene.skybrush.light_effects, "active_entry", None)
+        return entry is not None
+
+    def execute(self, context):
+        entry = context.scene.skybrush.light_effects.active_entry
+        value = max(0.0, min(1.0, float(getattr(entry, "manual_output_value", 0.0))))
+        drone_id = int(max(0, getattr(entry, "manual_output_drone_id", 0)))
+
+        item = entry.manual_output_entries.add()
+        item.drone_id = drone_id
+        item.output_value = value
+
+        self.report({'INFO'}, f"Stored output {value:.3f} for drone {drone_id}")
+        return {'FINISHED'}
+
+
+class RemoveManualOutputEntryOperator(Operator):  # pragma: no cover - Blender UI
+    bl_idname = "skybrush.manual_output_remove"
+    bl_label = "Remove Manual Output"
+
+    index: IntProperty(name="Index", default=-1, min=-1)
+
+    @classmethod
+    def poll(cls, context):
+        entry = getattr(context.scene.skybrush.light_effects, "active_entry", None)
+        return entry is not None
+
+    def execute(self, context):
+        entry = context.scene.skybrush.light_effects.active_entry
+        if entry is None:
+            return {'CANCELLED'}
+        if 0 <= self.index < len(entry.manual_output_entries):
+            entry.manual_output_entries.remove(self.index)
+            return {'FINISHED'}
+        return {'CANCELLED'}
+
+
 class PatchedLightEffectsPanel(Panel):  # pragma: no cover - Blender UI code
     def draw(self, context):
         layout = self.layout
@@ -6131,6 +6233,27 @@ class PatchedLightEffectsPanel(Panel):  # pragma: no cover - Blender UI code
                 if entry.output == "CUSTOM":
                     col.prop(entry.output_function, "path", text="Fn file")
                     col.prop(entry.output_function, "name", text="Fn name")
+                if entry.output == OUTPUT_MANUAL:
+                    manual_box = col.box()
+                    manual_box.label(text="Store Output X with Drone ID")
+                    values_row = manual_box.row(align=True)
+                    values_row.prop(entry, "manual_output_value")
+                    values_row.prop(entry, "manual_output_drone_id")
+                    manual_box.operator(
+                        AddManualOutputEntryOperator.bl_idname,
+                        text="Add / Update Pair",
+                        icon="ADD",
+                    )
+                    for idx, manual in enumerate(entry.manual_output_entries):
+                        row_manual = manual_box.row(align=True)
+                        row_manual.prop(manual, "drone_id", text="ID")
+                        row_manual.prop(manual, "output_value", text="Output X")
+                        remove = row_manual.operator(
+                            RemoveManualOutputEntryOperator.bl_idname,
+                            text="",
+                            icon="X",
+                        )
+                        remove.index = idx
                 if (
                     hasattr(entry, "uv_mesh")
                     and entry.output in {OUTPUT_MESH_UV_U, OUTPUT_MESH_UV_V}
@@ -6269,6 +6392,7 @@ def register():  # pragma: no cover - executed in Blender
     _pending_dynamic_color_ramp_creations.clear()
     _light_effect_enable_backups.clear()
 
+    bpy.utils.register_class(ManualOutputEntry)
     bpy.utils.register_class(SequenceDelayEntry)
     bpy.utils.register_class(DynamicArrayValue)
     bpy.utils.register_class(DynamicArrayProperty)
@@ -6280,6 +6404,8 @@ def register():  # pragma: no cover - executed in Blender
     bpy.utils.register_class(AddDynamicColorRampPointOperator)
     bpy.utils.register_class(RemoveDynamicColorRampPointOperator)
     bpy.utils.register_class(RefreshDynamicColorRampOperator)
+    bpy.utils.register_class(AddManualOutputEntryOperator)
+    bpy.utils.register_class(RemoveManualOutputEntryOperator)
     bpy.utils.register_class(EmbedColorFunctionOperator)
     bpy.utils.register_class(UnembedColorFunctionOperator)
     bpy.utils.register_class(BakeColorRampOperator)
@@ -6330,6 +6456,8 @@ def unregister():  # pragma: no cover - executed in Blender
     bpy.utils.unregister_class(BakeColorRampOperator)
     bpy.utils.unregister_class(UnembedColorFunctionOperator)
     bpy.utils.unregister_class(EmbedColorFunctionOperator)
+    bpy.utils.unregister_class(RemoveManualOutputEntryOperator)
+    bpy.utils.unregister_class(AddManualOutputEntryOperator)
     bpy.utils.unregister_class(RemoveDynamicColorRampPointOperator)
     bpy.utils.unregister_class(AddDynamicColorRampPointOperator)
     bpy.utils.unregister_class(RefreshDynamicColorRampOperator)
@@ -6341,6 +6469,7 @@ def unregister():  # pragma: no cover - executed in Blender
     bpy.utils.unregister_class(DynamicArrayProperty)
     bpy.utils.unregister_class(DynamicArrayValue)
     bpy.utils.unregister_class(SequenceDelayEntry)
+    bpy.utils.unregister_class(ManualOutputEntry)
 
     _delayed_id_property_updates.clear()
     _pending_dynamic_array_updates.clear()
