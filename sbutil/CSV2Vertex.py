@@ -308,6 +308,24 @@ def _update_frame_range_from_storyboard(context):
         scene.frame_end = max(scene.frame_end, max_end)
 
 
+def _shift_subsequent_storyboard_entries(storyboard, start_index: int, delta: int):
+    """Shift storyboard entries after ``start_index`` by ``delta`` frames."""
+
+    if delta == 0 or storyboard is None:
+        return
+
+    entries = getattr(storyboard, "entries", None)
+    if not entries:
+        return
+
+    for idx in range(start_index + 1, len(entries)):
+        entry = entries[idx]
+        try:
+            entry.frame_start = int(getattr(entry, "frame_start", 0)) + delta
+        except Exception:
+            continue
+
+
 def _create_light_effect_for_storyboard(
     context,
     mesh_obj,
@@ -381,6 +399,43 @@ def _create_light_effect_for_storyboard(
             tex.image = color_image
 
     return le_entry
+
+
+def _find_light_effect_entry(scene, name: str):
+    light_effects = getattr(getattr(scene, "skybrush", None), "light_effects", None)
+    entries = getattr(light_effects, "entries", None)
+    if not entries:
+        return None
+
+    for entry in entries:
+        if getattr(entry, "name", None) == name:
+            return entry
+    return None
+
+
+def _replace_light_effect_texture(light_effect, color_image):
+    if light_effect is None:
+        return
+
+    tex = getattr(light_effect, "texture", None)
+    if tex is None:
+        try:
+            tex = bpy.data.textures.new(name=f"{light_effect.name}_ColorTex", type="IMAGE")
+            light_effect.texture = tex
+        except Exception:
+            tex = None
+
+    if tex is not None:
+        try:
+            old_img = getattr(tex, "image", None)
+            if old_img is not None:
+                bpy.data.images.remove(old_img)
+        except Exception:
+            pass
+        try:
+            tex.image = color_image
+        except Exception:
+            pass
 
 # ---------- Import Helper ----------
 
@@ -758,6 +813,61 @@ class CSVVA_OT_Update(Operator):
                 keep_start = existing_entry.frame_start
                 keep_duration = existing_entry.duration
                 target_start = keep_start if not item.frame_mismatch else item.start_frame
+
+            tracks = build_tracks_from_folder(item.folder)
+            duration = calculate_duration_from_tracks(tracks, fps)
+            if duration == 0:
+                self.report({"WARNING"}, f"No CSV/TSV files found in {item.folder}")
+                continue
+
+            if existing_entry and prefs.use_vat:
+                obj = None
+                for candidate_name in (f"{existing_entry.name}_CSV", existing_entry.name):
+                    obj = bpy.data.objects.get(candidate_name)
+                    if obj:
+                        break
+
+                color_image = None
+                if obj:
+                    old_end = existing_entry.frame_start + existing_entry.duration
+                    try:
+                        color_image, imported_duration, _drone_count = csv_vat_gn.update_vat_animation_for_object(
+                            obj,
+                            tracks,
+                            fps,
+                            start_frame=target_start,
+                            base_name=obj.name,
+                            storyboard_name=existing_entry.name,
+                        )
+                        duration = imported_duration
+                    except Exception:
+                        color_image = None
+                        imported_duration = duration
+
+                    try:
+                        existing_entry.frame_start = target_start
+                        existing_entry.duration = duration
+                    except Exception:
+                        pass
+
+                    if existing_index is not None:
+                        new_end = target_start + duration
+                        delta = new_end - old_end
+                        _shift_subsequent_storyboard_entries(storyboard, existing_index, delta)
+
+                    le_entry = _find_light_effect_entry(context.scene, existing_entry.name)
+                    if le_entry is not None:
+                        _replace_light_effect_texture(le_entry, color_image)
+                        try:
+                            le_entry.frame_start = existing_entry.frame_start
+                            le_entry.duration = duration
+                        except Exception:
+                            pass
+
+                    processed += 1
+                    continue
+
+            if existing_entry:
                 clear_drone_keys(existing_entry.frame_start, existing_entry.duration)
                 for candidate_name in (existing_entry.name, f"{existing_entry.name}_CSV"):
                     old_obj = bpy.data.objects.get(candidate_name)
@@ -767,12 +877,6 @@ class CSVVA_OT_Update(Operator):
                         if mesh and mesh.users == 0:
                             bpy.data.meshes.remove(mesh)
                 storyboard.entries.remove(existing_index)
-
-            tracks = build_tracks_from_folder(item.folder)
-            duration = calculate_duration_from_tracks(tracks, fps)
-            if duration == 0:
-                self.report({"WARNING"}, f"No CSV/TSV files found in {item.folder}")
-                continue
 
             obj, imported_duration, key_entries = import_csv_folder(
                 context, item.folder, target_start, use_vat=prefs.use_vat
@@ -791,6 +895,10 @@ class CSVVA_OT_Update(Operator):
                     entry.frame_start = item.start_frame
                     entry.duration = duration
 
+                old_end = (keep_start or 0) + (keep_duration or 0)
+                new_end = entry.frame_start + entry.duration
+                _shift_subsequent_storyboard_entries(storyboard, existing_index, new_end - old_end)
+
             if key_entries:
                 key_data_collection.append((key_entries, entry.frame_start))
             processed += 1
@@ -807,6 +915,8 @@ class CSVVA_OT_Update(Operator):
                 start_frame,
             )
         context.scene.frame_set(current_frame)
+
+        _update_frame_range_from_storyboard(context)
 
         self.report(
             {"INFO"},
