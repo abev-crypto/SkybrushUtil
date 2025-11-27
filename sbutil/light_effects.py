@@ -3456,7 +3456,21 @@ def patch_light_effect_class():
     LightEffect._original_evaluate_influence_at = getattr(
         LightEffect, "_evaluate_influence_at", None
     )
+    LightEffect.original_cat_frame_offset = getattr(
+        LightEffect, "cat_frame_offset", None
+    )
+    LightEffect.original_cat_speed = getattr(LightEffect, "cat_speed", None)
+    LightEffect.original_cat_texture_split = getattr(
+        LightEffect, "cat_texture_split", None
+    )
+    LightEffect.original_cat_texture_index = getattr(
+        LightEffect, "cat_texture_index", None
+    )
     LightEffect.type = PatchedLightEffect.type
+    LightEffect.cat_frame_offset = PatchedLightEffect.cat_frame_offset
+    LightEffect.cat_speed = PatchedLightEffect.cat_speed
+    LightEffect.cat_texture_split = PatchedLightEffect.cat_texture_split
+    LightEffect.cat_texture_index = PatchedLightEffect.cat_texture_index
     LightEffect.loop_count = PatchedLightEffect.loop_count
     LightEffect.loop_method = PatchedLightEffect.loop_method
     LightEffect.color_function_text = PatchedLightEffect.color_function_text
@@ -3570,6 +3584,10 @@ def patch_light_effect_class():
     )
     LightEffect._evaluate_influence_at = PatchedLightEffect._evaluate_influence_at
     LightEffect.__annotations__["type"] = LightEffect.type
+    LightEffect.__annotations__["cat_frame_offset"] = LightEffect.cat_frame_offset
+    LightEffect.__annotations__["cat_speed"] = LightEffect.cat_speed
+    LightEffect.__annotations__["cat_texture_split"] = LightEffect.cat_texture_split
+    LightEffect.__annotations__["cat_texture_index"] = LightEffect.cat_texture_index
     LightEffect.__annotations__["loop_count"] = LightEffect.loop_count
     LightEffect.__annotations__["loop_method"] = LightEffect.loop_method
     LightEffect.__annotations__["color_function_text"] = LightEffect.color_function_text
@@ -3605,6 +3623,21 @@ def unpatch_light_effect_class():
     bpy.utils.unregister_class(LightEffect)
     LightEffect.type = LightEffect.original_type
     LightEffect.__annotations__["type"] = LightEffect.original_type
+    for attr, original_attr in (
+        ("cat_frame_offset", "original_cat_frame_offset"),
+        ("cat_speed", "original_cat_speed"),
+        ("cat_texture_split", "original_cat_texture_split"),
+        ("cat_texture_index", "original_cat_texture_index"),
+    ):
+        original_value = getattr(LightEffect, original_attr, None)
+        if original_value is not None:
+            setattr(LightEffect, attr, original_value)
+            LightEffect.__annotations__[attr] = original_value
+        elif hasattr(LightEffect, attr):
+            delattr(LightEffect, attr)
+            LightEffect.__annotations__.pop(attr, None)
+        if hasattr(LightEffect, original_attr):
+            setattr(LightEffect, original_attr, None)
     for attr in (
         "loop_count",
         "loop_method",
