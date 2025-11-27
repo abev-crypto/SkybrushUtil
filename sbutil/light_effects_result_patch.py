@@ -204,6 +204,43 @@ def _write_column(image, column: int, colors: list[MutableRGBAColor]) -> None:
     image.pixels[:] = pixels
 
 
+def _reregister_update_light_effects() -> None:
+    original = _ORIGINALS.get("update_light_effects")
+    patched = getattr(_light_effects_mod, "update_light_effects", None)
+
+    if original is None or patched is None:
+        return
+
+    handler_container = getattr(bpy.app, "handlers", None)
+    if handler_container is None:
+        return
+
+    for name in dir(handler_container):
+        if name.startswith("_"):
+            continue
+
+        handlers = getattr(handler_container, name, None)
+        try:
+            existing = list(handlers)
+        except Exception:
+            continue
+
+        replaced = False
+        for handler in existing:
+            if handler is original:
+                try:
+                    handlers.remove(handler)
+                    replaced = True
+                except Exception:
+                    continue
+
+        if replaced and patched not in handlers:
+            try:
+                handlers.append(patched)
+            except Exception:
+                continue
+
+
 def patch_light_effect_results():
     """Apply the monkey patches when Skybrush is available."""
 
@@ -223,6 +260,7 @@ def patch_light_effect_results():
     _light_effects_mod._get_or_create_result_image = _get_or_create_result_image
     _light_effects_mod._write_column = _write_column
     _light_effects_mod.update_light_effects = _patched_update_light_effects
+    _reregister_update_light_effects()
 
 
 def unpatch_light_effect_results():
