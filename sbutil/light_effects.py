@@ -2625,6 +2625,36 @@ class PatchedLightEffect(PropertyGroup):
 
         return predicate
 
+    def _evaluate_influence_at(
+        self,
+        position,
+        frame: int,
+        condition: Optional[Callable[[Coordinate3D, Optional[int]], bool]],
+        *,
+        index: Optional[int] = None,
+    ) -> float:
+        if condition:
+            try:
+                if not condition(position, index):
+                    return 0.0
+            except TypeError:
+                if not condition(position):
+                    return 0.0
+
+        influence = self.influence
+
+        if self.fade_in_duration > 0:
+            diff = frame - self.frame_start + 1
+            if diff < self.fade_in_duration:
+                influence *= diff / self.fade_in_duration
+
+        if self.fade_out_duration > 0:
+            diff = self.frame_end - frame
+            if diff < self.fade_out_duration:
+                influence *= diff / self.fade_out_duration
+
+        return influence
+
     def apply_on_colors(
         self,
         colors: Sequence[MutableRGBAColor],
@@ -2870,12 +2900,19 @@ class PatchedLightEffect(PropertyGroup):
                 return array, np.isfinite(array)
 
             def finalized_color(index, position, new_color, color):
-                predicate = condition
-                if predicate is not None:
-                    predicate = partial(
-                        predicate, idx=_get_drone_number(mapping, index)
-                    )
-                new_color[3] *= max(min(self._evaluate_influence_at(position, effective_frame, predicate),1.0,),0.0,)
+                drone_index = _get_drone_number(mapping, index)
+                new_color[3] *= max(
+                    min(
+                        self._evaluate_influence_at(
+                            position,
+                            effective_frame,
+                            condition,
+                            index=drone_index,
+                        ),
+                        1.0,
+                    ),
+                    0.0,
+                )
                 blend_in_place(new_color, color, BlendMode[self.blend_mode])
             def l2srgb(direct_color):
                 nc = []
@@ -3416,6 +3453,9 @@ def patch_light_effect_class():
     LightEffect._original_get_spatial_effect_predicate = getattr(
         LightEffect, "_get_spatial_effect_predicate", None
     )
+    LightEffect._original_evaluate_influence_at = getattr(
+        LightEffect, "_evaluate_influence_at", None
+    )
     LightEffect.type = PatchedLightEffect.type
     LightEffect.loop_count = PatchedLightEffect.loop_count
     LightEffect.loop_method = PatchedLightEffect.loop_method
@@ -3528,6 +3568,7 @@ def patch_light_effect_class():
     LightEffect._get_spatial_effect_predicate = (
         PatchedLightEffect._get_spatial_effect_predicate
     )
+    LightEffect._evaluate_influence_at = PatchedLightEffect._evaluate_influence_at
     LightEffect.__annotations__["type"] = LightEffect.type
     LightEffect.__annotations__["loop_count"] = LightEffect.loop_count
     LightEffect.__annotations__["loop_method"] = LightEffect.loop_method
@@ -3645,6 +3686,13 @@ def unpatch_light_effect_class():
         LightEffect._original_get_spatial_effect_predicate = None
     elif hasattr(LightEffect, "_get_spatial_effect_predicate"):
         delattr(LightEffect, "_get_spatial_effect_predicate")
+    if getattr(LightEffect, "_original_evaluate_influence_at", None) is not None:
+        LightEffect._evaluate_influence_at = (
+            LightEffect._original_evaluate_influence_at
+        )
+        LightEffect._original_evaluate_influence_at = None
+    elif hasattr(LightEffect, "_evaluate_influence_at"):
+        delattr(LightEffect, "_evaluate_influence_at")
     if hasattr(LightEffect, "target_collection"):
         delattr(LightEffect, "target_collection")
         LightEffect.__annotations__.pop("target_collection", None)
