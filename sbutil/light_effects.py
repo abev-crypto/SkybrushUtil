@@ -9,6 +9,7 @@ plug‑in is not available, the module simply does nothing.
 import bpy
 import bmesh
 import numpy as np
+import re
 from bpy.props import (
     BoolProperty,
     CollectionProperty,
@@ -87,6 +88,8 @@ OUTPUT_BAKED_UV_R = "BAKED_UV_R"
 OUTPUT_BAKED_UV_G = "BAKED_UV_G"
 OUTPUT_MANUAL = "MANUAL_SET"
 
+
+_DIGITS_AT_END = re.compile(r"(\d+)$")
 
 _selection_tracker_active = False
 
@@ -6014,6 +6017,29 @@ class AddManualOutputEntryOperator(Operator):  # pragma: no cover - Blender UI
         entry = context.scene.skybrush.light_effects.active_entry
         value = max(0.0, min(1.0, float(getattr(entry, "manual_output_value", 0.0))))
         drone_id = int(max(0, getattr(entry, "manual_output_drone_id", 0)))
+
+        obj = getattr(context, "object", None)
+        if obj is None and getattr(context, "selected_objects", None):
+            obj = context.selected_objects[0]
+        if obj is not None:
+            trailing_digits = _DIGITS_AT_END.search(obj.name)
+            if trailing_digits:
+                drone_index = int(trailing_digits.group(0))
+                drone_id = drone_index
+
+                mapping = None
+                try:
+                    storyboard = context.scene.skybrush.storyboard
+                    mapping = storyboard.get_mapping_at_frame(context.scene.frame_current)
+                except Exception:
+                    mapping = None
+
+                if mapping is not None and 0 <= drone_index < len(mapping):
+                    mapped_drone_index = mapping[drone_index]
+                    if mapped_drone_index is not None:
+                        drone_id = mapped_drone_index
+
+        entry.manual_output_drone_id = drone_id
 
         item = entry.manual_output_entries.add()
         item.drone_id = drone_id
