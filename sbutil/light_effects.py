@@ -2858,11 +2858,18 @@ class PatchedLightEffect(PropertyGroup):
                     for item in entries
                 }
 
-                for idx in range(num_positions):
-                    drone_number = _get_drone_number(mapping, idx)
-                    key = drone_number if drone_number is not None else idx
-                    if key in value_map:
-                        outputs[idx] = value_map[key]
+                if mapping is not None:
+                    mapped_indices = {
+                        mapped: idx for idx, mapped in enumerate(mapping) if mapped is not None
+                    }
+                    for drone_id, value in value_map.items():
+                        idx = mapped_indices.get(drone_id)
+                        if idx is not None:
+                            outputs[idx] = value
+                else:
+                    for idx, value in value_map.items():
+                        if idx < num_positions:
+                            outputs[idx] = value
 
                 return outputs, None
 
