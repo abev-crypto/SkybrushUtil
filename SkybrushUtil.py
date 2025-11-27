@@ -138,6 +138,36 @@ def ensure_json_files(blend_dir, prefix):
 
     return os.path.exists(key_path) and os.path.exists(light_path)
 
+
+def ensure_light_json_file(blend_dir, prefix):
+    """Ensure a light JSON file exists in ``blend_dir`` for ``prefix``."""
+
+    light_path = os.path.join(blend_dir, prefix + LightdataStr)
+    if os.path.exists(light_path):
+        return True
+
+    class DRONE_OT_SelectLightJsonDir(bpy.types.Operator):
+        bl_idname = "drone.select_light_json_dir"
+        bl_label = "Select Light JSON Source Directory"
+
+        directory: StringProperty(subtype="DIR_PATH")
+
+        def execute(self, context):
+            src_light = os.path.join(self.directory, prefix + LightdataStr)
+            if os.path.exists(src_light):
+                shutil.copy(src_light, light_path)
+            return {'FINISHED'}
+
+        def invoke(self, context, event):
+            context.window_manager.fileselect_add(self)
+            return {'RUNNING_MODAL'}
+
+    bpy.utils.register_class(DRONE_OT_SelectLightJsonDir)
+    bpy.ops.drone.select_light_json_dir('INVOKE_DEFAULT')
+    bpy.utils.unregister_class(DRONE_OT_SelectLightJsonDir)
+
+    return os.path.exists(light_path)
+
 # -------------------------------
 # LightEffect Export Helpers
 # -------------------------------
@@ -159,14 +189,31 @@ def convert_value(value):
 
 def convert_color_ramp(texture):
     """ColorRamp情報を辞書化"""
-    data = []
-    if texture and hasattr(texture, "color_ramp"):
-        color_ramp = texture.color_ramp
-        for elem in color_ramp.elements:
-            data.append({
-                "position": elem.position,
-                "color": [round(c, 3) for c in elem.color],
-            })
+    if not texture or not getattr(texture, "use_color_ramp", False):
+        return None
+
+    ramp = getattr(texture, "color_ramp", None)
+    if ramp is None:
+        return None
+
+    data = {
+        "texture_name": texture.name,
+        "type": getattr(texture, "type", None),
+        "use_color_ramp": bool(texture.use_color_ramp),
+        "color_mode": getattr(ramp, "color_mode", None),
+        "interpolation": getattr(ramp, "interpolation", None),
+        "hue_interpolation": getattr(ramp, "hue_interpolation", None),
+        "elements": [],
+    }
+
+    for elem in ramp.elements:
+        data["elements"].append(
+            {
+                "position": float(elem.position),
+                "color": [float(c) for c in elem.color],
+            }
+        )
+
     return data
 
 
@@ -203,7 +250,9 @@ def propertygroup_to_dict(pg):
 
     if getattr(pg, "type", None) == "COLOR_RAMP":
         texture = getattr(pg, "texture", None)
-        data["color_ramp"] = convert_color_ramp(texture)
+        ramp_data = convert_color_ramp(texture)
+        if ramp_data:
+            data["color_ramp"] = ramp_data
 
     return data
 
@@ -324,6 +373,36 @@ class DRONE_OT_SaveLightEffects(Operator):
             os.path.join(blend_dir, prefix + LightdataStr), context
         )
         self.report({'INFO'}, f"Light effects saved: {blend_dir}")
+        return {'FINISHED'}
+
+
+class DRONE_OT_LoadLightEffects(Operator):
+    bl_idname = "drone.load_light_effects"
+    bl_label = "Load Light Effects"
+    bl_description = "Import light effect data from a JSON file"
+
+    def execute(self, context):
+        props = context.scene.drone_key_props
+        blend_dir = os.path.dirname(bpy.data.filepath) if bpy.data.filepath else os.getcwd()
+        prefix = active_timebind_prefix(context, props.file_name)
+        frame_offset = bpy.context.scene.frame_current
+
+        tb_entries = context.scene.time_bind.entries
+        index = context.scene.time_bind.active_index
+        if 0 <= index < len(tb_entries) and tb_entries:
+            frame_offset = tb_entries[index].StartFrame
+            prefix = tb_entries[index].Prefix
+
+        if not ensure_light_json_file(blend_dir, prefix):
+            self.report({'WARNING'}, f"Light JSON for prefix '{prefix}' not found")
+            return {'CANCELLED'}
+
+        import_light_effects_from_json(
+            os.path.join(blend_dir, prefix + LightdataStr), frame_offset, context
+        )
+        update_texture_key(prefix + "_", frame_offset)
+        add_timebind_prop(context, prefix + "_", frame_offset)
+        self.report({'INFO'}, f"Light effects loaded: {blend_dir}")
         return {'FINISHED'}
 
 # -------------------------------
@@ -1458,6 +1537,32 @@ def set_propertygroup_from_dict(pg, data):
         # 通常プロパティ
         setattr(pg, key, value)
 
+def _ensure_color_ramp_texture(effect, ramp_data):
+    """Ensure a texture exists for restoring ColorRamp information."""
+
+    texture = getattr(effect, "texture", None)
+    if texture is not None:
+        return texture
+
+    if not isinstance(ramp_data, dict):
+        return None
+
+    tex_name = ramp_data.get("texture_name")
+    tex_type = ramp_data.get("type") or "NONE"
+    if not tex_name:
+        return None
+
+    try:
+        texture = bpy.data.textures.get(tex_name)
+        if texture is None:
+            texture = bpy.data.textures.new(name=tex_name, type=tex_type)
+        effect.texture = texture
+    except Exception:
+        return None
+
+    return texture
+
+
 def apply_color_ramp(texture, ramp_data):
     """ColorRamp情報をTextureに適用"""
     if not texture or not hasattr(texture, "color_ramp"):
@@ -1467,17 +1572,35 @@ def apply_color_ramp(texture, ramp_data):
 
     color_ramp = texture.color_ramp
 
+    if isinstance(ramp_data, dict):
+        elements = ramp_data.get("elements") or []
+        texture.use_color_ramp = bool(ramp_data.get("use_color_ramp", True))
+        if ramp_data.get("type"):
+            texture.type = ramp_data["type"]
+        if ramp_data.get("color_mode"):
+            color_ramp.color_mode = ramp_data["color_mode"]
+        if ramp_data.get("interpolation"):
+            color_ramp.interpolation = ramp_data["interpolation"]
+        if ramp_data.get("hue_interpolation") and hasattr(
+            color_ramp, "hue_interpolation"
+        ):
+            color_ramp.hue_interpolation = ramp_data["hue_interpolation"]
+    else:
+        elements = ramp_data or []
+
     # 1つだけ残して全削除
     while len(color_ramp.elements) > 1:
         color_ramp.elements.remove(color_ramp.elements[-1])
 
+    if not elements:
+        return
+
     # 残した要素を最初のJSONデータで上書き
-    if ramp_data:
-        color_ramp.elements[0].position = ramp_data[0]["position"]
-        color_ramp.elements[0].color = ramp_data[0]["color"]
+    color_ramp.elements[0].position = elements[0]["position"]
+    color_ramp.elements[0].color = elements[0]["color"]
 
     # 2番目以降の要素を追加
-    for point in ramp_data[1:]:
+    for point in elements[1:]:
         elem = color_ramp.elements.new(point["position"])
         elem.color = point["color"]
 
@@ -1512,12 +1635,13 @@ def import_light_effects_from_json(filepath, frame_offset, context):
         if "frame_end" in effect_data:
             effect_data["frame_end"] += frame_offset
 
-        # ColorRamp復元
-        if effect.type == "COLOR_RAMP" and color_ramp_data:
-            apply_color_ramp(effect.texture, color_ramp_data)
-
         # プロパティをセット
         set_propertygroup_from_dict(effect, effect_data)
+
+        # ColorRamp復元
+        if effect.type == "COLOR_RAMP" and color_ramp_data:
+            texture = _ensure_color_ramp_texture(effect, color_ramp_data)
+            apply_color_ramp(texture, color_ramp_data)
 
 def apply_key(filepath, frame_offset, duration=0):
     from sbutil.color_key_utils import apply_color_keys_to_nearest
@@ -1810,6 +1934,7 @@ class DRONE_PT_KeyTransfer(Panel):
         layout.operator("drone.save_keys", text="Save")
         layout.operator("drone.save_single_keys", text="Key Save")
         layout.operator("drone.save_light_effects", text="Light Save")
+        layout.operator("drone.load_light_effects", text="Light Load")
         layout.operator("drone.load_keys", text="Load")
         layout.operator("drone.load_all_keys", text="All Load")
         layout.operator("drone.append_assets", text="Append Assets")
@@ -1943,6 +2068,7 @@ classes = (
     DRONE_OT_SaveKeys,
     DRONE_OT_SaveSignleKeys,
     DRONE_OT_SaveLightEffects,
+    DRONE_OT_LoadLightEffects,
     DRONE_OT_LoadKeys,
     SBUTIL_AddonPreferences,
     DRONE_OT_UpdateAddon,
