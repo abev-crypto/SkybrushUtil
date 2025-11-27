@@ -8,6 +8,7 @@ import bpy
 __all__ = [
     "build_vat_images_from_tracks",
     "create_vat_animation_from_tracks",
+    "update_vat_animation_for_object",
 ]
 
 
@@ -328,6 +329,39 @@ def _apply_gn_to_object(obj, node_group):
     mod = obj.modifiers.new(name="Drone VAT", type="NODES")
     mod.node_group = node_group
     return mod
+
+
+def update_vat_animation_for_object(
+    obj,
+    tracks: Sequence[dict],
+    fps: float,
+    *,
+    start_frame: int,
+    base_name: str,
+    storyboard_name: str | None = None,
+):
+    """Regenerate VAT textures and reapply the GN modifier on ``obj``."""
+
+    if obj is None:
+        return None, 0, 0
+
+    image_name_prefix = f"{storyboard_name}_VAT" if storyboard_name else "VAT"
+    pos_img, col_img, pos_min, pos_max, duration, drone_count = build_vat_images_from_tracks(
+        tracks, fps, image_name_prefix=image_name_prefix
+    )
+
+    node_group = _create_gn_vat_group(
+        pos_img,
+        pos_min,
+        pos_max,
+        duration + 1,
+        drone_count,
+        start_frame=start_frame,
+        base_name=base_name,
+    )
+    _apply_gn_to_object(obj, node_group)
+
+    return col_img, duration, drone_count
 
 
 def create_vat_animation_from_tracks(
