@@ -112,6 +112,7 @@ def _patched_update_light_effects(scene, depsgraph):
             changed = True
 
         effect.apply_on_colors(
+            drones,
             colors,
             positions=positions,
             mapping=mapping,

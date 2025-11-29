@@ -2631,7 +2631,13 @@ class PatchedLightEffect(PropertyGroup):
         ensure_schema(self, schema)
         draw_dynamic(self, layout, schema)
 
-    def _get_spatial_effect_predicate(self, index: Optional[int] = None):
+    def _get_spatial_effect_predicate(
+        self,
+        index: Optional[int] = None,
+        *,
+        drones: Optional[Sequence[object]] = None,
+        mapping: Optional[Sequence[Optional[int]]] = None,
+    ):
         predicate: Optional[Callable[[Coordinate3D, Optional[int]], bool]] = None
 
         if self.target == "BAKED_MAP":
@@ -2641,13 +2647,52 @@ class PatchedLightEffect(PropertyGroup):
                 return idx is not None and idx in baked_indices
 
         elif self.target == "COLLECTION" and getattr(self, "target_collection", None):
-            positions = {
-                tuple(get_position_of_object(obj))
-                for obj in self.target_collection.objects
-            }
+            mapping_lookup = (
+                {mapped: idx for idx, mapped in enumerate(mapping) if mapped is not None}
+                if mapping is not None
+                else None
+            )
 
-            def predicate(pos, _idx=None):
-                return tuple(pos) in positions
+            try:
+                collection_objects = getattr(self.target_collection, "objects", None)
+            except Exception:
+                collection_objects = None
+
+            if drones and collection_objects is not None:
+                objects_by_name = {
+                    getattr(obj, "name", None): obj for obj in collection_objects
+                }
+
+                def predicate(_pos, idx=None):
+                    if idx is None:
+                        return False
+
+                    drone_idx = idx
+                    if mapping_lookup is not None:
+                        drone_idx = mapping_lookup.get(idx, drone_idx)
+
+                    if drone_idx is None or drone_idx < 0 or drone_idx >= len(drones):
+                        return False
+
+                    drone = drones[drone_idx]
+
+                    try:
+                        in_collection = drone in collection_objects
+                    except Exception:
+                        drone_name = getattr(drone, "name", None)
+                        in_collection = (
+                            drone_name is not None and drone_name in objects_by_name
+                        )
+
+                    return in_collection
+            elif collection_objects is not None:
+                positions = {
+                    tuple(get_position_of_object(obj))
+                    for obj in collection_objects
+                }
+
+                def predicate(pos, _idx=None):
+                    return tuple(pos) in positions
 
         if predicate is None:
             original = getattr(LightEffect, "_original_get_spatial_effect_predicate", None)
@@ -2876,14 +2921,6 @@ class PatchedLightEffect(PropertyGroup):
                     else None
                 )
 
-                position_to_index: dict[tuple[float, ...], int] = {}
-                for idx in range(num_positions):
-                    try:
-                        pos_tuple = tuple(map(float, positions[idx]))
-                    except Exception:
-                        continue
-                    position_to_index[pos_tuple] = idx
-
                 def _indices_for_collection(collection) -> set[int]:
                     indices: set[int] = set()
                     if collection is None:
@@ -2891,6 +2928,36 @@ class PatchedLightEffect(PropertyGroup):
                     try:
                         objects = collection.objects
                     except Exception:
+                        return indices
+
+                    objects_by_name = {getattr(obj, "name", None): obj for obj in objects}
+
+                    if drones:
+                        for idx, drone in enumerate(drones):
+                            try:
+                                in_collection = drone in objects
+                            except Exception:
+                                drone_name = getattr(drone, "name", None)
+                                in_collection = drone_name is not None and drone_name in objects_by_name
+
+                            if not in_collection:
+                                continue
+
+                            index: Optional[int] = idx
+                            trailing_digits = _DIGITS_AT_END.search(getattr(drone, "name", ""))
+                            if trailing_digits:
+                                drone_index = int(trailing_digits.group(0))
+                                if mapping_lookup is not None:
+                                    mapped_index = mapping_lookup.get(drone_index)
+                                    if mapped_index is not None:
+                                        index = mapped_index
+                                    else:
+                                        index = drone_index
+                                else:
+                                    index = drone_index
+
+                            if index is not None and 0 <= index < num_positions:
+                                indices.add(index)
                         return indices
 
                     for obj in objects:
@@ -2906,13 +2973,6 @@ class PatchedLightEffect(PropertyGroup):
                                     index = drone_index
                             else:
                                 index = drone_index
-
-                        if index is None and position_to_index:
-                            try:
-                                pos_tuple = tuple(map(float, get_position_of_object(obj)))
-                                index = position_to_index.get(pos_tuple)
-                            except Exception:
-                                index = None
 
                         if index is not None and 0 <= index < num_positions:
                             indices.add(index)
@@ -3000,7 +3060,9 @@ class PatchedLightEffect(PropertyGroup):
             num_positions = len(positions)
             color_ramp = self.color_ramp
             color_image = self.color_image
-            condition = self._get_spatial_effect_predicate()
+            condition = self._get_spatial_effect_predicate(
+                drones=drones, mapping=mapping
+            )
 
             def _prepare_output_array(
                 outputs: Optional[list[Optional[float]]], common_value: Optional[float]
@@ -5653,7 +5715,9 @@ class BakeSpatialTargetMapOperator(bpy.types.Operator):  # pragma: no cover - Bl
 
         positions = [tuple(get_position_of_object(obj)) for obj in drones]
         mapping = _build_formation_mapping(drones)
-        predicate = entry._get_spatial_effect_predicate()
+        predicate = entry._get_spatial_effect_predicate(
+            drones=drones, mapping=mapping
+        )
         if predicate is None:
             predicate = lambda *_args, **_kwargs: True
 
