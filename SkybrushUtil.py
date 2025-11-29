@@ -786,6 +786,90 @@ class DRONE_OT_LinearizeCopyLocationInfluence(Operator):
         return {'FINISHED'}
 
 
+def _set_vat_start_frame(modifier, start_frame: int) -> bool:
+    node_group = getattr(modifier, "node_group", None)
+    if node_group is None:
+        return False
+
+    updated = False
+    interface = getattr(node_group, "interface", None)
+    if interface is not None:
+        for item in getattr(interface, "items_tree", []):
+            if (
+                getattr(item, "name", "") == "Start Frame"
+                and getattr(item, "in_out", "") == "INPUT"
+            ):
+                try:
+                    item.default_value = float(start_frame)
+                    updated = True
+                except Exception:
+                    pass
+                break
+
+    return updated
+
+
+class DRONE_OT_ShiftVatStartFrames(Operator):
+    """Shift VAT geometry node Start Frame values for storyboard entries"""
+
+    bl_idname = "drone.shift_vat_start_frames"
+    bl_label = "Shift VAT Start Frames"
+    bl_description = (
+        "Shift Geometry Nodes VAT start frames for objects linked to storyboard entries"
+    )
+
+    def execute(self, context):
+        storyboard = getattr(getattr(context.scene, "skybrush", None), "storyboard", None)
+        entries = getattr(storyboard, "entries", None)
+        if not entries:
+            self.report({'ERROR'}, "Storyboard entries not found")
+            return {'CANCELLED'}
+
+        offset = getattr(context.scene, "vat_start_shift_frames", 0)
+
+        updated = 0
+        skipped = 0
+
+        for entry in entries:
+            target_start = int(getattr(entry, "frame_start", 0)) + offset
+            obj = None
+            for candidate in (entry.name, f"{entry.name}_CSV"):
+                obj = bpy.data.objects.get(candidate)
+                if obj is not None:
+                    break
+
+            if obj is None:
+                skipped += 1
+                continue
+
+            modifier = next(
+                (
+                    m
+                    for m in obj.modifiers
+                    if m.type == "NODES"
+                    and getattr(getattr(m, "node_group", None), "name", "").startswith(
+                        "GN_DroneVAT_"
+                    )
+                ),
+                None,
+            )
+
+            if modifier is None:
+                skipped += 1
+                continue
+
+            if _set_vat_start_frame(modifier, target_start):
+                updated += 1
+            else:
+                skipped += 1
+
+        self.report(
+            {'INFO'},
+            f"Updated VAT start frames for {updated} entr(ies); skipped {skipped}",
+        )
+        return {'FINISHED'}
+
+
 def _find_active_transition_range(scene):
     storyboard = getattr(getattr(scene, "skybrush", None), "storyboard", None)
     if storyboard is None:
@@ -1792,6 +1876,13 @@ def patch_recalculate_operator():
         panel.append(_draw_recalculate_key_handling)
         panel._SBUTIL_KEYS_DRAW_APPENDED = True
 
+
+def patch_storyboard_panel_extras():
+    panel = _get_storyboard_editor_panel()
+    if panel and not getattr(panel, "_SBUTIL_UTILS_DRAW_APPENDED", False):
+        panel.append(_draw_storyboard_extras)
+        panel._SBUTIL_UTILS_DRAW_APPENDED = True
+
 def unpatch_recalculate_operator():
     if RecalculateTransitionsOperator._original_execute:
         RecalculateTransitionsOperator.execute = RecalculateTransitionsOperator._original_execute
@@ -1803,6 +1894,16 @@ def unpatch_recalculate_operator():
         except Exception:
             pass
         panel._SBUTIL_KEYS_DRAW_APPENDED = False
+
+
+def unpatch_storyboard_panel_extras():
+    panel = _get_storyboard_editor_panel()
+    if panel and getattr(panel, "_SBUTIL_UTILS_DRAW_APPENDED", False):
+        try:
+            panel.remove(_draw_storyboard_extras)
+        except Exception:
+            pass
+        panel._SBUTIL_UTILS_DRAW_APPENDED = False
 
 
 def _get_storyboard_editor_panel():
@@ -1820,6 +1921,16 @@ def _draw_recalculate_key_handling(self, context):
     col = layout.column()
     col.use_property_split = True
     col.prop(scene, "handle_keys_on_recalculate", text="Export & Apply Keys")
+
+
+def _draw_storyboard_extras(self, context):
+    layout = self.layout
+    layout.separator()
+    col = layout.column(align=True)
+    col.label(text="SBUtil")
+    col.operator("drone.linearize_copyloc_influence", text="Linearize CopyLoc")
+    col.prop(context.scene, "vat_start_shift_frames", text="VAT Start Offset")
+    col.operator("drone.shift_vat_start_frames", text="Shift VAT Start")
 
 
 def _draw_auto_proximity_toggle(self, context):  # pragma: no cover - Blender UI
@@ -1869,6 +1980,7 @@ def try_patch():
             bpy.app.timers.unregister(try_patch)
             return None
         patch_recalculate_operator()
+        patch_storyboard_panel_extras()
         #recalculate_transitions_patch.patch_recalculate_transitions()
         formation_patch.patch_create_formation_operator()
         storyboard_patch.patch_storyboard_entry_removal()
@@ -1900,6 +2012,7 @@ def _restore_originals():
         #recalculate_transitions_patch.unpatch_recalculate_transitions()
         formation_patch.unpatch_create_formation_operator()
         storyboard_patch.unpatch_storyboard_entry_removal()
+        unpatch_storyboard_panel_extras()
         light_effects_patch.unpatch_light_effect_collection()
         light_effects_patch.unpatch_light_effects_panel()
         light_effects_patch.unpatch_light_effect_class()
@@ -2080,6 +2193,7 @@ classes = (
     DRONE_OT_ApplyProximityLimit,
     DRONE_OT_RemoveProximityLimit,
     DRONE_OT_LinearizeCopyLocationInfluence,
+    DRONE_OT_ShiftVatStartFrames,
     DRONE_OT_StaggerCopyLocationInfluence,
     DRONE_OT_RestoreCopyLocationInfluence,
     LIGHTEFFECT_OTadd_prefix_le_tex,
@@ -2143,6 +2257,13 @@ def register():
         ),
         default=False,
     )
+    bpy.types.Scene.vat_start_shift_frames = bpy.props.IntProperty(
+        name="VAT Start Offset",
+        description=(
+            "Offset added to storyboard start when shifting VAT geometry node start frames"
+        ),
+        default=0,
+    )
     bpy.types.Scene.copyloc_stagger_frames = bpy.props.IntProperty(
         name="CopyLoc Offset Frames",
         description=(
@@ -2185,6 +2306,8 @@ def unregister():
         del bpy.types.Scene.proximity_skip_influence_keys
     if hasattr(bpy.types.Scene, "handle_keys_on_recalculate"):
         del bpy.types.Scene.handle_keys_on_recalculate
+    if hasattr(bpy.types.Scene, "vat_start_shift_frames"):
+        del bpy.types.Scene.vat_start_shift_frames
     if hasattr(bpy.types.Scene, "copyloc_stagger_frames"):
         del bpy.types.Scene.copyloc_stagger_frames
     if hasattr(bpy.types.Scene, "copyloc_stagger_layers"):
