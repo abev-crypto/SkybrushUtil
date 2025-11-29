@@ -168,6 +168,8 @@ def _copy_patched_light_effect_properties(source, target) -> None:
         "sequence_duration",
         "sequence_delay",
         "sequence_manual_delay",
+        "manual_output_value",
+        "manual_output_collection",
         "baked_target_indices",
     )
 
@@ -225,6 +227,21 @@ def _copy_patched_light_effect_properties(source, target) -> None:
                 new_ramp.name = ramp.name
                 new_ramp.set_from_python(sanitized)
                 _set_id_property(target, new_ramp.name, sanitized)
+            except Exception:
+                continue
+
+    if hasattr(source, "manual_output_entries") and hasattr(target, "manual_output_entries"):
+        try:
+            target.manual_output_entries.clear()
+        except Exception:
+            while len(target.manual_output_entries):
+                target.manual_output_entries.remove(len(target.manual_output_entries) - 1)
+
+        for manual in getattr(source, "manual_output_entries", []):
+            try:
+                new_manual = target.manual_output_entries.add()
+                new_manual.collection = getattr(manual, "collection", None)
+                new_manual.output_value = getattr(manual, "output_value", 0.0)
             except Exception:
                 continue
 
@@ -2213,7 +2230,9 @@ class DynamicColorRamp(PropertyGroup):
 
 
 class ManualOutputEntry(PropertyGroup):
-    drone_id: IntProperty(name="Drone ID", default=0, min=0)
+    collection: PointerProperty(
+        name="Collection Target", type=bpy.types.Collection
+    )
     output_value: FloatProperty(
         name="Output X", default=0.0, min=0.0, max=1.0
     )
@@ -2345,21 +2364,20 @@ class PatchedLightEffect(PropertyGroup):
     )
     manual_output_entries = CollectionProperty(
         name="Manual Outputs",
-        description="Per-drone output values used by the manual output mode",
+        description="Per-collection output values used by the manual output mode",
         type=ManualOutputEntry,
     )
     manual_output_value = FloatProperty(
         name="Output X Value",
-        description="Value stored for the selected drone when adding a manual output entry",
+        description="Value stored for the selected collection when adding a manual output entry",
         default=0.0,
         min=0.0,
         max=1.0,
     )
-    manual_output_drone_id = IntProperty(
-        name="Drone ID",
-        description="Drone identifier associated with the manual output value",
-        default=0,
-        min=0,
+    manual_output_collection = PointerProperty(
+        name="Collection Target",
+        description="Collection associated with the manual output value",
+        type=bpy.types.Collection,
     )
     baked_target_indices = StringProperty(
         name="Baked Target Indices",
@@ -2851,25 +2869,63 @@ class PatchedLightEffect(PropertyGroup):
                 if not entries:
                     return outputs, None
 
-                value_map = {
-                    int(max(0, getattr(item, "drone_id", 0))): max(
-                        0.0, min(1.0, float(getattr(item, "output_value", 0.0)))
-                    )
-                    for item in entries
-                }
+                mapping_lookup = (
+                    {mapped: idx for idx, mapped in enumerate(mapping) if mapped is not None}
+                    if mapping is not None
+                    else None
+                )
 
-                if mapping is not None:
-                    mapped_indices = {
-                        mapped: idx for idx, mapped in enumerate(mapping) if mapped is not None
-                    }
-                    for drone_id, value in value_map.items():
-                        idx = mapped_indices.get(drone_id)
-                        if idx is not None:
-                            outputs[idx] = value
-                else:
-                    for idx, value in value_map.items():
-                        if idx < num_positions:
-                            outputs[idx] = value
+                position_to_index: dict[tuple[float, ...], int] = {}
+                for idx in range(num_positions):
+                    try:
+                        pos_tuple = tuple(map(float, positions[idx]))
+                    except Exception:
+                        continue
+                    position_to_index[pos_tuple] = idx
+
+                def _indices_for_collection(collection) -> set[int]:
+                    indices: set[int] = set()
+                    if collection is None:
+                        return indices
+                    try:
+                        objects = collection.objects
+                    except Exception:
+                        return indices
+
+                    for obj in objects:
+                        index: Optional[int] = None
+                        trailing_digits = _DIGITS_AT_END.search(getattr(obj, "name", ""))
+                        if trailing_digits:
+                            drone_index = int(trailing_digits.group(0))
+                            if mapping_lookup is not None:
+                                mapped_index = mapping_lookup.get(drone_index)
+                                if mapped_index is not None:
+                                    index = mapped_index
+                                else:
+                                    index = drone_index
+                            else:
+                                index = drone_index
+
+                        if index is None and position_to_index:
+                            try:
+                                pos_tuple = tuple(map(float, get_position_of_object(obj)))
+                                index = position_to_index.get(pos_tuple)
+                            except Exception:
+                                index = None
+
+                        if index is not None and 0 <= index < num_positions:
+                            indices.add(index)
+
+                    return indices
+
+                for item in entries:
+                    value = max(0.0, min(1.0, float(getattr(item, "output_value", 0.0))))
+                    collection = getattr(item, "collection", None)
+                    if collection is None:
+                        continue
+                    indices = _indices_for_collection(collection)
+                    for idx in indices:
+                        outputs[idx] = value
 
                 return outputs, None
 
@@ -3559,7 +3615,7 @@ def patch_light_effect_class():
     LightEffect.dynamic_color_ramps = PatchedLightEffect.dynamic_color_ramps
     LightEffect.manual_output_entries = PatchedLightEffect.manual_output_entries
     LightEffect.manual_output_value = PatchedLightEffect.manual_output_value
-    LightEffect.manual_output_drone_id = PatchedLightEffect.manual_output_drone_id
+    LightEffect.manual_output_collection = PatchedLightEffect.manual_output_collection
     LightEffect.original_output = getattr(LightEffect, "output", None)
     LightEffect.output = EnumProperty(
         name="Output X",
@@ -3582,7 +3638,7 @@ def patch_light_effect_class():
             (OUTPUT_MESH_UV_U, "Mesh UV (U)", "", 15),
             (OUTPUT_FORMATION_UV_U, "Formation UV (U)", "", 16),
             (OUTPUT_BAKED_UV_R, "Baked UV (R)", "", 17),
-            (OUTPUT_MANUAL, "Manual (Output X + Drone ID)", "", 18),
+            (OUTPUT_MANUAL, "Manual (Output X + Collection)", "", 18),
         ],
         default="LAST_COLOR",
     )
@@ -3608,7 +3664,7 @@ def patch_light_effect_class():
             (OUTPUT_MESH_UV_V, "Mesh UV (V)", "", 15),
             (OUTPUT_FORMATION_UV_V, "Formation UV (V)", "", 16),
             (OUTPUT_BAKED_UV_G, "Baked UV (G)", "", 17),
-            (OUTPUT_MANUAL, "Manual (Output X + Drone ID)", "", 18),
+            (OUTPUT_MANUAL, "Manual (Output X + Collection)", "", 18),
         ],
         default="LAST_COLOR",
     )
@@ -3670,7 +3726,9 @@ def patch_light_effect_class():
     LightEffect.__annotations__["color_image"] = LightEffect.color_image
     LightEffect.__annotations__["manual_output_entries"] = LightEffect.manual_output_entries
     LightEffect.__annotations__["manual_output_value"] = LightEffect.manual_output_value
-    LightEffect.__annotations__["manual_output_drone_id"] = LightEffect.manual_output_drone_id
+    LightEffect.__annotations__["manual_output_collection"] = (
+        LightEffect.manual_output_collection
+    )
     LightEffect.__annotations__["output"] = LightEffect.output
     LightEffect.__annotations__["output_y"] = LightEffect.output_y
     LightEffect.__annotations__["target"] = LightEffect.target
@@ -6012,8 +6070,8 @@ class RefreshDynamicColorRampOperator(Operator):  # pragma: no cover - Blender U
 
 class AddManualOutputEntryOperator(Operator):  # pragma: no cover - Blender UI
     bl_idname = "skybrush.manual_output_add"
-    bl_label = "Store Output / Drone Pair"
-    bl_description = "Store the current Output X value together with the target drone ID"
+    bl_label = "Store Output / Collection Pair"
+    bl_description = "Store the current Output X value together with the target collection"
 
     @classmethod
     def poll(cls, context):
@@ -6023,38 +6081,43 @@ class AddManualOutputEntryOperator(Operator):  # pragma: no cover - Blender UI
     def execute(self, context):
         entry = context.scene.skybrush.light_effects.active_entry
         value = max(0.0, min(1.0, float(getattr(entry, "manual_output_value", 0.0))))
-        drone_id = int(max(0, getattr(entry, "manual_output_drone_id", 0)))
+        collection = getattr(entry, "manual_output_collection", None)
 
-        obj = getattr(context, "object", None)
-        if obj is None and getattr(context, "selected_objects", None):
-            obj = context.selected_objects[0]
-        if obj is not None:
-            trailing_digits = _DIGITS_AT_END.search(obj.name)
-            if trailing_digits:
-                drone_index = int(trailing_digits.group(0))
-                drone_id = drone_index
-
-                mapping = None
+        if collection is None:
+            obj = getattr(context, "object", None)
+            if obj is None and getattr(context, "selected_objects", None):
+                obj = context.selected_objects[0]
+            if obj is not None:
                 try:
-                    storyboard = context.scene.skybrush.storyboard
-                    mapping = storyboard.get_mapping_at_frame(context.scene.frame_current)
+                    collections = getattr(obj, "users_collection", None) or []
+                    collection = collections[0] if collections else None
                 except Exception:
-                    mapping = None
-                if mapping is not None:
-                    mapped_drone_index = next(
-                        (idx for idx, mapped in enumerate(mapping) if mapped == drone_index),
-                        None,
-                    )
-                    if mapped_drone_index is not None:
-                        drone_id = mapped_drone_index
+                    collection = None
 
-        entry.manual_output_drone_id = drone_id
+        if collection is None:
+            self.report({'WARNING'}, "Select a collection to store the manual output value.")
+            return {'CANCELLED'}
 
-        item = entry.manual_output_entries.add()
-        item.drone_id = drone_id
+        entry.manual_output_collection = collection
+
+        existing_index = next(
+            (
+                idx
+                for idx, item in enumerate(entry.manual_output_entries)
+                if getattr(item, "collection", None) == collection
+            ),
+            None,
+        )
+
+        if existing_index is None:
+            item = entry.manual_output_entries.add()
+        else:
+            item = entry.manual_output_entries[existing_index]
+
+        item.collection = collection
         item.output_value = value
 
-        self.report({'INFO'}, f"Stored output {value:.3f} for drone {drone_id}")
+        self.report({'INFO'}, f"Stored output {value:.3f} for collection {collection.name}")
         return {'FINISHED'}
 
 
@@ -6270,10 +6333,9 @@ class PatchedLightEffectsPanel(Panel):  # pragma: no cover - Blender UI code
                     col.prop(entry.output_function, "name", text="Fn name")
                 if entry.output == OUTPUT_MANUAL:
                     manual_box = col.box()
-                    manual_box.label(text="Store Output X with Drone ID")
-                    values_row = manual_box.row(align=True)
-                    values_row.prop(entry, "manual_output_value")
-                    values_row.prop(entry, "manual_output_drone_id")
+                    manual_box.label(text="Store Output X for Collections")
+                    manual_box.prop(entry, "manual_output_collection", text="Collection")
+                    manual_box.prop(entry, "manual_output_value")
                     manual_box.operator(
                         AddManualOutputEntryOperator.bl_idname,
                         text="Add / Update Pair",
@@ -6281,7 +6343,7 @@ class PatchedLightEffectsPanel(Panel):  # pragma: no cover - Blender UI code
                     )
                     for idx, manual in enumerate(entry.manual_output_entries):
                         row_manual = manual_box.row(align=True)
-                        row_manual.prop(manual, "drone_id", text="ID")
+                        row_manual.prop(manual, "collection", text="Collection")
                         row_manual.prop(manual, "output_value", text="Output X")
                         remove = row_manual.operator(
                             RemoveManualOutputEntryOperator.bl_idname,
