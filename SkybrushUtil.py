@@ -1576,8 +1576,11 @@ def add_prefix_le_tex(context):
 
 def set_propertygroup_from_dict(pg, data):
     """辞書データをPropertyGroupにセット（texture/meshのみ特殊処理）"""
+    annotations = getattr(pg, "__annotations__", {}) or {}
+
     for key, value in data.items():
-        if key not in getattr(pg, "__annotations__", {}) and not hasattr(pg, key):
+        annotation = annotations.get(key)
+        if annotation is None and not hasattr(pg, key):
             continue  # JSONに余分なキーがあっても無視
 
         # 空文字や None はスキップ
@@ -1611,15 +1614,21 @@ def set_propertygroup_from_dict(pg, data):
             continue
 
         # EnumProperty の場合（候補外はスキップ）
-        if "EnumProperty" in str(type(pg.__annotations__[key])):
-            enum_items = pg.__annotations__[key].keywords["items"]
+        if annotation is not None and "EnumProperty" in str(type(annotation)):
+            enum_items = annotation.keywords["items"]
             if value not in [item[0] for item in enum_items]:
                 continue
-            setattr(pg, key, value)
+            try:
+                setattr(pg, key, value)
+            except (AttributeError, TypeError, ValueError):
+                continue  # read-only or incompatible, skip safely
             continue
 
         # 通常プロパティ
-        setattr(pg, key, value)
+        try:
+            setattr(pg, key, value)
+        except (AttributeError, TypeError, ValueError):
+            continue  # read-only or incompatible, skip safely
 
 def _ensure_color_ramp_texture(effect, ramp_data):
     """Ensure a texture exists for restoring ColorRamp information."""
@@ -1655,6 +1664,8 @@ def apply_color_ramp(texture, ramp_data):
         return
 
     color_ramp = texture.color_ramp
+    if color_ramp is None:
+        return
 
     if isinstance(ramp_data, dict):
         elements = ramp_data.get("elements") or []

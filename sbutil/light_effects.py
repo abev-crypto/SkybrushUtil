@@ -2705,6 +2705,7 @@ class PatchedLightEffect(PropertyGroup):
 
     def apply_on_colors(
         self,
+        drones,
         colors: Sequence[MutableRGBAColor],
         positions: Sequence[Coordinate3D],
         mapping: Optional[list[int]],

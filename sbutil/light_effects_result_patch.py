@@ -8,29 +8,17 @@ on its own.
 
 from __future__ import annotations
 
-try:  # pragma: no cover - Blender dependency
-    import bpy
-except Exception:  # pragma: no cover - allows import without Blender
-    bpy = None
 
-try:  # pragma: no cover - Skybrush dependency
-    from sbstudio.plugin import colors as _colors_mod
-    from sbstudio.plugin.constants import Collections
-    from sbstudio.plugin.tasks import light_effects as _light_effects_mod
-    from sbstudio.plugin.utils.evaluator import get_position_of_object
-    from sbstudio.plugin.utils.image import find_image_by_name
-except Exception:  # pragma: no cover - optional dependency
-    _colors_mod = None
-    _light_effects_mod = None
-    Collections = None
-    get_position_of_object = None
-    find_image_by_name = None
+import bpy
 
-try:  # pragma: no cover - typing helpers
-    from sbstudio.model.types import MutableRGBAColor, RGBAColor
-except Exception:  # pragma: no cover - optional dependency
-    MutableRGBAColor = list  # type: ignore
-    RGBAColor = tuple  # type: ignore
+from sbstudio.plugin import colors as _colors_mod
+from sbstudio.plugin.tasks import light_effects as _light_effects_mod
+from sbstudio.plugin.utils.image import find_image_by_name
+
+from sbstudio.model.types import MutableRGBAColor, RGBAColor
+from sbstudio.plugin.constants import Collections
+from sbstudio.plugin.materials import get_led_light_color, set_led_light_color
+from sbstudio.plugin.utils.evaluator import get_position_of_object
 
 __all__ = (
     "patch_light_effect_results",
@@ -136,6 +124,83 @@ def _patched_update_light_effects(scene, depsgraph):
     else:
         _copy_previous_column(image, frame - frame_start)
 
+def update_light_effects(scene, depsgraph):
+    global _last_frame, _base_color_cache, _suspension_counter, WHITE
+
+    
+    
+    
+    
+
+    if _suspension_counter > 0:
+        return
+
+    light_effects = scene.skybrush.light_effects
+    if not light_effects:
+        return
+
+    random_seq = scene.skybrush.settings.random_sequence_root
+
+    frame = scene.frame_current
+    drones = None
+
+    if _last_frame != frame:
+        
+        _last_frame = frame
+        _base_color_cache.clear()
+
+    changed = False
+
+    for effect in light_effects.iter_active_effects_in_frame(frame):
+        if drones is None:
+            
+            drones = Collections.find_drones().objects
+            positions = [get_position_of_object(drone) for drone in drones]
+            mapping = scene.skybrush.storyboard.get_mapping_at_frame(frame)
+            if not _base_color_cache:
+                
+                
+                colors: list[MutableRGBAColor] = []
+                for drone in drones:
+                    color = list(get_led_light_color(drone))
+                    colors.append(color)
+                    _base_color_cache[id(drone)] = color
+            else:
+                
+                colors = [
+                    _base_color_cache.get(id(drone)) or list(WHITE) for drone in drones
+                ]
+
+            changed = True
+
+        effect.apply_on_colors(
+            drones,
+            colors,
+            positions=positions,
+            mapping=mapping,
+            frame=frame,
+            random_seq=random_seq,
+        )
+
+    
+    
+    
+    
+    
+    if not changed:
+        if _base_color_cache:
+            drones = Collections.find_drones().objects
+            colors = [
+                _base_color_cache.get(id(drone)) or list(WHITE) for drone in drones
+            ]
+            _base_color_cache.clear()
+            changed = True
+
+    if changed:
+        assert drones is not None
+        for drone, color in zip(drones, colors):
+            set_led_light_color(drone, color)
+
 
 def _copy_previous_column(image, column: int) -> None:
     if column <= 0:
@@ -230,16 +295,16 @@ def patch_light_effect_results():
     _ORIGINALS["get_color_of_drone"] = _colors_mod.get_color_of_drone
     _ORIGINALS["update_light_effects"] = _light_effects_mod.update_light_effects
 
-    _colors_mod.get_color_of_drone = _patched_get_color_of_drone
+    #_colors_mod.get_color_of_drone = _patched_get_color_of_drone
 
     _light_effects_mod._render_range = None
     _light_effects_mod._result_image = None
-    _light_effects_mod.RESULT_IMAGE_NAME = "Light effects result"
-    _light_effects_mod._copy_previous_column = _copy_previous_column
-    _light_effects_mod._get_base_colors_for_frame = _get_base_colors_for_frame
-    _light_effects_mod._get_or_create_result_image = _get_or_create_result_image
-    _light_effects_mod._write_column = _write_column
-    _light_effects_mod.update_light_effects = _patched_update_light_effects
+    #_light_effects_mod.RESULT_IMAGE_NAME = "Light effects result"
+    #_light_effects_mod._copy_previous_column = _copy_previous_column
+    #_light_effects_mod._get_base_colors_for_frame = _get_base_colors_for_frame
+    #_light_effects_mod._get_or_create_result_image = _get_or_create_result_image
+    #_light_effects_mod._write_column = _write_column
+    _light_effects_mod.update_light_effects = update_light_effects
 
 
 def unpatch_light_effect_results():
