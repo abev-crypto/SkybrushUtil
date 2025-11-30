@@ -609,6 +609,9 @@ class DRONE_OT_UseNewDroneSpec(Operator):
         converted = 0
         for obj in collection.objects:
             _convert_object(obj)
+            obj.show_texture_space = True
+            obj.display_type = 'BOUNDS'
+            obj.display.show_shadows = False
             converted += 1
 
         drone_mesh_gn.setup_for_collection(collection)
