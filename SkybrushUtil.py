@@ -170,26 +170,6 @@ def ensure_light_json_file(blend_dir, prefix):
 
     return os.path.exists(light_path)
 
-
-def _find_drone_collection():
-    collection = bpy.data.collections.get("Drones")
-    if collection is not None:
-        return collection
-    collection = Collections.find_drones()
-    if collection is not None:
-        return collection
-
-    return bpy.data.collections.get("Drones")
-
-
-def _iter_drone_mesh_objects(collection):
-    objects = getattr(collection, "all_objects", None) or collection.objects
-    for obj in objects:
-        if obj is None:
-            continue
-        if getattr(obj, "type", None) == 'MESH':
-            yield obj
-
 # -------------------------------
 # LightEffect Export Helpers
 # -------------------------------
@@ -611,14 +591,24 @@ class DRONE_OT_UseNewDroneSpec(Operator):
     )
 
     def execute(self, context):
-        collection = _find_drone_collection()
+        collection = bpy.data.collections.get("Drones")
         if collection is None:
             self.report({'ERROR'}, "DroneCollection not found")
             return {'CANCELLED'}
 
+        new_mesh = bpy.data.meshes.new(name="Drone_SingleVert")
+        new_mesh.from_pydata([(0.0, 0.0, 0.0)], [], [])
+        new_mesh.update()
+
+        def _convert_object(obj):
+            old_mesh = obj.data
+            obj.data = new_mesh
+            obj.data.materials.clear()
+            bpy.data.meshes.remove(old_mesh)
+
         converted = 0
-        for obj in _iter_drone_mesh_objects(collection):
-            self._convert_object(obj)
+        for obj in collection.objects:
+            _convert_object(obj)
             converted += 1
 
         drone_mesh_gn.setup_for_collection(collection)
@@ -630,19 +620,6 @@ class DRONE_OT_UseNewDroneSpec(Operator):
 
         self.report({'INFO'}, f"Converted {converted} drones to the new specification")
         return {'FINISHED'}
-
-    @staticmethod
-    def _convert_object(obj):
-        old_mesh = obj.data
-        new_mesh = bpy.data.meshes.new(name=f"{obj.name}_SingleVert")
-        new_mesh.from_pydata([(0.0, 0.0, 0.0)], [], [])
-        new_mesh.update()
-
-        obj.data = new_mesh
-        obj.data.materials.clear()
-
-        if old_mesh and old_mesh.users == 0:
-            bpy.data.meshes.remove(old_mesh)
 
 class DRONE_OT_ApplyProximityLimit(Operator):
     """Add Limit Distance constraints for drones closer than the safety threshold."""

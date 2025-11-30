@@ -119,13 +119,14 @@ def _patched_update_light_effects(scene, depsgraph):
             changed = True
 
         effect.apply_on_colors(
-            colors,
+            drones=drones,
+            colors=colors,
             positions=positions,
             mapping=mapping,
             frame=frame,
             random_seq=random_seq,
         )
-
+    return
     if changed and colors is not None:
         _write_column(image, frame - frame_start, colors)
     else:
