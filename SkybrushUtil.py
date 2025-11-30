@@ -608,8 +608,7 @@ class DRONE_OT_UseNewDroneSpec(Operator):
             obj.data = new_mesh
             obj.data.materials.clear()
             for mat in materials_to_remove:
-                if mat.users == 0:
-                    bpy.data.materials.remove(mat)
+                bpy.data.materials.remove(mat)
             bpy.data.meshes.remove(old_mesh)
 
         converted = 0
