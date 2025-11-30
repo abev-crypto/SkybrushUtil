@@ -9,6 +9,8 @@ on its own.
 
 import bpy
 from bpy.types import Image
+from typing import Iterator, Optional, TYPE_CHECKING
+from bpy.app.handlers import persistent
 
 from sbstudio.model import color as _colors_mod
 from sbstudio.plugin.constants import Collections
@@ -129,10 +131,24 @@ def _patched_update_light_effects(scene, depsgraph):
     else:
         _copy_previous_column(image, frame - frame_start)
 
-def update_light_effects(scene, depsgraph):
-    global _last_frame, _base_color_cache, _suspension_counter, WHITE
+_base_color_cache: dict[int, RGBAColor] = {}
 
-    
+_last_frame: Optional[int] = None
+"""Number of the last frame that was evaluated with `update_light_effects()`"""
+
+_suspension_counter: int = 0
+"""Suspension counter. Dynamic light effect evaluation is suspended if this
+counter is positive.
+"""
+
+WHITE: RGBAColor = (1, 1, 1, 1)
+"""White color, used as a base color when no info is available for a newly added
+drone.
+"""
+
+@persistent
+def c_update_light_effects(scene):
+    global _last_frame, _base_color_cache, _suspension_counter, WHITE
     
     
     
@@ -287,23 +303,19 @@ def _write_column(image, column: int, colors: list[MutableRGBAColor]) -> None:
 def _reregister_update_light_effects() -> None:
     bpy.app.handlers.depsgraph_update_post.remove(_light_effects_mod.update_light_effects)
     bpy.app.handlers.frame_change_post.remove(_light_effects_mod.update_light_effects)
-    bpy.app.handlers.depsgraph_update_post.append(update_light_effects)
-    bpy.app.handlers.frame_change_post.append(update_light_effects)
-
+    bpy.app.handlers.depsgraph_update_post.append(c_update_light_effects)
+    bpy.app.handlers.frame_change_post.append(c_update_light_effects)
+    print("Reregistered patched update_light_effects.")
 
 def patch_light_effect_results():
     """Apply the monkey patches when Skybrush is available."""
 
-    if _ORIGINALS:
-        return
-
-    #_ORIGINALS["get_color_of_drone"] = _colors_mod.get_color_of_drone
-    _ORIGINALS["update_light_effects"] = _light_effects_mod.update_light_effects
 
     #_colors_mod.get_color_of_drone = _patched_get_color_of_drone
 
-    _light_effects_mod.update_light_effects = update_light_effects
+    
     _reregister_update_light_effects()
+    #_light_effects_mod.update_light_effects = update_light_effects
 
 
 def unpatch_light_effect_results():

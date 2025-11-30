@@ -2011,50 +2011,12 @@ def try_patch():
     bpy.app.timers.unregister(try_patch)
     return None
 
-
-_PATCH_DELAY_FRAMES = 3
-_patch_delay_start_frame = None
-
-
-def _delayed_patch_handler(scene):
-    """Apply patches after waiting for a few frame changes.
-
-    Using a frame-change handler keeps the delay tied to animation updates
-    instead of real time so the patch is applied only after Blender has had
-    a chance to finish its initial updates.
-    """
-
-    global _patch_delay_start_frame
-
-    if _patch_delay_start_frame is None:
-        _patch_delay_start_frame = scene.frame_current
-        return
-
-    if scene.frame_current - _patch_delay_start_frame < _PATCH_DELAY_FRAMES:
-        return
-
-    try:
-        bpy.app.handlers.frame_change_pre.remove(_delayed_patch_handler)
-    except ValueError:
-        pass
-
-    _patch_delay_start_frame = None
-    bpy.app.timers.register(try_patch)
-
-
-def _schedule_delayed_patch():
-    global _patch_delay_start_frame
-
-    _patch_delay_start_frame = None
-    if _delayed_patch_handler not in bpy.app.handlers.frame_change_pre:
-        bpy.app.handlers.frame_change_pre.append(_delayed_patch_handler)
-
 # --- ファイル読み込み後にも再適用したい場合（原状復帰→再適用が安全） ---
 def _on_load_post(_dummy):
     # 原状復帰→再適用（複数回読み込みに強くする）
     _restore_originals()
     # 遅延パッチも再スケジュール
-    _schedule_delayed_patch()
+    bpy.app.timers.register(try_patch, first_interval=0.1)
 
 def _restore_originals():
     try:
@@ -2337,7 +2299,7 @@ def register():
     reflow_vertex.register()
     drone_check_gn.register()
     view_setup.register()
-    _schedule_delayed_patch()
+    bpy.app.timers.register(try_patch)
     bpy.app.handlers.load_post.append(_on_load_post)
     if _auto_run_proximity_check not in bpy.app.handlers.frame_change_post:
         bpy.app.handlers.frame_change_post.append(_auto_run_proximity_check)
@@ -2373,8 +2335,6 @@ def unregister():
         bpy.app.handlers.load_post.remove(_on_load_post)
     if _auto_run_proximity_check in bpy.app.handlers.frame_change_post:
         bpy.app.handlers.frame_change_post.remove(_auto_run_proximity_check)
-    if _delayed_patch_handler in bpy.app.handlers.frame_change_pre:
-        bpy.app.handlers.frame_change_pre.remove(_delayed_patch_handler)
 
     # 元に戻す
     _restore_originals()
