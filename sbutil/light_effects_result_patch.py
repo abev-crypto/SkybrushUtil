@@ -149,9 +149,6 @@ drone.
 @persistent
 def c_update_light_effects(scene):
     global _last_frame, _base_color_cache, _suspension_counter, WHITE
-    
-    
-    
 
     if _suspension_counter > 0:
         return

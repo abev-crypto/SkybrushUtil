@@ -2925,58 +2925,14 @@ class PatchedLightEffect(PropertyGroup):
                     indices: set[int] = set()
                     if collection is None:
                         return indices
-                    try:
-                        objects = collection.objects
-                    except Exception:
-                        return indices
-
+                    objects = collection.objects
                     objects_by_name = {getattr(obj, "name", None): obj for obj in objects}
-
-                    if drones:
-                        for idx, drone in enumerate(drones):
-                            try:
-                                in_collection = drone in objects
-                            except Exception:
-                                drone_name = getattr(drone, "name", None)
-                                in_collection = drone_name is not None and drone_name in objects_by_name
-
-                            if not in_collection:
-                                continue
-
-                            index: Optional[int] = idx
-                            trailing_digits = _DIGITS_AT_END.search(getattr(drone, "name", ""))
-                            if trailing_digits:
-                                drone_index = int(trailing_digits.group(0))
-                                if mapping_lookup is not None:
-                                    mapped_index = mapping_lookup.get(drone_index)
-                                    if mapped_index is not None:
-                                        index = mapped_index
-                                    else:
-                                        index = drone_index
-                                else:
-                                    index = drone_index
-
-                            if index is not None and 0 <= index < num_positions:
-                                indices.add(index)
-                        return indices
-
-                    for obj in objects:
-                        index: Optional[int] = None
-                        trailing_digits = _DIGITS_AT_END.search(getattr(obj, "name", ""))
-                        if trailing_digits:
-                            drone_index = int(trailing_digits.group(0))
-                            if mapping_lookup is not None:
-                                mapped_index = mapping_lookup.get(drone_index)
-                                if mapped_index is not None:
-                                    index = mapped_index
-                                else:
-                                    index = drone_index
-                            else:
-                                index = drone_index
-
-                        if index is not None and 0 <= index < num_positions:
-                            indices.add(index)
-
+                    for idx, drone in enumerate(drones):
+                        drone_name = getattr(drone, "name", None)
+                        in_collection = drone_name is not None and drone_name in objects_by_name
+                        if in_collection:
+                            indices.add(idx)
+                        
                     return indices
 
                 for item in entries:
