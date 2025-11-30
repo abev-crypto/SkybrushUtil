@@ -22,6 +22,7 @@ from sbutil import light_effects as light_effects_patch
 from sbutil import light_effects_result_patch
 from sbutil import recalculate_transitions_patch
 from sbutil import CSV2Vertex
+from sbutil import drone_mesh_gn
 from sbutil import reflow_vertex
 from sbutil import drone_check_gn
 from sbutil import view_setup
@@ -167,6 +168,32 @@ def ensure_light_json_file(blend_dir, prefix):
     bpy.utils.unregister_class(DRONE_OT_SelectLightJsonDir)
 
     return os.path.exists(light_path)
+
+
+def _find_drone_collection():
+    collection = bpy.data.collections.get("DroneCollection")
+    if collection is not None:
+        return collection
+
+    spec = importlib.util.find_spec("sbstudio.plugin.constants")
+    if spec is not None:
+        from sbstudio.plugin.constants import Collections
+
+        try:
+            collection = Collections.find_drones()
+        except Exception:
+            collection = None
+        if collection is not None:
+            return collection
+
+    return bpy.data.collections.get("Drones")
+
+
+def _iter_drone_mesh_objects(collection):
+    objects = getattr(collection, "all_objects", None) or collection.objects
+    for obj in objects:
+        if obj.type == 'MESH':
+            yield obj
 
 # -------------------------------
 # LightEffect Export Helpers
@@ -576,6 +603,51 @@ class DRONE_OT_RecalcTransitionsWithKeys(Operator):
 
         self.report({'INFO'}, f"Transitions recalculated ({self.scope}) and keys reloaded")
         return {'FINISHED'}
+
+
+class DRONE_OT_UseNewDroneSpec(Operator):
+    """Convert drones to the new specification and enable patched updates."""
+
+    bl_idname = "drone.use_new_drone_spec"
+    bl_label = "Convert to New Drone Spec"
+    bl_description = (
+        "Set drone meshes to single vertices, clear materials, rebuild geometry nodes, "
+        "and force patched light effect updates."
+    )
+
+    def execute(self, context):
+        collection = _find_drone_collection()
+        if collection is None:
+            self.report({'ERROR'}, "DroneCollection not found")
+            return {'CANCELLED'}
+
+        converted = 0
+        for obj in _iter_drone_mesh_objects(collection):
+            self._convert_object(obj)
+            converted += 1
+
+        drone_mesh_gn.setup_for_collection(collection)
+
+        scene = context.scene
+        scene.sbutil_use_patched_light_effects = True
+        light_effects_result_patch._base_color_cache.clear()
+        light_effects_result_patch._last_frame = None
+
+        self.report({'INFO'}, f"Converted {converted} drones to the new specification")
+        return {'FINISHED'}
+
+    @staticmethod
+    def _convert_object(obj):
+        old_mesh = obj.data
+        new_mesh = bpy.data.meshes.new(name=f"{obj.name}_SingleVert")
+        new_mesh.from_pydata([(0.0, 0.0, 0.0)], [], [])
+        new_mesh.update()
+
+        obj.data = new_mesh
+        obj.data.materials.clear()
+
+        if old_mesh and old_mesh.users == 0:
+            bpy.data.meshes.remove(old_mesh)
 
 class DRONE_OT_ApplyProximityLimit(Operator):
     """Add Limit Distance constraints for drones closer than the safety threshold."""
@@ -2132,6 +2204,10 @@ class DRONE_PT_Utilities(Panel):
 
     def draw(self, context):
         layout = self.layout
+        layout.operator("drone.use_new_drone_spec", text="Convert to New Drone Spec", icon='MOD_NODES')
+        if getattr(context.scene, "sbutil_use_patched_light_effects", False):
+            layout.label(text="Patched light effects enabled", icon='CHECKMARK')
+        layout.separator()
         layout.prop(context.scene, "proximity_limit_mode", text="Clamp Region")
         layout.prop(context.scene, "proximity_skip_influence_keys")
         layout.operator(
@@ -2202,6 +2278,7 @@ classes = (
     DRONE_OT_LoadAllKeys,
     DRONE_OT_append_assets,
     DRONE_OT_RecalcTransitionsWithKeys,
+    DRONE_OT_UseNewDroneSpec,
     DRONE_OT_ApplyProximityLimit,
     DRONE_OT_RemoveProximityLimit,
     DRONE_OT_LinearizeCopyLocationInfluence,
@@ -2235,6 +2312,13 @@ def register():
     bpy.types.Scene.drone_key_props = bpy.props.PointerProperty(type=DroneKeyTransferProperties)
     bpy.types.Scene.time_bind = bpy.props.PointerProperty(type=TimeBindCollection)
     bpy.types.Scene.shift_prefix_list = bpy.props.PointerProperty(type=ShiftPrefixList)
+    bpy.types.Scene.sbutil_use_patched_light_effects = BoolProperty(
+        name="Use Patched Light Effects",
+        description=(
+            "Keep using the patched light effect updater after converting drones to the new specification"
+        ),
+        default=False,
+    )
     bpy.types.Scene.auto_proximity_check = BoolProperty(
         name="Auto Proximity Check",
         description="Run full proximity check when frame changes",
@@ -2310,6 +2394,8 @@ def unregister():
     del bpy.types.Scene.drone_key_props
     del bpy.types.Scene.time_bind
     del bpy.types.Scene.shift_prefix_list
+    if hasattr(bpy.types.Scene, "sbutil_use_patched_light_effects"):
+        del bpy.types.Scene.sbutil_use_patched_light_effects
     if hasattr(bpy.types.Scene, "auto_proximity_check"):
         del bpy.types.Scene.auto_proximity_check
     if hasattr(bpy.types.Scene, "proximity_limit_mode"):
