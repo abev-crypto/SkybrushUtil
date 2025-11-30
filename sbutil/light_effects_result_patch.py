@@ -92,19 +92,12 @@ def _patched_update_light_effects(scene, depsgraph):
 
     frame = scene.frame_current
     frame_start = scene.frame_start
-    frame_end = scene.frame_end
-    render_range = (frame_start, frame_end)
-    render_range_length = frame_end - frame_start + 1
 
     drones = Collections.find_drones().objects if Collections is not None else []
     mapping = scene.skybrush.storyboard.get_mapping_at_frame(frame)
     height = len(mapping) if mapping is not None else len(drones)
 
     if not drones or height == 0:
-        return
-
-    image = _get_or_create_result_image(render_range_length, height, render_range)
-    if image is None:
         return
 
     changed = False
@@ -115,7 +108,7 @@ def _patched_update_light_effects(scene, depsgraph):
     for effect in light_effects.iter_active_effects_in_frame(frame):
         if colors is None:
             positions = [get_position_of_object(drone) for drone in drones]
-            colors = _get_base_colors_for_frame(image, frame, frame_start, drones)
+            colors = [[0.0, 0.0, 0.0, 0.0] for _ in drones]
             changed = True
 
         effect.apply_on_colors(
