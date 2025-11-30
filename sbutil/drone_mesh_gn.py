@@ -45,18 +45,34 @@ def ensure_sphere_object(name: str) -> bpy.types.Object:
     return obj
 
 
-def ensure_system_object(name: str) -> bpy.types.Object:
+def ensure_system_object(name: str, vertex_count: int) -> bpy.types.Object:
     """GNをぶら下げるためのシステム用オブジェクトを用意"""
-    obj = bpy.data.objects.get(name)
-    if obj and obj.type == 'MESH':
-        return obj
 
-    if obj:
+    obj = bpy.data.objects.get(name)
+    mesh = None
+
+    if obj and obj.type == 'MESH':
+        mesh = obj.data
+    elif obj:
         bpy.data.objects.remove(obj, do_unlink=True)
 
-    mesh = bpy.data.meshes.new(name + "_Mesh")
-    obj = bpy.data.objects.new(name, mesh)
-    bpy.context.scene.collection.objects.link(obj)
+    old_mesh = mesh if mesh and len(mesh.vertices) != vertex_count else None
+
+    if mesh is None or len(mesh.vertices) != vertex_count:
+        mesh = bpy.data.meshes.new(name + "_Mesh")
+        verts = [(0.0, 0.0, 0.0)] * vertex_count
+        mesh.from_pydata(verts, [], [])
+        mesh.update()
+
+    if obj is None:
+        obj = bpy.data.objects.new(name, mesh)
+        bpy.context.scene.collection.objects.link(obj)
+    else:
+        obj.data = mesh
+
+    if old_mesh and old_mesh.users == 0:
+        bpy.data.meshes.remove(old_mesh)
+
     return obj
 
 
@@ -105,10 +121,16 @@ def create_gn_group(
     n_in = nodes.new("NodeGroupInput")
     n_in.location = (-600, -100)
 
+    input_geom_socket = iface.new_socket(
+        name="Base Geometry",
+        in_out='INPUT',
+        socket_type='NodeSocketGeometry',
+    )
+
     c_cir = iface.new_socket(
-    name=CHECK_CIRCLE_SOCKET_NAME,
-    in_out='INPUT',
-    socket_type='NodeSocketBool',
+        name=CHECK_CIRCLE_SOCKET_NAME,
+        in_out='INPUT',
+        socket_type='NodeSocketBool',
     )
     c_cir.default_value = True  # デフォルトは従来通り 0〜1 グラデ
 
@@ -196,7 +218,6 @@ def create_gn_group(
 
     links.new(join_geo.outputs["Geometry"], switch.inputs["True"])
     links.new(ico_sphere_node.outputs["Mesh"], switch.inputs["False"])
-    links.new(n_in.outputs[CHECK_CIRCLE_SOCKET_NAME], switch.inputs["Switch"])
 
 
     # --- Collection Info ---
@@ -237,18 +258,33 @@ def create_gn_group(
             sock.default_value = 0.0
             break
 
+    # Base geometry をコントローラーの座標に合わせる
+    pos_node = nodes.new("GeometryNodeInputPosition")
+    pos_node.location = (-100, 350)
+
+    sample_pos = nodes.new("GeometryNodeSampleIndex")
+    sample_pos.location = (150, 300)
+    sample_pos.data_type = 'FLOAT_VECTOR'
+    try:
+        sample_pos.domain = 'POINT'
+    except AttributeError:
+        pass
+
+    set_pos = nodes.new("GeometryNodeSetPosition")
+    set_pos.location = (400, 250)
+
     # --- Domain Size（ポイント数を取得）---
     n_domain = nodes.new("GeometryNodeAttributeDomainSize")
-    n_domain.location = (-300, -100)
-    # Mesh to Points の出力は POINTCLOUD コンポーネント
+    n_domain.location = (-50, -100)
+    # 元メッシュの頂点数を使用
     try:
-        n_domain.component = 'POINTCLOUD'
+        n_domain.component = 'MESH'
     except AttributeError:
         pass
 
     # --- Index ---
     n_index = nodes.new("GeometryNodeInputIndex")
-    n_index.location = (-100, -200)
+    n_index.location = (-250, -200)
 
     # Y = (Index + 0.5) / PointCount
     n_add = nodes.new("ShaderNodeMath")
@@ -286,22 +322,25 @@ def create_gn_group(
 
     # --- 接続（全部 index ベース） ---
 
+    # 入力ジオメトリを Set Position に渡す
+    links.new(n_in.outputs[input_geom_socket.name], set_pos.inputs["Geometry"])
+
     # Collection Info 出力0(Geometry) -> Realize Instances 入力0(Geometry)
     links.new(n_col.outputs[0], n_realize.inputs[0])
 
     # Realize 出力0(Geometry) -> Mesh to Points 入力0(Mesh)
     links.new(n_realize.outputs[0], n_mesh2pts.inputs[0])
 
-    # Mesh to Points 出力0(Points) -> Domain Size 入力0(Geometry)
-    links.new(n_mesh2pts.outputs[0], n_domain.inputs[0])
+    # Mesh to Points を元に位置をサンプリング
+    links.new(n_mesh2pts.outputs[0], sample_pos.inputs["Geometry"])
+    links.new(pos_node.outputs["Position"], sample_pos.inputs["Value"])
+    links.new(n_index.outputs[0], sample_pos.inputs["Index"])
+    links.new(sample_pos.outputs["Value"], set_pos.inputs["Position"])
 
-    # Index 出力0 -> Add 入力0
+    # UV計算のためのサイズとインデックス
+    links.new(set_pos.outputs[0], n_domain.inputs[0])
     links.new(n_index.outputs[0], n_add.inputs[0])
-
-    # Add 出力 -> Divide 入力0
     links.new(n_add.outputs[0], n_div.inputs[0])
-
-    # Domain Size 出力0(Point Count) -> Divide 入力1
     links.new(n_domain.outputs[0], n_div.inputs[1])
 
     # X=1/RenderRange, Y=Divide の結果
@@ -309,8 +348,7 @@ def create_gn_group(
     links.new(n_div.outputs[0], n_combine.inputs[1])    # Y
 
     # UVベクトルを named attribute として保存
-    # Mesh to Points 出力0(Points) -> StoreNamedAttribute 入力0(Geometry)
-    links.new(n_mesh2pts.outputs[0], n_store.inputs[0])
+    links.new(set_pos.outputs[0], n_store.inputs[0])
     # Combine XYZ 出力0(Vector) -> StoreNamedAttribute 入力3(Value)
     if len(n_store.inputs) > 3:
         links.new(n_combine.outputs[0], n_store.inputs[3])
@@ -319,10 +357,12 @@ def create_gn_group(
         links.new(n_combine.outputs[0], n_store.inputs[-1])
 
     # インスタンス配置
-    # StoreNamedAttribute 出力0(Geometry) -> Instance on Points 入力0(Points)
     links.new(n_store.outputs[0], n_inst.inputs[0])
     # Object Info 出力0(Geometry/Instance) -> Instance on Points 入力2(Instance)
     links.new(switch.outputs["Output"], n_inst.inputs[2])
+
+    # Group Input の Check Circle をスイッチへ
+    links.new(n_in.outputs[c_cir.name], switch.inputs["Switch"])
 
     # 出力へ（Group Output の最初の入力ソケットに接続）
     if not group_out.inputs:
@@ -441,11 +481,12 @@ def setup_for_collection(controller_collection: bpy.types.Collection) -> bpy.typ
 
     scene = bpy.context.scene
     render_range = get_render_range(scene)
+    vertex_count = len(controller_collection.objects)
 
     mat = create_drone_material(MATERIAL_NAME, render_range)
     gn_group = create_gn_group(GN_GROUP_NAME, controller_collection, render_range, mat)
 
-    system_obj = ensure_system_object("DroneSystem")
+    system_obj = ensure_system_object("DroneSystem", vertex_count)
     mod = system_obj.modifiers.get("DroneInstances")
     if mod is None:
         mod = system_obj.modifiers.new(name="DroneInstances", type='NODES')
