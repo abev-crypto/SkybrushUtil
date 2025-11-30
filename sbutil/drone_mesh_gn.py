@@ -433,6 +433,28 @@ def create_drone_material(mat_name: str, render_range: int) -> bpy.types.Materia
 
 
 # ======================================
+# エクスポートされたユーティリティ
+# ======================================
+
+def setup_for_collection(controller_collection: bpy.types.Collection) -> bpy.types.Object:
+    """Set up the geometry node system for the given controller collection."""
+
+    scene = bpy.context.scene
+    render_range = get_render_range(scene)
+
+    mat = create_drone_material(MATERIAL_NAME, render_range)
+    gn_group = create_gn_group(GN_GROUP_NAME, controller_collection, render_range, mat)
+
+    system_obj = ensure_system_object("DroneSystem")
+    mod = system_obj.modifiers.get("DroneInstances")
+    if mod is None:
+        mod = system_obj.modifiers.new(name="DroneInstances", type='NODES')
+    mod.node_group = gn_group
+
+    return system_obj
+
+
+# ======================================
 # メイン処理
 # ======================================
 
@@ -449,18 +471,7 @@ def main():
     print(f"Using controller collection: {controller_collection.name}")
     print(f"RenderRange (frame_start={scene.frame_start}, frame_end={scene.frame_end}) -> {render_range} frames")
 
-    # マテリアル
-    mat = create_drone_material(MATERIAL_NAME, render_range)
-
-    # Geometry Nodesグループ
-    gn_group = create_gn_group(GN_GROUP_NAME, controller_collection, render_range, mat)
-
-    # システムオブジェクトにモディファイアとして付ける
-    system_obj = ensure_system_object("DroneSystem")
-    mod = system_obj.modifiers.get("DroneInstances")
-    if mod is None:
-        mod = system_obj.modifiers.new(name="DroneInstances", type='NODES')
-    mod.node_group = gn_group
+    system_obj = setup_for_collection(controller_collection)
 
     print("セットアップ完了！")
     print("・DroneSystem オブジェクトを選択してビューポートを再生すると、")
