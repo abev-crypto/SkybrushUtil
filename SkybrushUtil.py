@@ -17,6 +17,7 @@ from mathutils import Vector
 import json, os, shutil, tempfile, urllib.request
 from sbstudio.plugin.operators import RecalculateTransitionsOperator
 from sbstudio.plugin.operators.base import StoryboardOperator
+from sbstudio.plugin.constants import Collections
 from sbutil import formation_patch
 from sbutil import light_effects as light_effects_patch
 from sbutil import light_effects_result_patch
@@ -171,17 +172,12 @@ def ensure_light_json_file(blend_dir, prefix):
 
 
 def _find_drone_collection():
-    collection = bpy.data.collections.get("DroneCollection")
+    collection = bpy.data.collections.get("Drones")
     if collection is not None:
         return collection
-
-    spec = importlib.util.find_spec("sbstudio.plugin.constants")
-    if spec is not None:
-        from sbstudio.plugin.constants import Collections
-
-        collection = Collections.find_drones()
-        if collection is not None:
-            return collection
+    collection = Collections.find_drones()
+    if collection is not None:
+        return collection
 
     return bpy.data.collections.get("Drones")
 
@@ -189,7 +185,9 @@ def _find_drone_collection():
 def _iter_drone_mesh_objects(collection):
     objects = getattr(collection, "all_objects", None) or collection.objects
     for obj in objects:
-        if obj.type == 'MESH':
+        if obj is None:
+            continue
+        if getattr(obj, "type", None) == 'MESH':
             yield obj
 
 # -------------------------------
@@ -2201,7 +2199,15 @@ class DRONE_PT_Utilities(Panel):
 
     def draw(self, context):
         layout = self.layout
-        layout.operator("drone.use_new_drone_spec", text="Convert to New Drone Spec", icon='MOD_NODES')
+        # Some Blender builds complain about the icon kwarg; fall back to a plain button if needed
+        try:
+            layout.operator(
+                "drone.use_new_drone_spec",
+                text="Convert to New Drone Spec",
+                icon='NODETREE',
+            )
+        except TypeError:
+            layout.operator("drone.use_new_drone_spec", text="Convert to New Drone Spec")
         if getattr(context.scene, "sbutil_use_patched_light_effects", False):
             layout.label(text="Patched light effects enabled", icon='CHECKMARK')
         layout.separator()
