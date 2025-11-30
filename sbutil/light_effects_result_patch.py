@@ -150,6 +150,10 @@ drone.
 def c_update_light_effects(scene):
     global _last_frame, _base_color_cache, _suspension_counter, WHITE
 
+    if getattr(scene, "sbutil_use_patched_light_effects", False):
+        _patched_update_light_effects(scene, None)
+        return
+
     if _suspension_counter > 0:
         return
 
@@ -277,8 +281,8 @@ def _get_or_create_result_image(width: int, height: int, render_range: tuple[int
             bpy.data.images.remove(image)
         image = bpy.data.images.new(name="Light effects result", width=width, height=height)
 
-    result_image = render_range
-    stored_range = image
+    result_image = image
+    stored_range = render_range
     return image
 
 
