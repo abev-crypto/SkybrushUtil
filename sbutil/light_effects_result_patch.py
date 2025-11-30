@@ -6,19 +6,30 @@ when the Skybrush plug-in is available, keeping the rest of the add-on usable
 on its own.
 """
 
-from __future__ import annotations
-
 
 import bpy
+from bpy.types import Image
 
-from sbstudio.plugin import colors as _colors_mod
+from sbstudio.model import color as _colors_mod
+from sbstudio.plugin.constants import Collections
 from sbstudio.plugin.tasks import light_effects as _light_effects_mod
-from sbstudio.plugin.utils.image import find_image_by_name
+from sbstudio.plugin.utils.evaluator import get_position_of_object
+from sbstudio.plugin.materials import get_led_light_color, set_led_light_color
 
 from sbstudio.model.types import MutableRGBAColor, RGBAColor
-from sbstudio.plugin.constants import Collections
-from sbstudio.plugin.materials import get_led_light_color, set_led_light_color
-from sbstudio.plugin.utils.evaluator import get_position_of_object
+
+def find_image_by_name(name: str) -> Image | None:
+    """Searches for an image in bpy.data.images by its name.
+
+    Args:
+        name: The name of the image to find.
+
+    Returns:
+        the image object, or None if not found.
+    """
+    for img in bpy.data.images:
+        if img.name == name:
+            return img
 
 __all__ = (
     "patch_light_effect_results",
@@ -42,9 +53,6 @@ def _patched_get_color_of_drone(drone) -> RGBAColor:
 
 
 def _get_color_from_result_image(drone) -> RGBAColor | None:
-    if bpy is None or Collections is None:
-        return None
-
     scene = bpy.context.scene
     image = bpy.data.images.get("Light effects result")
     if image is None:
@@ -72,9 +80,6 @@ def _get_color_from_result_image(drone) -> RGBAColor | None:
 
 
 def _patched_update_light_effects(scene, depsgraph):
-    if _light_effects_mod is None or bpy is None:
-        return
-
     _suspension_counter = getattr(_light_effects_mod, "_suspension_counter", 0)
     if _suspension_counter > 0:
         return
@@ -112,7 +117,6 @@ def _patched_update_light_effects(scene, depsgraph):
             changed = True
 
         effect.apply_on_colors(
-            drones,
             colors,
             positions=positions,
             mapping=mapping,
@@ -175,8 +179,8 @@ def update_light_effects(scene, depsgraph):
             changed = True
 
         effect.apply_on_colors(
-            drones,
-            colors,
+            drones=drones,
+            colors=colors,
             positions=positions,
             mapping=mapping,
             frame=frame,
@@ -237,18 +241,14 @@ def _get_base_colors_for_frame(
             for row in range(height)
         ]
 
-    return [list(_colors_mod.get_color_of_drone(drone)) for drone in drones]
+    return [list(_patched_get_color_of_drone(drone)) for drone in drones]
 
+result_image: Image | None = None
+stored_range: tuple[int, int] | None = None
 
 def _get_or_create_result_image(width: int, height: int, render_range: tuple[int, int]):
-    if bpy is None:
-        return None
-
-    if _light_effects_mod is None:
-        return None
-
-    result_image = getattr(_light_effects_mod, "_result_image", None)
-    stored_range = getattr(_light_effects_mod, "_render_range", None)
+    global result_image
+    global stored_range
 
     image = result_image
     if image is None or image.name not in bpy.data.images:
@@ -264,8 +264,8 @@ def _get_or_create_result_image(width: int, height: int, render_range: tuple[int
             bpy.data.images.remove(image)
         image = bpy.data.images.new(name="Light effects result", width=width, height=height)
 
-    _light_effects_mod._render_range = render_range
-    _light_effects_mod._result_image = image
+    result_image = render_range
+    stored_range = image
     return image
 
 
@@ -284,34 +284,32 @@ def _write_column(image, column: int, colors: list[MutableRGBAColor]) -> None:
     image.pixels[:] = pixels
 
 
+def _reregister_update_light_effects() -> None:
+    bpy.app.handlers.depsgraph_update_post.remove(_light_effects_mod.update_light_effects)
+    bpy.app.handlers.frame_change_post.remove(_light_effects_mod.update_light_effects)
+    bpy.app.handlers.depsgraph_update_post.append(update_light_effects)
+    bpy.app.handlers.frame_change_post.append(update_light_effects)
+
+
 def patch_light_effect_results():
     """Apply the monkey patches when Skybrush is available."""
-
-    if _colors_mod is None or _light_effects_mod is None:
-        return
 
     if _ORIGINALS:
         return
 
-    _ORIGINALS["get_color_of_drone"] = _colors_mod.get_color_of_drone
+    #_ORIGINALS["get_color_of_drone"] = _colors_mod.get_color_of_drone
     _ORIGINALS["update_light_effects"] = _light_effects_mod.update_light_effects
 
     #_colors_mod.get_color_of_drone = _patched_get_color_of_drone
 
-    _light_effects_mod._render_range = None
-    _light_effects_mod._result_image = None
-    #_light_effects_mod.RESULT_IMAGE_NAME = "Light effects result"
-    #_light_effects_mod._copy_previous_column = _copy_previous_column
-    #_light_effects_mod._get_base_colors_for_frame = _get_base_colors_for_frame
-    #_light_effects_mod._get_or_create_result_image = _get_or_create_result_image
-    #_light_effects_mod._write_column = _write_column
     _light_effects_mod.update_light_effects = update_light_effects
+    _reregister_update_light_effects()
 
 
 def unpatch_light_effect_results():
     """Revert the monkey patches if they were applied."""
 
-    if not _ORIGINALS or _colors_mod is None or _light_effects_mod is None:
+    if not _ORIGINALS:
         return
 
     _colors_mod.get_color_of_drone = _ORIGINALS.get(  # type: ignore[assignment]
@@ -321,7 +319,7 @@ def unpatch_light_effect_results():
         "update_light_effects", _light_effects_mod.update_light_effects
     )
 
-    _light_effects_mod._render_range = None
-    _light_effects_mod._result_image = None
-
     _ORIGINALS.clear()
+
+
+
