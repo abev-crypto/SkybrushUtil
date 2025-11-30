@@ -1590,8 +1590,9 @@ def set_propertygroup_from_dict(pg, data):
         # texture / mesh は名前から検索して代入
         if key == "texture":
             tex = bpy.data.textures.get(value)
-            if tex:
-                setattr(pg, key, tex)
+            if tex is None:
+                tex = bpy.data.textures.new(name=value, type="NONE")
+            setattr(pg, key, tex)
             continue
 
         if key == "mesh":
