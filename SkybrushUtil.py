@@ -600,16 +600,17 @@ class DRONE_OT_UseNewDroneSpec(Operator):
         new_mesh.from_pydata([(0.0, 0.0, 0.0)], [], [])
         new_mesh.update()
 
+        materials_to_cleanup = set()
+
         def _convert_object(obj):
-            materials_to_remove = [
+            materials_to_cleanup.update(
                 slot.material for slot in obj.material_slots if slot.material is not None
-            ]
+            )
             old_mesh = obj.data
             obj.data = new_mesh
             obj.data.materials.clear()
-            for mat in materials_to_remove:
-                bpy.data.materials.remove(mat)
-            bpy.data.meshes.remove(old_mesh)
+            if old_mesh.users == 0:
+                bpy.data.meshes.remove(old_mesh)
 
         converted = 0
         for obj in collection.objects:
@@ -618,6 +619,12 @@ class DRONE_OT_UseNewDroneSpec(Operator):
             obj.display_type = 'BOUNDS'
             obj.display.show_shadows = False
             converted += 1
+
+        for mat in materials_to_cleanup:
+            if mat is None:
+                continue
+            if mat.users == 0:
+                bpy.data.materials.remove(mat)
 
         drone_mesh_gn.setup_for_collection(collection)
 
@@ -2195,6 +2202,7 @@ class DRONE_PT_Utilities(Panel):
             layout.operator("drone.use_new_drone_spec", text="Convert to New Drone Spec")
         if getattr(context.scene, "sbutil_use_patched_light_effects", False):
             layout.label(text="Patched light effects enabled", icon='CHECKMARK')
+        layout.prop(context.scene, "sbutil_update_light_effects")
         layout.separator()
         layout.prop(context.scene, "proximity_limit_mode", text="Clamp Region")
         layout.prop(context.scene, "proximity_skip_influence_keys")
@@ -2307,6 +2315,11 @@ def register():
         ),
         default=False,
     )
+    bpy.types.Scene.sbutil_update_light_effects = BoolProperty(
+        name="Update Light Effects",
+        description="Run the SBUtil light effect updater on frame changes",
+        default=True,
+    )
     bpy.types.Scene.auto_proximity_check = BoolProperty(
         name="Auto Proximity Check",
         description="Run full proximity check when frame changes",
@@ -2384,6 +2397,8 @@ def unregister():
     del bpy.types.Scene.shift_prefix_list
     if hasattr(bpy.types.Scene, "sbutil_use_patched_light_effects"):
         del bpy.types.Scene.sbutil_use_patched_light_effects
+    if hasattr(bpy.types.Scene, "sbutil_update_light_effects"):
+        del bpy.types.Scene.sbutil_update_light_effects
     if hasattr(bpy.types.Scene, "auto_proximity_check"):
         del bpy.types.Scene.auto_proximity_check
     if hasattr(bpy.types.Scene, "proximity_limit_mode"):

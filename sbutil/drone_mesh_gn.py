@@ -8,7 +8,6 @@ from math import inf
 GN_GROUP_NAME = "GN_DroneInstances"
 SPHERE_OBJECT_NAME = "DroneSphere"
 MATERIAL_NAME = "M_DroneTexture"
-DRONE_UV_ATTR_NAME = "drone_uv"  # Geometry Nodes / Shader で使う属性名
 CHECK_CIRCLE_SOCKET_NAME = "Check Circle"
 
 # ======================================
@@ -152,7 +151,7 @@ def create_gn_group(
     ico_sphere_node = nodes.new(type='GeometryNodeMeshIcoSphere')
     ico_sphere_node.location = (0, 0)
     # パラメーターを任意に設定
-    ico_sphere_node.inputs['Radius'].default_value = 1
+    ico_sphere_node.inputs['Radius'].default_value = 0.5
     ico_sphere_node.inputs['Subdivisions'].default_value = 2
 
     # Curve → Mesh
@@ -273,44 +272,9 @@ def create_gn_group(
     set_pos = nodes.new("GeometryNodeSetPosition")
     set_pos.location = (400, 250)
 
-    # --- Domain Size（ポイント数を取得）---
-    n_domain = nodes.new("GeometryNodeAttributeDomainSize")
-    n_domain.location = (-50, -100)
-    # 元メッシュの頂点数を使用
-    try:
-        n_domain.component = 'MESH'
-    except AttributeError:
-        pass
-
     # --- Index ---
     n_index = nodes.new("GeometryNodeInputIndex")
     n_index.location = (-250, -200)
-
-    # Y = (Index + 0.5) / PointCount
-    n_add = nodes.new("ShaderNodeMath")
-    n_add.location = (100, -200)
-    n_add.operation = 'ADD'
-    n_add.inputs[1].default_value = 0.5
-
-    n_div = nodes.new("ShaderNodeMath")
-    n_div.location = (300, -200)
-    n_div.operation = 'DIVIDE'
-
-    # X = 1 / RenderRange（一定値）
-    n_valx = nodes.new("ShaderNodeValue")
-    n_valx.location = (100, 50)
-    n_valx.outputs[0].default_value = 1.0 / float(render_range)
-
-    # Combine XYZ -> UVベクトル
-    n_combine = nodes.new("ShaderNodeCombineXYZ")
-    n_combine.location = (550, 50)
-
-    # Store Named Attribute : drone_uv (ベクトル・ポイント)
-    n_store = nodes.new("GeometryNodeStoreNamedAttribute")
-    n_store.location = (650, 200)
-    n_store.data_type = 'FLOAT_VECTOR'
-    n_store.domain = 'POINT'
-    n_store.inputs[2].default_value = DRONE_UV_ATTR_NAME  # Name ソケット（たいてい index 2）
 
     # Instance on Points
     n_inst = nodes.new("GeometryNodeInstanceOnPoints")
@@ -337,27 +301,8 @@ def create_gn_group(
     links.new(n_index.outputs[0], sample_pos.inputs["Index"])
     links.new(sample_pos.outputs["Value"], set_pos.inputs["Position"])
 
-    # UV計算のためのサイズとインデックス
-    links.new(set_pos.outputs[0], n_domain.inputs[0])
-    links.new(n_index.outputs[0], n_add.inputs[0])
-    links.new(n_add.outputs[0], n_div.inputs[0])
-    links.new(n_domain.outputs[0], n_div.inputs[1])
-
-    # X=1/RenderRange, Y=Divide の結果
-    links.new(n_valx.outputs[0], n_combine.inputs[0])   # X
-    links.new(n_div.outputs[0], n_combine.inputs[1])    # Y
-
-    # UVベクトルを named attribute として保存
-    links.new(set_pos.outputs[0], n_store.inputs[0])
-    # Combine XYZ 出力0(Vector) -> StoreNamedAttribute 入力3(Value)
-    if len(n_store.inputs) > 3:
-        links.new(n_combine.outputs[0], n_store.inputs[3])
-    else:
-        # もしソケット構成が違っていたら最後の入力に繋ぐ
-        links.new(n_combine.outputs[0], n_store.inputs[-1])
-
     # インスタンス配置
-    links.new(n_store.outputs[0], n_inst.inputs[0])
+    links.new(set_pos.outputs[0], n_inst.inputs[0])
     # Object Info 出力0(Geometry/Instance) -> Instance on Points 入力2(Instance)
     links.new(switch.outputs["Output"], n_inst.inputs[2])
 
@@ -385,7 +330,7 @@ def create_gn_group(
 # ======================================
 
 def create_drone_material(mat_name: str, render_range: int) -> bpy.types.Material:
-    """drone_uv 属性からUVを取り、X方向をフレームで動かすEmissionマテリアルを作る"""
+    """LEDColor頂点カラーを参照するEmissionマテリアルを作る"""
 
     mat = bpy.data.materials.get(mat_name)
     if mat is None:
@@ -406,68 +351,14 @@ def create_drone_material(mat_name: str, render_range: int) -> bpy.types.Materia
     n_em.location = (550, 0)
     n_em.inputs["Strength"].default_value = 5.0
 
-    # Attribute（drone_uv）
-    n_attr = nodes.new("ShaderNodeAttribute")
-    n_attr.location = (-400, 0)
-    n_attr.attribute_name = DRONE_UV_ATTR_NAME
-
-    # Separate XYZ
-    n_sep = nodes.new("ShaderNodeSeparateXYZ")
-    n_sep.location = (-150, 0)
-
-    # FrameNorm（Valueノードにドライバーで frame / RenderRange を入れる）
-    n_frame = nodes.new("ShaderNodeValue")
-    n_frame.location = (-150, -200)
-    n_frame.label = "FrameNorm"
-
-    # X + FrameNorm
-    n_add = nodes.new("ShaderNodeMath")
-    n_add.location = (100, -100)
-    n_add.operation = 'ADD'
-
-    # Combine XYZ (X動かしたもの + Yそのまま)
-    n_combine = nodes.new("ShaderNodeCombineXYZ")
-    n_combine.location = (350, 0)
-
-    # Image Texture（ここにアニメーションテクスチャを設定してもらう）
-    n_tex = nodes.new("ShaderNodeTexImage")
-    n_tex.location = (550, -200)
-    n_tex.label = "DroneTexture"
-    n_tex.extension = 'REPEAT'  # X方向にループさせたいので
+    # Vertex color (LEDColor)
+    n_vcol = nodes.new("ShaderNodeVertexColor")
+    n_vcol.location = (300, 0)
+    n_vcol.layer_name = "LEDColor"
 
     # 接続
-    links.new(n_attr.outputs["Vector"], n_sep.inputs["Vector"])
-
-    # X + FrameNorm
-    links.new(n_sep.outputs["X"], n_add.inputs[0])
-    links.new(n_frame.outputs[0], n_add.inputs[1])
-
-    # 新しいUVベクトル
-    links.new(n_add.outputs["Value"], n_combine.inputs["X"])
-    links.new(n_sep.outputs["Y"], n_combine.inputs["Y"])
-
-    # UV -> テクスチャ
-    links.new(n_combine.outputs["Vector"], n_tex.inputs["Vector"])
-
-    # テクスチャカラー -> Emission Color
-    links.new(n_tex.outputs["Color"], n_em.inputs["Color"])
-
-    # Emission -> 出力
+    links.new(n_vcol.outputs["Color"], n_em.inputs["Color"])
     links.new(n_em.outputs["Emission"], n_out.inputs["Surface"])
-
-    # FrameNorm にドライバーを設定： frame / RenderRange
-    data_path = f'nodes["{n_frame.name}"].outputs[0].default_value'
-    fcurve = nt.driver_add(data_path)
-    drv = fcurve.driver
-    # Blenderにはデフォルトで 'frame' という変数があるのでそれを使う
-    drv.expression = f"frame/{float(render_range)}"
-
-    # 変数定義は不要（frameはビルトイン）だが、明示したいなら以下を追加してもよい
-    # var = drv.variables.new()
-    # var.name = "frame"
-    # var.targets[0].id_type = 'SCENE'
-    # var.targets[0].id = bpy.context.scene
-    # var.targets[0].data_path = "frame_current"
 
     return mat
 
