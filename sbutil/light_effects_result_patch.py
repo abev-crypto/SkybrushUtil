@@ -81,6 +81,27 @@ def _get_color_from_result_image(drone) -> RGBAColor | None:
     return tuple(image.pixels[offset : offset + 4])  # type: ignore[return-value]
 
 
+def _is_any_viewport_wireframe() -> bool:
+    wm = getattr(bpy.context, "window_manager", None)
+    if wm is None:
+        return False
+
+    for window in wm.windows:
+        screen = window.screen
+        if screen is None:
+            continue
+        for area in screen.areas:
+            if area.type != 'VIEW_3D':
+                continue
+            for space in area.spaces:
+                if space.type != 'VIEW_3D':
+                    continue
+                shading = getattr(space, "shading", None)
+                if shading and getattr(shading, "type", None) == 'WIREFRAME':
+                    return True
+    return False
+
+
 def _patched_update_light_effects(scene, depsgraph):
     _suspension_counter = getattr(_light_effects_mod, "_suspension_counter", 0)
     if _suspension_counter > 0:
@@ -148,6 +169,12 @@ drone.
 @persistent
 def c_update_light_effects(scene):
     global _last_frame, _base_color_cache, _suspension_counter, WHITE
+
+    if _is_any_viewport_wireframe():
+        return
+
+    if not getattr(scene, "sbutil_update_light_effects", True):
+        return
 
     if getattr(scene, "sbutil_use_patched_light_effects", False):
         _patched_update_light_effects(scene, None)
