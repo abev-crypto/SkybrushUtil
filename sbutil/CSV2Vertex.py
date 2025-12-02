@@ -768,6 +768,95 @@ class CSVVA_OT_Import(Operator):
         return {"FINISHED"}
 
 
+def _format_bounds_suffix(pos_min, pos_max):
+    def _fmt(value: float) -> str:
+        return (f"{value:.3f}").rstrip("0").rstrip(".")
+
+    return (
+        f"Start_{_fmt(pos_min[0])}_{_fmt(pos_min[1])}_{_fmt(pos_min[2])}_"
+        f"End_{_fmt(pos_max[0])}_{_fmt(pos_max[1])}_{_fmt(pos_max[2])}"
+    )
+
+
+def _save_image(image, filepath, file_format):
+    image.filepath_raw = filepath
+    image.file_format = file_format
+    image.save()
+
+
+class CSVVA_OT_GenerateImages(Operator):
+    bl_idname = "csvva.generate_images"
+    bl_label = "Generate CAT/VAT Images"
+    bl_description = "Create CAT and VAT images for the checked entries in the list"
+
+    def execute(self, context):
+        prefs = context.scene.csvva_props
+        fps = context.scene.render.fps
+
+        blend_path = bpy.data.filepath
+        if not blend_path:
+            self.report({"ERROR"}, "Please save the .blend file first")
+            return {"CANCELLED"}
+
+        export_dir = bpy.path.abspath("//")
+        if not os.path.isdir(export_dir):
+            self.report({"ERROR"}, "Could not resolve the .blend directory")
+            return {"CANCELLED"}
+
+        targets = [item for item in prefs.preview_items if item.checked]
+        if not targets:
+            self.report({"ERROR"}, "No checked entries in the list")
+            return {"CANCELLED"}
+
+        created = []
+        for item in targets:
+            tracks = build_tracks_from_folder(item.folder)
+            if not tracks:
+                self.report({"WARNING"}, f"No tracks found in {item.folder}")
+                continue
+
+            try:
+                pos_img, vat_col_img, pos_min, pos_max, _duration, _drone_count = (
+                    csv_vat_gn.build_vat_images_from_tracks(
+                        tracks, fps, image_name_prefix=f"{item.name}_VAT"
+                    )
+                )
+            except Exception as exc:
+                self.report({"ERROR"}, f"VAT generation failed for {item.name}: {exc}")
+                continue
+
+            bounds_suffix = _format_bounds_suffix(pos_min, pos_max)
+            vat_base = f"{item.name}_VAT_{bounds_suffix}"
+
+            pos_img.name = f"{vat_base}_Pos"
+            vat_col_img.name = f"{vat_base}_Color"
+
+            pos_path = os.path.join(export_dir, f"{pos_img.name}.exr")
+            vat_color_path = os.path.join(export_dir, f"{vat_col_img.name}.png")
+
+            _save_image(pos_img, pos_path, "OPEN_EXR")
+            _save_image(vat_col_img, vat_color_path, "PNG")
+
+            cat_img = vat_col_img.copy()
+            cat_img.name = f"{item.name}_CAT"
+            cat_path = os.path.join(export_dir, f"{cat_img.name}.png")
+            _save_image(cat_img, cat_path, "PNG")
+
+            created.append((item.name, pos_path, vat_color_path, cat_path))
+
+        if not created:
+            self.report({"ERROR"}, "No images were generated")
+            return {"CANCELLED"}
+
+        details = []
+        for name, pos_path, vat_color_path, cat_path in created:
+            details.append(
+                f"{name}: VAT Pos -> {os.path.basename(pos_path)}, VAT Color -> {os.path.basename(vat_color_path)}, CAT -> {os.path.basename(cat_path)}"
+            )
+        self.report({"INFO"}, " | ".join(details))
+        return {"FINISHED"}
+
+
 class CSVVA_OT_Preview(Operator):
     bl_idname = "csvva.preview"
     bl_label = "Preview"
@@ -1017,6 +1106,7 @@ class CSVVA_PT_UI(Panel):
             "preview_index",
             rows=4,
         )
+        col.operator(CSVVA_OT_GenerateImages.bl_idname, icon="IMAGE_DATA")
         col.operator(CSVVA_OT_Update.bl_idname, icon="FILE_REFRESH")
 
 
@@ -1028,6 +1118,7 @@ classes = (
     CSVVA_UL_Preview,
     CSVVA_OT_PrepareFolders,
     CSVVA_OT_Import,
+    CSVVA_OT_GenerateImages,
     CSVVA_OT_Preview,
     CSVVA_OT_Update,
     CSVVA_PT_UI,
