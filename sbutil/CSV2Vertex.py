@@ -1,7 +1,7 @@
 import bpy
 from bpy.props import BoolProperty, CollectionProperty, IntProperty, StringProperty
 from bpy.types import Operator, Panel, PropertyGroup, UIList
-import csv, os, re, math
+import csv, os, re, math, zipfile
 from mathutils import Vector
 
 from sbutil import csv_vat_gn
@@ -592,6 +592,73 @@ class CSVVA_UL_Preview(UIList):
         main.label(text=status_text, icon=status_icon)
 
 
+class CSVVA_OT_PrepareFolders(Operator):
+    bl_idname = "csvva.prepare_folders"
+    bl_label = "Prep Folders"
+    bl_description = "Unzip archives in the selected folder and normalize names"
+
+    def execute(self, context):
+        prefs = context.scene.csvva_props
+        folder = bpy.path.abspath(prefs.folder)
+
+        if not os.path.isdir(folder):
+            self.report({"ERROR"}, "Invalid CSV folder")
+            return {"CANCELLED"}
+
+        zip_files = [f for f in os.listdir(folder) if f.lower().endswith(".zip")]
+        if not zip_files:
+            self.report({"INFO"}, "No ZIP archives found")
+            return {"CANCELLED"}
+
+        prepared = []
+        for zip_name in sorted(zip_files):
+            zip_path = os.path.join(folder, zip_name)
+            base_name = os.path.splitext(zip_name)[0]
+            target_dir = os.path.join(folder, base_name)
+
+            try:
+                os.makedirs(target_dir, exist_ok=True)
+                with zipfile.ZipFile(zip_path, "r") as archive:
+                    archive.extractall(target_dir)
+            except Exception as exc:
+                self.report({"ERROR"}, f"Failed to extract {zip_name}: {exc}")
+                continue
+
+            try:
+                os.remove(zip_path)
+            except Exception:
+                self.report({"WARNING"}, f"Could not remove {zip_name} after extraction")
+
+            final_name = os.path.basename(target_dir)
+            if not re.search(r"_\d+$", final_name):
+                normalized = f"{final_name}_480"
+                normalized_path = os.path.join(folder, normalized)
+                if os.path.abspath(target_dir) != os.path.abspath(normalized_path):
+                    if os.path.exists(normalized_path):
+                        self.report(
+                            {"WARNING"},
+                            f"Cannot rename {final_name} to {normalized}: destination exists",
+                        )
+                    else:
+                        try:
+                            os.rename(target_dir, normalized_path)
+                            final_name = normalized
+                        except Exception as exc:
+                            self.report(
+                                {"WARNING"},
+                                f"Rename failed for {final_name}: {exc}",
+                            )
+            prepared.append(final_name)
+
+        if prepared:
+            details = ", ".join(prepared)
+            self.report({"INFO"}, f"Prepared {len(prepared)} folder(s): {details}")
+            return {"FINISHED"}
+
+        self.report({"ERROR"}, "No folders prepared")
+        return {"CANCELLED"}
+
+
 class CSVVA_OT_Import(Operator):
     bl_idname = "csvva.import_setup"
     bl_label = "Import & Setup"
@@ -937,6 +1004,7 @@ class CSVVA_PT_UI(Panel):
         col = lay.column(align=True)
         col.prop(prefs, "folder")
         col.prop(prefs, "use_vat")
+        col.operator(CSVVA_OT_PrepareFolders.bl_idname, icon="FILE_FOLDER")
         row = col.row(align=True)
         row.operator(CSVVA_OT_Import.bl_idname, icon="IMPORT")
         row.operator(CSVVA_OT_Preview.bl_idname, icon="VIEWZOOM")
@@ -958,6 +1026,7 @@ classes = (
     CSVVA_PreviewItem,
     CSVVA_Props,
     CSVVA_UL_Preview,
+    CSVVA_OT_PrepareFolders,
     CSVVA_OT_Import,
     CSVVA_OT_Preview,
     CSVVA_OT_Update,
