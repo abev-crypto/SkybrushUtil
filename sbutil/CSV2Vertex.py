@@ -299,16 +299,18 @@ def _create_grid_positions(count, *, spacing=1.0, bounds=None, layers=1):
     per_layer = math.ceil(count / layers)
 
     center = Vector((0.0, 0.0, 0.0))
-    dims = Vector((spacing, spacing, spacing))
+    dims = Vector((0.0, 0.0, 0.0))
+    use_bounds_for_dims = bounds is not None and layers == 1
     if bounds:
         min_v, max_v = bounds
         center = (min_v + max_v) * 0.5
         center.y = 0.0
-        dims = max_v - min_v
+        if use_bounds_for_dims:
+            dims = max_v - min_v
 
     cols = max(1, math.ceil(math.sqrt(per_layer)))
     rows = cols
-    if dims.x > 0 and dims.y > 0:
+    if use_bounds_for_dims and dims.x > 0 and dims.y > 0:
         ideal_cols = max(1, int(round(math.sqrt(per_layer * dims.x / dims.y))))
         candidates = {cols, ideal_cols, ideal_cols + 1, ideal_cols - 1}
         best = cols
@@ -333,22 +335,22 @@ def _create_grid_positions(count, *, spacing=1.0, bounds=None, layers=1):
 
     spacing_x = spacing
     spacing_y = spacing
-    base_layer_spacing = spacing
-    spacing_z = dims.z / (layers - 1) if layers > 1 and dims.z > 0 else base_layer_spacing
+    layer_spacing = spacing
 
     start_x = -0.5 * spacing_x * (cols - 1)
     start_y = -0.5 * spacing_y * (rows - 1)
-    start_z = -0.5 * spacing_z * (layers - 1)
+    start_layer = -0.5 * layer_spacing * (layers - 1)
 
     positions = []
     for layer in range(layers):
+        layer_offset_y = start_layer + layer * layer_spacing
         for idx in range(per_layer):
             row = idx // cols
             col = idx % cols
             x = start_x + col * spacing_x
-            y = start_y + row * spacing_y
-            z = start_z + layer * spacing_z
-            positions.append((x + center.x, y + center.y, z + center.z))
+            y = start_y + row * spacing_y + layer_offset_y
+            z = center.z
+            positions.append((x + center.x, y + center.y, z))
             if len(positions) >= count:
                 return positions
 
@@ -442,11 +444,9 @@ def create_grid_mid_pose(
         return None
 
     ref_spacing = spacing
-    ref_center = Vector((0.0, 0.0, 0.0))
-    bounds = _geometry_node_bounds(reference_obj) or _world_bounds(reference_obj)
-    if bounds:
+    bounds = _geometry_node_bounds(reference_obj)
+    if bounds and layers == 1:
         min_v, max_v = bounds
-        ref_center = (min_v + max_v) * 0.5
         dims = max_v - min_v
         max_dim = max(dims.x, dims.y, dims.z)
         side = max(1, math.ceil(math.sqrt(drone_count)))
@@ -456,7 +456,10 @@ def create_grid_mid_pose(
             ref_spacing = max_dim
 
     positions = _create_grid_positions(
-        drone_count, spacing=ref_spacing, bounds=bounds, layers=layers
+        drone_count,
+        spacing=ref_spacing,
+        bounds=bounds if layers == 1 else None,
+        layers=layers,
     )
     mesh = bpy.data.meshes.new(f"{base_name}_mesh")
     mesh.from_pydata(positions, [], [])
@@ -465,8 +468,8 @@ def create_grid_mid_pose(
     obj = bpy.data.objects.new(base_name, mesh)
     bpy.context.scene.collection.objects.link(obj)
 
-    obj.rotation_euler[0] = math.radians(90)
-    obj.location = ref_center
+    obj.rotation_euler = (0.0, 0.0, 0.0)
+    obj.location = (0.0, 0.0, 0.0)
 
     vg = obj.vertex_groups.new(name="Drones")
     vg.add(range(len(mesh.vertices)), 1.0, "REPLACE")
@@ -1040,7 +1043,17 @@ class CSVVA_OT_Import(Operator):
                             entries_meta.append(None)
                         gap_for_next = max(gap_frames, mid_gap)
 
-                    next_start = max(next_start, sf + effective_duration + gap_for_next)
+                    transition_for_next = 0
+                    if idx < len(ordered_subdirs) - 1:
+                        next_meta = metadata_map.get(ordered_subdirs[idx + 1], {})
+                        transition_for_next = _metadata_transition_duration(
+                            next_meta, default=0
+                        ) or 0
+
+                    next_start = max(
+                        next_start,
+                        sf + effective_duration + gap_for_next + transition_for_next,
+                    )
                 if obj:
                     continue
             if not created:
