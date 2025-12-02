@@ -1015,14 +1015,53 @@ class DRONE_OT_RemoveProximityLimit(Operator):
         )
         return {'FINISHED'}
 
+
+def _shape_copyloc_influence_curve(fcurve, hold_ratio: float) -> bool:
+    """Adjust a two-key Copy Location influence curve into an S-shape.
+
+    The curve is expected to represent a 0→1 transition with exactly two keys.
+    ``hold_ratio`` controls how long the start/end values are held (0–0.49).
+    Returns True when the curve was updated.
+    """
+
+    keys = getattr(fcurve, "keyframe_points", [])
+    if len(keys) != 2:
+        return False
+
+    key0, key1 = keys
+    if key1.co.x < key0.co.x:
+        key0, key1 = key1, key0
+
+    span = key1.co.x - key0.co.x
+    if span <= 0:
+        return False
+
+    clamped_ratio = max(0.0, min(hold_ratio, 0.49))
+    handle_offset = span * clamped_ratio
+
+    for key in (key0, key1):
+        key.interpolation = 'BEZIER'
+        key.handle_left_type = 'FREE'
+        key.handle_right_type = 'FREE'
+
+    key0.handle_right.x = key0.co.x + handle_offset
+    key0.handle_right.y = key0.co.y
+
+    key1.handle_left.x = key1.co.x - handle_offset
+    key1.handle_left.y = key1.co.y
+
+    fcurve.keyframe_points.update()
+    return True
+
+
 class DRONE_OT_LinearizeCopyLocationInfluence(Operator):
-    """Set Copy Location constraint influence keys to linear"""
+    """Shape Copy Location influence keys into an S-curve"""
 
     bl_idname = "drone.linearize_copyloc_influence"
     bl_label = "Linearize CopyLoc Influence"
     bl_description = (
-        "Set Copy Location constraint influence keyframe handles to linear for"
-        " selected drones or all drones when none are selected"
+        "Shape Copy Location constraint influence curves for selected drones,"
+        " or all drones when none are selected"
     )
 
     def execute(self, context):
@@ -1031,6 +1070,9 @@ class DRONE_OT_LinearizeCopyLocationInfluence(Operator):
             self.report({'ERROR'}, "Drones collection not found")
             return {'CANCELLED'}
 
+        scene = context.scene
+        hold_ratio = getattr(scene, "copyloc_hold_ratio", 0.3)
+
         collection_objects = list(drones_collection.objects)
         drone_names = {obj.name for obj in collection_objects}
         selected = [
@@ -1038,6 +1080,7 @@ class DRONE_OT_LinearizeCopyLocationInfluence(Operator):
         ]
         targets = selected if selected else collection_objects
 
+        updated = 0
         for obj in targets:
             anim = obj.animation_data
             if not anim or not anim.action:
@@ -1051,10 +1094,14 @@ class DRONE_OT_LinearizeCopyLocationInfluence(Operator):
                 )
                 if not fcurve:
                     continue
-                for key in fcurve.keyframe_points:
-                    key.interpolation = 'LINEAR'
-                    key.handle_left_type = 'VECTOR'
-                    key.handle_right_type = 'VECTOR'
+                if _shape_copyloc_influence_curve(fcurve, hold_ratio):
+                    updated += 1
+
+        if updated == 0:
+            self.report({'WARNING'}, "No Copy Location influence curves updated")
+            return {'CANCELLED'}
+
+        self.report({'INFO'}, f"Shaped {updated} Copy Location influence curves")
         return {'FINISHED'}
 
 
@@ -2217,6 +2264,7 @@ def _draw_storyboard_extras(self, context):
         text="Render Range from Storyboard",
         icon='PREVIEW_RANGE',
     )
+    col.prop(context.scene, "copyloc_hold_ratio", slider=True)
     col.operator("drone.linearize_copyloc_influence", text="Linearize CopyLoc")
     col.prop(context.scene, "vat_start_shift_frames", text="VAT Start Offset")
     col.operator("drone.shift_vat_start_frames", text="Shift VAT Start")
@@ -2429,6 +2477,7 @@ class DRONE_PT_Utilities(Panel):
         layout.operator(
             "drone.remove_proximity_limit", text="Remove Proximity Limit"
         )
+        layout.prop(context.scene, "copyloc_hold_ratio", slider=True)
         layout.operator(
             "drone.linearize_copyloc_influence", text="Linearize CopyLoc"
         )
@@ -2627,6 +2676,16 @@ def register():
         ),
         default=0,
     )
+    bpy.types.Scene.copyloc_hold_ratio = bpy.props.FloatProperty(
+        name="CopyLoc Hold Ratio",
+        description=(
+            "Fraction of the Copy Location transition to hold start and end values"
+        ),
+        default=0.3,
+        min=0.0,
+        max=0.49,
+        subtype='FACTOR',
+    )
     bpy.types.Scene.copyloc_stagger_frames = bpy.props.IntProperty(
         name="CopyLoc Offset Frames",
         description=(
@@ -2677,6 +2736,8 @@ def unregister():
         del bpy.types.Scene.handle_keys_on_recalculate
     if hasattr(bpy.types.Scene, "vat_start_shift_frames"):
         del bpy.types.Scene.vat_start_shift_frames
+    if hasattr(bpy.types.Scene, "copyloc_hold_ratio"):
+        del bpy.types.Scene.copyloc_hold_ratio
     if hasattr(bpy.types.Scene, "copyloc_stagger_frames"):
         del bpy.types.Scene.copyloc_stagger_frames
     if hasattr(bpy.types.Scene, "copyloc_stagger_layers"):
