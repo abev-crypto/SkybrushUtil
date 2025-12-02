@@ -331,6 +331,25 @@ class ShiftPrefixList(bpy.types.PropertyGroup):
     active_index : bpy.props.IntProperty()
     shift_amount : bpy.props.IntProperty(name="Shift Frames", default=0)
 
+
+class SBUTIL_StoryboardBatchItem(bpy.types.PropertyGroup):
+    name: StringProperty(name="Name")
+    start_frame: bpy.props.IntProperty(name="Start", default=0)
+    end_frame: bpy.props.IntProperty(name="End", default=0)
+    duration: bpy.props.IntProperty(name="Duration", default=0)
+    is_transition: BoolProperty(name="Is Transition", default=False)
+    selected: BoolProperty(name="Export", default=True)
+
+
+class SBUTIL_StoryboardBatchSettings(bpy.types.PropertyGroup):
+    entries: bpy.props.CollectionProperty(type=SBUTIL_StoryboardBatchItem)
+    active_index: bpy.props.IntProperty()
+    include_transitions: BoolProperty(
+        name="Include Transitions",
+        description="Add gaps between storyboard entries as transition ranges",
+        default=True,
+    )
+
 class TIMEBIND_UL_entries(bpy.types.UIList):
     """TimeBind entriesを表示するUIList"""
     def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
@@ -344,6 +363,166 @@ class TIMEBIND_UL_shift_prefixes(bpy.types.UIList):
     def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
         split = layout.split(factor=1.0)
         split.label(text=item.Prefix if item.Prefix else "-")
+
+
+class SBUTIL_UL_StoryboardBatch(bpy.types.UIList):
+    bl_idname = "SBUTIL_UL_StoryboardBatch"
+
+    def draw_item(
+        self, context, layout, data, item, icon, active_data, active_propname, index
+    ):
+        if self.layout_type in {"DEFAULT", "COMPACT"}:
+            row = layout.row(align=True)
+            row.prop(item, "selected", text="")
+            icon = 'ARROW_LEFTRIGHT' if item.is_transition else 'SEQ_STRIP_META'
+            row.label(text=item.name, icon=icon)
+            row.label(text=str(item.start_frame))
+            row.label(text=str(item.end_frame))
+            row.label(text=str(item.duration))
+        elif self.layout_type == "GRID":
+            layout.alignment = 'CENTER'
+            layout.label(text=item.name)
+
+
+class SBUTIL_OT_LoadStoryboardBatch(Operator):
+    bl_idname = "sbutil.load_storyboard_batch"
+    bl_label = "Load Storyboard"
+    bl_description = "Load storyboard start/end frames into the export list"
+
+    def execute(self, context):
+        settings = context.scene.sbutil_storyboard_export
+        entries = getattr(getattr(context.scene, "skybrush", None), "storyboard", None)
+
+        settings.entries.clear()
+
+        storyboard_entries = getattr(entries, "entries", None)
+        if not storyboard_entries:
+            self.report({'ERROR'}, "No storyboard entries found")
+            settings.active_index = -1
+            return {'CANCELLED'}
+
+        sorted_entries = sorted(storyboard_entries, key=lambda e: e.frame_start)
+        previous_entry = None
+        previous_end = None
+
+        for entry in sorted_entries:
+            start = int(getattr(entry, "frame_start", 0))
+            duration = int(getattr(entry, "duration", 0))
+            end = start + max(duration, 0)
+
+            if (
+                settings.include_transitions
+                and previous_entry is not None
+                and previous_end is not None
+                and start > previous_end
+            ):
+                transition = settings.entries.add()
+                transition.name = f"{previous_entry.name}_To_{entry.name}"
+                transition.start_frame = previous_end
+                transition.end_frame = start
+                transition.duration = start - previous_end
+                transition.is_transition = True
+
+            item = settings.entries.add()
+            item.name = entry.name
+            item.start_frame = start
+            item.end_frame = end
+            item.duration = max(duration, 0)
+            item.is_transition = False
+
+            previous_entry = entry
+            previous_end = end
+
+        settings.active_index = 0 if settings.entries else -1
+        self.report({'INFO'}, f"Loaded {len(settings.entries)} range(s)")
+        return {'FINISHED'}
+
+
+class SBUTIL_OT_ExportStoryboardBatch(Operator):
+    bl_idname = "sbutil.export_storyboard_batch"
+    bl_label = "Export CSV Batch"
+    bl_description = "Export checked storyboard ranges as Skybrush CSV archives"
+
+    def execute(self, context):
+        scene = context.scene
+        settings = scene.sbutil_storyboard_export
+        blend_path = bpy.data.filepath
+        if not blend_path:
+            self.report({'ERROR'}, "Save the .blend file before exporting")
+            return {'CANCELLED'}
+
+        base_dir = os.path.dirname(blend_path)
+        if not settings.entries:
+            self.report({'ERROR'}, "No storyboard ranges loaded")
+            return {'CANCELLED'}
+
+        exported = 0
+        for item in settings.entries:
+            if not item.selected:
+                continue
+
+            start = int(item.start_frame)
+            end = int(item.end_frame)
+            if end < start:
+                continue
+
+            scene.frame_start = start
+            scene.frame_end = end
+            scene.frame_set(start)
+
+            filepath = os.path.join(base_dir, f"{item.name}.zip")
+
+            try:
+                result = bpy.ops.export_scene.skybrush_csv(
+                    filepath=filepath,
+                    check_existing=False,
+                    export_selected=False,
+                    frame_range='RENDER',
+                    redraw='AUTO',
+                    output_fps=24.0,
+                    light_output_fps=24.0,
+                )
+            except Exception as exc:
+                self.report({'ERROR'}, f"Export failed for {item.name}: {exc}")
+                return {'CANCELLED'}
+
+            if 'FINISHED' not in result:
+                self.report({'ERROR'}, f"Export failed for {item.name}")
+                return {'CANCELLED'}
+
+            exported += 1
+
+        if exported == 0:
+            self.report({'WARNING'}, "No entries selected for export")
+            return {'CANCELLED'}
+
+        self.report({'INFO'}, f"Exported {exported} storyboard range(s)")
+        return {'FINISHED'}
+
+
+class SBUTIL_OT_SetRenderRangeFromStoryboard(Operator):
+    bl_idname = "sbutil.set_render_range_from_storyboard"
+    bl_label = "Render Range from Storyboard"
+    bl_description = "Match the render range to the active storyboard entry"
+
+    def execute(self, context):
+        storyboard = getattr(getattr(context.scene, "skybrush", None), "storyboard", None)
+        entries = getattr(storyboard, "entries", None)
+        index = getattr(storyboard, "active_index", -1)
+
+        if not entries or index < 0 or index >= len(entries):
+            self.report({'WARNING'}, "No active storyboard entry")
+            return {'CANCELLED'}
+
+        entry = entries[index]
+        start = int(getattr(entry, "frame_start", 0))
+        duration = int(getattr(entry, "duration", 0))
+        context.scene.frame_start = start
+        context.scene.frame_end = start + max(duration, 0)
+        context.scene.frame_set(start)
+
+        self.report({'INFO'}, f"Render range set to {entry.name}")
+        return {'FINISHED'}
 
 # -------------------------------
 # 抽出（保存）オペレーター
@@ -2011,6 +2190,11 @@ def _draw_storyboard_extras(self, context):
     layout.separator()
     col = layout.column(align=True)
     col.label(text="SBUtil")
+    col.operator(
+        SBUTIL_OT_SetRenderRangeFromStoryboard.bl_idname,
+        text="Render Range from Storyboard",
+        icon='PREVIEW_RANGE',
+    )
     col.operator("drone.linearize_copyloc_influence", text="Linearize CopyLoc")
     col.prop(context.scene, "vat_start_shift_frames", text="VAT Start Offset")
     col.operator("drone.shift_vat_start_frames", text="Shift VAT Start")
@@ -2247,6 +2431,45 @@ class DRONE_PT_Utilities(Panel):
         row.operator("sbutil.setup_glare_compositor", text="Setup Glare")
         row.operator("sbutil.frame_from_neg_y", text="Frame Camera")
 
+
+class SBUTIL_PT_StoryboardBatchExport(Panel):
+    bl_label = "Storyboard CSV Batch"
+    bl_idname = "SBUTIL_PT_storyboard_batch_export"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "SBUtil"
+
+    def draw(self, context):
+        layout = self.layout
+        settings = context.scene.sbutil_storyboard_export
+
+        row = layout.row(align=True)
+        row.operator(SBUTIL_OT_LoadStoryboardBatch.bl_idname, icon='FILE_REFRESH')
+        row.prop(settings, "include_transitions", text="Transitions")
+
+        header = layout.row(align=True)
+        header.label(text="")
+        header.label(text="Name")
+        header.label(text="Start")
+        header.label(text="End")
+        header.label(text="Dur")
+
+        layout.template_list(
+            SBUTIL_UL_StoryboardBatch.bl_idname,
+            "",
+            settings,
+            "entries",
+            settings,
+            "active_index",
+        )
+
+        layout.label(text="Frame rate fixed to 24 FPS; render range updates per item.")
+        layout.operator(
+            SBUTIL_OT_ExportStoryboardBatch.bl_idname,
+            text="Export Checked Entries",
+            icon='EXPORT',
+        )
+
 # -------------------------------
 # Add-on Preferences
 # -------------------------------
@@ -2301,6 +2524,13 @@ classes = (
     TIMEBIND_OT_remove_shift_prefix,
     TIMEBIND_OT_create_animated_collection,
     TIMEBIND_OT_shift_prefixes,
+    SBUTIL_StoryboardBatchItem,
+    SBUTIL_StoryboardBatchSettings,
+    SBUTIL_UL_StoryboardBatch,
+    SBUTIL_OT_LoadStoryboardBatch,
+    SBUTIL_OT_ExportStoryboardBatch,
+    SBUTIL_OT_SetRenderRangeFromStoryboard,
+    SBUTIL_PT_StoryboardBatchExport,
 )
 _PATCHED = False
 _ORIGINALS = {}  # {("module.path","attr_name"): original_obj}
@@ -2311,6 +2541,9 @@ def register():
     bpy.types.Scene.drone_key_props = bpy.props.PointerProperty(type=DroneKeyTransferProperties)
     bpy.types.Scene.time_bind = bpy.props.PointerProperty(type=TimeBindCollection)
     bpy.types.Scene.shift_prefix_list = bpy.props.PointerProperty(type=ShiftPrefixList)
+    bpy.types.Scene.sbutil_storyboard_export = bpy.props.PointerProperty(
+        type=SBUTIL_StoryboardBatchSettings
+    )
     bpy.types.Scene.sbutil_use_patched_light_effects = BoolProperty(
         name="Use Patched Light Effects",
         description=(
@@ -2398,6 +2631,8 @@ def unregister():
     del bpy.types.Scene.drone_key_props
     del bpy.types.Scene.time_bind
     del bpy.types.Scene.shift_prefix_list
+    if hasattr(bpy.types.Scene, "sbutil_storyboard_export"):
+        del bpy.types.Scene.sbutil_storyboard_export
     if hasattr(bpy.types.Scene, "sbutil_use_patched_light_effects"):
         del bpy.types.Scene.sbutil_use_patched_light_effects
     if hasattr(bpy.types.Scene, "sbutil_update_light_effects"):
