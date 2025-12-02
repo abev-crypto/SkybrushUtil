@@ -296,60 +296,65 @@ def _create_grid_positions(count, *, spacing=1.0, bounds=None, layers=1):
         return []
 
     layers = max(1, int(layers))
-    per_layer = math.ceil(count / layers)
+    base_per_layer = count // layers
+    remainder = count % layers
 
     center = Vector((0.0, 0.0, 0.0))
-    dims = Vector((spacing, spacing, spacing))
+    dims = Vector((0.0, 0.0, 0.0))
     if bounds:
         min_v, max_v = bounds
-        center = (min_v + max_v) * 0.5
-        dims = max_v - min_v
+        center = Vector(((min_v.x + max_v.x) * 0.5, 0.0, (min_v.z + max_v.z) * 0.5))
+        dims = Vector((max_v.x - min_v.x, 0.0, max_v.z - min_v.z))
 
-    cols = max(1, math.ceil(math.sqrt(per_layer)))
-    rows = cols
-    if dims.x > 0 and dims.y > 0:
-        ideal_cols = max(1, int(round(math.sqrt(per_layer * dims.x / dims.y))))
-        candidates = {cols, ideal_cols, ideal_cols + 1, ideal_cols - 1}
-        best = cols
-        best_diff = float("inf")
-        for cand in candidates:
-            cand_cols = max(1, min(per_layer, cand))
-            cand_rows = max(1, math.ceil(per_layer / cand_cols))
-            cand_spacing_x = (
-                dims.x / (cand_cols - 1) if cand_cols > 1 and dims.x > 0 else spacing
-            )
-            cand_spacing_y = (
-                dims.y / (cand_rows - 1) if cand_rows > 1 and dims.y > 0 else spacing
-            )
-            diff = abs(cand_spacing_x - cand_spacing_y)
-            if diff < best_diff:
-                best_diff = diff
-                best = cand_cols
-                rows = cand_rows
-        cols = best
-    else:
-        rows = math.ceil(per_layer / cols)
-
-    spacing_x = dims.x / (cols - 1) if cols > 1 and dims.x > 0 else spacing
-    spacing_y = dims.y / (rows - 1) if rows > 1 and dims.y > 0 else spacing
-    base_layer_spacing = max(spacing_x, spacing_y, spacing)
-    spacing_z = (
-        dims.z / (layers - 1) if layers > 1 and dims.z > 0 else base_layer_spacing
-    )
-
-    start_x = -0.5 * spacing_x * (cols - 1)
-    start_y = -0.5 * spacing_y * (rows - 1)
-    start_z = -0.5 * spacing_z * (layers - 1)
+    layer_spacing = spacing
+    start_layer = -0.5 * layer_spacing * (layers - 1)
 
     positions = []
-    for layer in range(layers):
-        for idx in range(per_layer):
+    for layer_idx in range(layers):
+        layer_count = base_per_layer + (1 if layer_idx < remainder else 0)
+        if layer_count == 0:
+            continue
+
+        cols = max(1, math.ceil(math.sqrt(layer_count)))
+        rows = math.ceil(layer_count / cols)
+
+        spacing_x = spacing
+        spacing_z = spacing
+        if dims.x > 0 and dims.z > 0:
+            ideal_cols = max(1, int(round(math.sqrt(layer_count * dims.x / dims.z))))
+            candidates = {cols, ideal_cols, ideal_cols + 1, ideal_cols - 1}
+            best_cols = cols
+            best_rows = rows
+            best_diff = float("inf")
+            for cand in candidates:
+                cand_cols = max(1, min(layer_count, cand))
+                cand_rows = max(1, math.ceil(layer_count / cand_cols))
+                cand_spacing_x = (
+                    dims.x / (cand_cols - 1) if cand_cols > 1 and dims.x > 0 else spacing
+                )
+                cand_spacing_z = (
+                    dims.z / (cand_rows - 1) if cand_rows > 1 and dims.z > 0 else spacing
+                )
+                diff = abs(cand_spacing_x - cand_spacing_z)
+                if diff < best_diff:
+                    best_diff = diff
+                    best_cols = cand_cols
+                    best_rows = cand_rows
+                    spacing_x = cand_spacing_x
+                    spacing_z = cand_spacing_z
+            cols = best_cols
+            rows = best_rows
+
+        start_x = -0.5 * spacing_x * (cols - 1)
+        start_z = -0.5 * spacing_z * (rows - 1)
+        layer_y = start_layer + layer_idx * layer_spacing
+
+        for idx in range(layer_count):
             row = idx // cols
             col = idx % cols
             x = start_x + col * spacing_x
-            y = start_y + row * spacing_y
-            z = start_z + layer * spacing_z
-            positions.append((x + center.x, y + center.y, z + center.z))
+            z = start_z + row * spacing_z
+            positions.append((x + center.x, layer_y, z + center.z))
             if len(positions) >= count:
                 return positions
 
@@ -443,13 +448,11 @@ def create_grid_mid_pose(
         return None
 
     ref_spacing = spacing
-    ref_center = Vector((0.0, 0.0, 0.0))
-    bounds = _geometry_node_bounds(reference_obj) or _world_bounds(reference_obj)
+    bounds = _geometry_node_bounds(reference_obj)
     if bounds:
         min_v, max_v = bounds
-        ref_center = (min_v + max_v) * 0.5
-        dims = max_v - min_v
-        max_dim = max(dims.x, dims.y, dims.z)
+        dims = Vector((max_v.x - min_v.x, 0.0, max_v.z - min_v.z))
+        max_dim = max(dims.x, dims.z)
         side = max(1, math.ceil(math.sqrt(drone_count)))
         if side > 1 and max_dim > 0:
             ref_spacing = max_dim / (side - 1)
@@ -457,7 +460,10 @@ def create_grid_mid_pose(
             ref_spacing = max_dim
 
     positions = _create_grid_positions(
-        drone_count, spacing=ref_spacing, bounds=bounds, layers=layers
+        drone_count,
+        spacing=ref_spacing,
+        bounds=bounds,
+        layers=layers,
     )
     mesh = bpy.data.meshes.new(f"{base_name}_mesh")
     mesh.from_pydata(positions, [], [])
@@ -466,8 +472,8 @@ def create_grid_mid_pose(
     obj = bpy.data.objects.new(base_name, mesh)
     bpy.context.scene.collection.objects.link(obj)
 
-    obj.rotation_euler[0] = math.radians(90)
-    obj.location = ref_center
+    obj.rotation_euler = (0.0, 0.0, 0.0)
+    obj.location = (0.0, 0.0, 0.0)
 
     vg = obj.vertex_groups.new(name="Drones")
     vg.add(range(len(mesh.vertices)), 1.0, "REPLACE")
@@ -533,22 +539,30 @@ def _update_frame_range_from_storyboard(context):
         scene.frame_end = max(scene.frame_end, max_end)
 
 
-def _shift_subsequent_storyboard_entries(storyboard, start_index: int, delta: int):
-    """Shift storyboard entries after ``start_index`` by ``delta`` frames."""
+def _shift_storyboard_after_transition(storyboard, start_index: int, delta: int):
+    """Shift storyboard entries and transitions after ``start_index`` by ``delta`` frames."""
 
     if delta == 0 or storyboard is None:
         return
 
     entries = getattr(storyboard, "entries", None)
-    if not entries:
-        return
+    transitions = getattr(storyboard, "transitions", None)
 
-    for idx in range(start_index + 1, len(entries)):
-        entry = entries[idx]
-        try:
-            entry.frame_start = int(getattr(entry, "frame_start", 0)) + delta
-        except Exception:
-            continue
+    if entries:
+        for idx in range(start_index + 1, len(entries)):
+            entry = entries[idx]
+            try:
+                entry.frame_start = int(getattr(entry, "frame_start", 0)) + delta
+            except Exception:
+                continue
+
+    if transitions:
+        for idx in range(start_index + 1, len(transitions)):
+            transition = transitions[idx]
+            try:
+                transition.frame_start = int(getattr(transition, "frame_start", 0)) + delta
+            except Exception:
+                continue
 
 
 def _apply_transition_durations(storyboard, entries_meta):
@@ -982,14 +996,13 @@ class CSVVA_OT_Import(Operator):
                 meta = metadata_map.get(d, {}) if metadata_map else {}
                 display_name = _storyboard_name(base_name, meta)
                 mid_layers = meta.get("midlayer", 1) or 1
-                midpose_disabled = False
-                if meta:
-                    try:
-                        midpose_disabled = int(
-                            meta.get("transition_duration", meta.get("duration", 0))
-                        ) == 0
-                    except Exception:
-                        midpose_disabled = False
+                next_meta = (
+                    metadata_map.get(ordered_subdirs[idx + 1], {})
+                    if idx < len(ordered_subdirs) - 1
+                    else {}
+                )
+                transition_duration = _metadata_transition_duration(next_meta, default=0) or 0
+                midpose_disabled = transition_duration <= 0
                 sf = next_start
                 obj, dur, key_entries = import_csv_folder(
                     context,
@@ -1015,8 +1028,7 @@ class CSVVA_OT_Import(Operator):
 
                     gap_for_next = gap_frames
                     if idx < len(ordered_subdirs) - 1 and not midpose_disabled:
-                        mid_gap = max(2, gap_frames)
-                        mid_offset = max(1, int(round(mid_gap / 2)))
+                        mid_offset = max(1, int(round(transition_duration * 0.5)))
                         mid_frame = sf + effective_duration + mid_offset
                         mid_entry = create_grid_mid_pose(
                             context,
@@ -1027,9 +1039,13 @@ class CSVVA_OT_Import(Operator):
                         )
                         if mid_entry:
                             entries_meta.append(None)
-                        gap_for_next = max(gap_frames, mid_gap)
-
-                    next_start = max(next_start, sf + effective_duration + gap_for_next)
+                    transition_for_next = (
+                        transition_duration if idx < len(ordered_subdirs) - 1 else 0
+                    )
+                    next_start = max(
+                        next_start,
+                        sf + effective_duration + gap_for_next + transition_for_next,
+                    )
                 if obj:
                     continue
             if not created:
