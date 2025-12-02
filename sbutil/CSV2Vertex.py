@@ -85,23 +85,14 @@ def split_name_and_gap(folder_name, fps):
     return base_name, gap_frames
 
 
-def load_prefix_map(directory, report):
-    """Return a filename-to-prefix-and-duration mapping from ``directory``.
+def load_import_metadata(directory, report):
+    """Return an import plan read from :data:`PREFIX_MAP_FILENAME`.
 
-    The mapping is read from :data:`PREFIX_MAP_FILENAME` when it exists. Keys are
-    matched as substrings in filenames. Each value can be a list or tuple where
-    the first element is the prefix (ID) and the optional second element is the
-    duration to append when missing. A scalar value is also accepted and treated
-    as only the prefix, with the duration falling back to
-    :data:`DEFAULT_FOLDER_DURATION`.
-
-    Example ``prefix_map.json`` content::
-
-        {
-            "key1": [1000, 480],
-            "key2": [1001, 360],
-            "key3": [2010]
-        }
+    The file is expected to contain a mapping from folder names to an object
+    with the keys ``id`` (required), ``duration`` (optional) and ``midlayer``
+    (optional). ``duration`` defaults to :data:`DEFAULT_FOLDER_DURATION` and
+    ``midlayer`` defaults to ``1`` when missing, but these defaults can be
+    overridden by top-level ``duration`` / ``midlayer`` keys in the JSON.
     """
 
     mapping_path = os.path.join(directory, PREFIX_MAP_FILENAME)
@@ -118,42 +109,61 @@ def load_prefix_map(directory, report):
     if not isinstance(data, dict):
         report(
             {"WARNING"},
-            f"{PREFIX_MAP_FILENAME} must contain an object that maps keys to prefixes",
+            f"{PREFIX_MAP_FILENAME} must contain an object that maps keys to metadata",
         )
         return {}
 
-    prefix_map = {}
+    # Global defaults that can be overridden by top-level keys
+    default_duration = DEFAULT_FOLDER_DURATION
+    if "duration" in data and not isinstance(data["duration"], dict):
+        try:
+            default_duration = int(data["duration"])
+        except Exception:
+            report({"WARNING"}, "Invalid top-level duration in prefix_map.json, using default")
+
+    default_midlayer = 1
+    if "midlayer" in data and not isinstance(data["midlayer"], dict):
+        try:
+            default_midlayer = max(1, int(data["midlayer"]))
+        except Exception:
+            report({"WARNING"}, "Invalid top-level midlayer in prefix_map.json, using default")
+
+    metadata = {}
     for key, value in data.items():
-        if value is None:
+        if key in {"duration", "midlayer"}:
             continue
 
-        prefix = None
-        duration = DEFAULT_FOLDER_DURATION
-
-        if isinstance(value, (list, tuple)):
-            if not value:
-                continue
-            prefix = value[0]
-            if len(value) > 1:
-                try:
-                    duration = int(value[1])
-                    if duration <= 0:
-                        raise ValueError("Duration must be positive")
-                except (TypeError, ValueError):
-                    report(
-                        {"WARNING"},
-                        f"Invalid duration for prefix_map key '{key}', using {DEFAULT_FOLDER_DURATION}",
-                    )
-                    duration = DEFAULT_FOLDER_DURATION
-        else:
-            prefix = value
-
-        if prefix is None:
+        if not isinstance(value, dict):
+            report({"WARNING"}, f"Ignoring malformed entry for '{key}' in {PREFIX_MAP_FILENAME}")
             continue
 
-        prefix_map[str(key)] = {"prefix": str(prefix), "duration": duration}
+        try:
+            entry_id = int(value.get("id"))
+        except Exception:
+            report({"WARNING"}, f"Missing or invalid id for '{key}' in {PREFIX_MAP_FILENAME}")
+            continue
 
-    return prefix_map
+        duration = value.get("duration", default_duration)
+        midlayer = value.get("midlayer", default_midlayer)
+
+        try:
+            duration = int(duration)
+        except Exception:
+            report({"WARNING"}, f"Invalid duration for '{key}', using {default_duration}")
+            duration = default_duration
+
+        try:
+            midlayer = max(1, int(midlayer))
+        except Exception:
+            midlayer = default_midlayer
+
+        metadata[str(key)] = {
+            "id": entry_id,
+            "duration": duration,
+            "midlayer": midlayer,
+        }
+
+    return metadata
 
 def build_tracks_from_folder(folder, delimiter="auto"):
     files = []
@@ -245,22 +255,81 @@ def ensure_mesh_with_armature(name="CSV_Tracks", count=1, first_positions=None):
     return obj
 
 
-def _create_grid_positions(count, spacing=1.0):
-    """Return a list of XY-plane grid positions for ``count`` items."""
+def _create_grid_positions(count, *, spacing=1.0, bounds=None, layers=1):
+    """Return grid positions for ``count`` items, optionally stacked in layers."""
 
     if count <= 0:
         return []
 
-    side = math.ceil(math.sqrt(count))
-    half = (side - 1) / 2.0
+    layers = max(1, int(layers))
+    per_layer = math.ceil(count / layers)
+
+    center = Vector((0.0, 0.0, 0.0))
+    dims = Vector((spacing, spacing, spacing))
+    if bounds:
+        min_v, max_v = bounds
+        center = (min_v + max_v) * 0.5
+        dims = max_v - min_v
+
+    side = max(1, math.ceil(math.sqrt(per_layer)))
+    spacing_x = dims.x / (side - 1) if side > 1 and dims.x > 0 else spacing
+    spacing_y = dims.y / (side - 1) if side > 1 and dims.y > 0 else spacing
+    spacing_z = dims.z / (layers - 1) if layers > 1 and dims.z > 0 else spacing
+
+    start_x = -0.5 * spacing_x * (side - 1)
+    start_y = -0.5 * spacing_y * (side - 1)
+    start_z = -0.5 * spacing_z * (layers - 1)
+
     positions = []
-    for idx in range(count):
-        row = idx // side
-        col = idx % side
-        x = (col - half) * spacing
-        y = (row - half) * spacing
-        positions.append((x, y, 0.0))
+    for layer in range(layers):
+        for idx in range(per_layer):
+            row = idx // side
+            col = idx % side
+            x = start_x + col * spacing_x
+            y = start_y + row * spacing_y
+            z = start_z + layer * spacing_z
+            positions.append((x + center.x, y + center.y, z + center.z))
+            if len(positions) >= count:
+                return positions
+
     return positions
+
+
+def _modifier_input_value(mod, socket_name):
+    """Best-effort fetch of a Geometry Nodes input value by socket name."""
+
+    try:
+        if socket_name in mod:
+            return mod.get(socket_name)
+    except Exception:
+        pass
+
+    try:
+        return getattr(mod, socket_name)
+    except Exception:
+        pass
+
+    group = getattr(mod, "node_group", None)
+    sockets = []
+    if group is not None:
+        sockets = list(getattr(group, "inputs", []) or [])
+    for idx, socket in enumerate(sockets):
+        if getattr(socket, "name", None) != socket_name:
+            continue
+        for candidate in (
+            getattr(socket, "identifier", None),
+            f"Input_{idx + 1}",
+        ):
+            if not candidate:
+                continue
+            try:
+                return mod.get(candidate)
+            except Exception:
+                try:
+                    return getattr(mod, candidate)
+                except Exception:
+                    continue
+    return None
 
 
 def _world_bounds(obj):
@@ -272,12 +341,33 @@ def _world_bounds(obj):
     return min_v, max_v
 
 
+def _geometry_node_bounds(obj):
+    if obj is None:
+        return None
+
+    for mod in getattr(obj, "modifiers", []):
+        if getattr(mod, "type", None) != "NODES":
+            continue
+
+        min_pos = _modifier_input_value(mod, "MinPos")
+        max_pos = _modifier_input_value(mod, "MaxPos")
+        try:
+            if min_pos is not None and max_pos is not None:
+                min_v = Vector(min_pos)
+                max_v = Vector(max_pos)
+                return min_v, max_v
+        except Exception:
+            continue
+    return None
+
+
 def create_grid_mid_pose(
     context,
     frame_start,
     base_name="MidPose",
     spacing=1.0,
     reference_obj=None,
+    layers=1,
 ):
     """Create and add a grid-formation storyboard entry at ``frame_start``.
 
@@ -293,8 +383,7 @@ def create_grid_mid_pose(
 
     ref_spacing = spacing
     ref_center = Vector((0.0, 0.0, 0.0))
-    z_offset = spacing
-    bounds = _world_bounds(reference_obj)
+    bounds = _geometry_node_bounds(reference_obj) or _world_bounds(reference_obj)
     if bounds:
         min_v, max_v = bounds
         ref_center = (min_v + max_v) * 0.5
@@ -305,9 +394,10 @@ def create_grid_mid_pose(
             ref_spacing = max_dim / (side - 1)
         elif max_dim > 0:
             ref_spacing = max_dim
-        z_offset = dims.z * 0.5 if dims.z > 0 else max_dim * 0.25
 
-    positions = _create_grid_positions(drone_count, spacing=ref_spacing)
+    positions = _create_grid_positions(
+        drone_count, spacing=ref_spacing, bounds=bounds, layers=layers
+    )
     mesh = bpy.data.meshes.new(f"{base_name}_mesh")
     mesh.from_pydata(positions, [], [])
     mesh.update()
@@ -316,7 +406,7 @@ def create_grid_mid_pose(
     bpy.context.scene.collection.objects.link(obj)
 
     obj.rotation_euler[0] = math.radians(90)
-    obj.location = ref_center + Vector((0.0, 0.0, z_offset))
+    obj.location = ref_center
 
     vg = obj.vertex_groups.new(name="Drones")
     vg.add(range(len(mesh.vertices)), 1.0, "REPLACE")
@@ -706,14 +796,12 @@ class CSVVA_OT_PrepareFolders(Operator):
     bl_idname = "csvva.prepare_folders"
     bl_label = "Prep Folders"
     bl_description = (
-        "Unzip archives in the selected folder, normalize names, and apply"
-        " prefix_map.json prefixes/durations when keys match"
+        "Unzip archives in the selected folder and normalize names"
     )
 
     def execute(self, context):
         prefs = context.scene.csvva_props
         folder = bpy.path.abspath(prefs.folder)
-        prefix_map = load_prefix_map(folder, self.report)
 
         if not os.path.isdir(folder):
             self.report({"ERROR"}, "Invalid CSV folder")
@@ -728,15 +816,6 @@ class CSVVA_OT_PrepareFolders(Operator):
         for zip_name in sorted(zip_files):
             zip_path = os.path.join(folder, zip_name)
             base_name = os.path.splitext(zip_name)[0]
-            matched_duration = DEFAULT_FOLDER_DURATION
-            if prefix_map:
-                for key, value in sorted(
-                    prefix_map.items(), key=lambda item: (-len(item[0]), item[0])
-                ):
-                    if key in base_name:
-                        base_name = f"{value['prefix']}_{base_name}"
-                        matched_duration = value.get("duration", DEFAULT_FOLDER_DURATION)
-                        break
             target_dir = os.path.join(folder, base_name)
 
             if os.path.isdir(target_dir):
@@ -762,28 +841,7 @@ class CSVVA_OT_PrepareFolders(Operator):
             except Exception:
                 self.report({"WARNING"}, f"Could not remove {zip_name} after extraction")
 
-            final_name = os.path.basename(target_dir)
-            expected_suffix = f"_{matched_duration}"
-            if not final_name.endswith(expected_suffix):
-                # Normalize to ensure the duration suffix is always appended, even after collisions
-                normalized = re.sub(r"_\d+$", "", final_name) + expected_suffix
-                normalized_path = os.path.join(folder, normalized)
-                if os.path.abspath(target_dir) != os.path.abspath(normalized_path):
-                    if os.path.exists(normalized_path):
-                        self.report(
-                            {"WARNING"},
-                            f"Cannot rename {final_name} to {normalized}: destination exists",
-                        )
-                    else:
-                        try:
-                            os.rename(target_dir, normalized_path)
-                            final_name = normalized
-                        except Exception as exc:
-                            self.report(
-                                {"WARNING"},
-                                f"Rename failed for {final_name}: {exc}",
-                            )
-            prepared.append(final_name)
+            prepared.append(os.path.basename(target_dir))
 
         if prepared:
             details = ", ".join(prepared)
@@ -815,15 +873,32 @@ class CSVVA_OT_Import(Operator):
         if not os.path.isdir(folder):
             self.report({"ERROR"}, "Invalid CSV folder")
             return {"CANCELLED"}
+        metadata_map = load_import_metadata(folder, self.report)
 
         subdirs = [d for d in sorted(os.listdir(folder)) if os.path.isdir(os.path.join(folder, d))]
+        ordered_subdirs = list(subdirs)
+        if metadata_map:
+            ordered_subdirs = []
+            subdir_set = set(subdirs)
+            for key, meta in sorted(metadata_map.items(), key=lambda item: item[1]["id"]):
+                if key in subdir_set:
+                    ordered_subdirs.append(key)
+                else:
+                    self.report({"WARNING"}, f"No folder matched metadata key '{key}'")
+            for d in subdirs:
+                if d not in metadata_map:
+                    ordered_subdirs.append(d)
+
         if subdirs:
             created = []
             next_start = base_start
             key_data_collection = []
-            for idx, d in enumerate(subdirs):
+            for idx, d in enumerate(ordered_subdirs):
                 sub_path = os.path.join(folder, d)
                 base_name, gap_frames = split_name_and_gap(d, context.scene.render.fps)
+                meta = metadata_map.get(d, {}) if metadata_map else {}
+                display_name = str(meta.get("id", base_name))
+                mid_layers = meta.get("midlayer", 1) or 1
                 sf = next_start
                 obj, dur, key_entries = import_csv_folder(
                     context,
@@ -837,17 +912,36 @@ class CSVVA_OT_Import(Operator):
                     if key_entries:
                         key_data_collection.append((key_entries, sf, obj, sub_path))
 
-                    if gap_frames >= 2 and idx < len(subdirs) - 1:
+                    if metadata_map:
+                        effective_duration = meta.get("duration", DEFAULT_FOLDER_DURATION)
+                    else:
+                        effective_duration = dur or DEFAULT_FOLDER_DURATION
+                    try:
+                        effective_duration = int(effective_duration)
+                    except Exception:
+                        effective_duration = dur or DEFAULT_FOLDER_DURATION
+
+                    try:
+                        entry = storyboard.entries[-1]
+                        entry.name = display_name
+                        entry.duration = effective_duration
+                    except Exception:
+                        pass
+
+                    if gap_frames >= 2 and idx < len(ordered_subdirs) - 1:
                         mid_offset = max(1, int(round(gap_frames / 2)))
-                        mid_frame = sf + dur + mid_offset
+                        mid_frame = sf + effective_duration + mid_offset
                         create_grid_mid_pose(
                             context,
                             mid_frame,
-                            base_name=f"{base_name}_MidPose",
+                            base_name=f"{display_name}_MidPose",
                             reference_obj=obj,
+                            layers=mid_layers,
                         )
 
-                    next_start = max(next_start, sf + dur + gap_frames)
+                    next_start = max(next_start, sf + effective_duration + gap_frames)
+                if obj:
+                    continue
             if not created:
                 self.report({"ERROR"}, "No CSV/TSV files found in subfolders")
                 return {"CANCELLED"}
