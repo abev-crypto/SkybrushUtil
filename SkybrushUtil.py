@@ -480,7 +480,6 @@ class SBUTIL_OT_ExportStoryboardBatch(Operator):
                     frame_range='RENDER',
                     redraw='AUTO',
                     output_fps=24.0,
-                    light_output_fps=24.0,
                 )
             except Exception as exc:
                 self.report({'ERROR'}, f"Export failed for {item.name}: {exc}")
@@ -2387,7 +2386,15 @@ class DRONE_PT_Utilities(Panel):
 
     def draw(self, context):
         layout = self.layout
-        layout.operator("drone.use_new_drone_spec", text="Convert to New Drone Spec", icon='MOD_NODES')
+        # Some Blender builds complain about specific icon enums; fall back gracefully
+        try:
+            layout.operator(
+                "drone.use_new_drone_spec",
+                text="Convert to New Drone Spec",
+                icon='NODETREE',
+            )
+        except TypeError:
+            layout.operator("drone.use_new_drone_spec", text="Convert to New Drone Spec")
         if getattr(context.scene, "sbutil_use_patched_light_effects", False):
             layout.label(text="Patched light effects enabled", icon='CHECKMARK')
         layout.separator()
