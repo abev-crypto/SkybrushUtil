@@ -1,7 +1,7 @@
 import bpy
 from bpy.props import BoolProperty, CollectionProperty, IntProperty, StringProperty
 from bpy.types import Operator, Panel, PropertyGroup, UIList
-import csv, os, re, math, zipfile
+import csv, json, os, re, math, zipfile
 from mathutils import Vector
 
 from sbutil import csv_vat_gn
@@ -10,6 +10,8 @@ from sbutil.light_effects import OUTPUT_VERTEX_COLOR
 from sbutil.color_key_utils import apply_color_keys_from_key_data
 
 # ---------- Utilities ----------
+
+PREFIX_MAP_FILENAME = "prefix_map.json"
 
 def detect_delimiter(sample_path):
     # Try to sniff; fall back to tab if header matches the sample
@@ -80,6 +82,40 @@ def split_name_and_gap(folder_name, fps):
     base_name = m.group(1)
     gap_frames = parse_gap_value(m.group(2), fps)
     return base_name, gap_frames
+
+
+def load_prefix_map(directory, report):
+    """Return a filename-to-prefix mapping from ``directory``.
+
+    The mapping is read from :data:`PREFIX_MAP_FILENAME` when it exists. Keys are
+    matched as substrings in filenames, and values are converted to strings so
+    they can be used directly as prefixes.
+    """
+
+    mapping_path = os.path.join(directory, PREFIX_MAP_FILENAME)
+    if not os.path.isfile(mapping_path):
+        return {}
+
+    try:
+        with open(mapping_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as exc:
+        report({"WARNING"}, f"Could not read {PREFIX_MAP_FILENAME}: {exc}")
+        return {}
+
+    if not isinstance(data, dict):
+        report(
+            {"WARNING"},
+            f"{PREFIX_MAP_FILENAME} must contain an object that maps keys to prefixes",
+        )
+        return {}
+
+    prefix_map = {}
+    for key, value in data.items():
+        if value is None:
+            continue
+        prefix_map[str(key)] = str(value)
+    return prefix_map
 
 def build_tracks_from_folder(folder, delimiter="auto"):
     files = []
@@ -613,11 +649,15 @@ class CSVVA_UL_Preview(UIList):
 class CSVVA_OT_PrepareFolders(Operator):
     bl_idname = "csvva.prepare_folders"
     bl_label = "Prep Folders"
-    bl_description = "Unzip archives in the selected folder and normalize names"
+    bl_description = (
+        "Unzip archives in the selected folder, normalize names, and apply"
+        " prefix_map.json prefixes when keys match"
+    )
 
     def execute(self, context):
         prefs = context.scene.csvva_props
         folder = bpy.path.abspath(prefs.folder)
+        prefix_map = load_prefix_map(folder, self.report)
 
         if not os.path.isdir(folder):
             self.report({"ERROR"}, "Invalid CSV folder")
@@ -632,6 +672,13 @@ class CSVVA_OT_PrepareFolders(Operator):
         for zip_name in sorted(zip_files):
             zip_path = os.path.join(folder, zip_name)
             base_name = os.path.splitext(zip_name)[0]
+            if prefix_map:
+                for key, value in sorted(
+                    prefix_map.items(), key=lambda item: (-len(item[0]), item[0])
+                ):
+                    if key in base_name:
+                        base_name = f"{value}_{base_name}"
+                        break
             target_dir = os.path.join(folder, base_name)
 
             try:
