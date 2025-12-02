@@ -387,6 +387,28 @@ def setup_for_collection(controller_collection: bpy.types.Collection) -> bpy.typ
 
 
 # ======================================
+# エクスポートされたユーティリティ
+# ======================================
+
+def setup_for_collection(controller_collection: bpy.types.Collection) -> bpy.types.Object:
+    """Set up the geometry node system for the given controller collection."""
+
+    scene = bpy.context.scene
+    render_range = get_render_range(scene)
+
+    mat = create_drone_material(MATERIAL_NAME, render_range)
+    gn_group = create_gn_group(GN_GROUP_NAME, controller_collection, render_range, mat)
+
+    system_obj = ensure_system_object("DroneSystem")
+    mod = system_obj.modifiers.get("DroneInstances")
+    if mod is None:
+        mod = system_obj.modifiers.new(name="DroneInstances", type='NODES')
+    mod.node_group = gn_group
+
+    return system_obj
+
+
+# ======================================
 # メイン処理
 # ======================================
 

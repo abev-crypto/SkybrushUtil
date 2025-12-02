@@ -170,6 +170,32 @@ def ensure_light_json_file(blend_dir, prefix):
 
     return os.path.exists(light_path)
 
+
+def _find_drone_collection():
+    collection = bpy.data.collections.get("DroneCollection")
+    if collection is not None:
+        return collection
+
+    spec = importlib.util.find_spec("sbstudio.plugin.constants")
+    if spec is not None:
+        from sbstudio.plugin.constants import Collections
+
+        try:
+            collection = Collections.find_drones()
+        except Exception:
+            collection = None
+        if collection is not None:
+            return collection
+
+    return bpy.data.collections.get("Drones")
+
+
+def _iter_drone_mesh_objects(collection):
+    objects = getattr(collection, "all_objects", None) or collection.objects
+    for obj in objects:
+        if obj.type == 'MESH':
+            yield obj
+
 # -------------------------------
 # LightEffect Export Helpers
 # -------------------------------
@@ -591,41 +617,14 @@ class DRONE_OT_UseNewDroneSpec(Operator):
     )
 
     def execute(self, context):
-        collection = bpy.data.collections.get("Drones")
+        collection = _find_drone_collection()
         if collection is None:
             self.report({'ERROR'}, "DroneCollection not found")
             return {'CANCELLED'}
-
-        new_mesh = bpy.data.meshes.new(name="Drone_SingleVert")
-        new_mesh.from_pydata([(0.0, 0.0, 0.0)], [], [])
-        new_mesh.update()
-
-        materials_to_cleanup = set()
-
-        def _convert_object(obj):
-            materials_to_cleanup.update(
-                slot.material for slot in obj.material_slots if slot.material is not None
-            )
-            old_mesh = obj.data
-            obj.data = new_mesh
-            obj.data.materials.clear()
-            if old_mesh.users == 0:
-                bpy.data.meshes.remove(old_mesh)
-
         converted = 0
-        for obj in collection.objects:
-            _convert_object(obj)
-            obj.show_texture_space = True
-            obj.display_type = 'BOUNDS'
-            obj.display.show_shadows = False
+        for obj in _iter_drone_mesh_objects(collection):
+            self._convert_object(obj)
             converted += 1
-
-        for mat in materials_to_cleanup:
-            if mat is None:
-                continue
-            if mat.users == 0:
-                bpy.data.materials.remove(mat)
-
         drone_mesh_gn.setup_for_collection(collection)
 
         scene = context.scene
@@ -635,6 +634,19 @@ class DRONE_OT_UseNewDroneSpec(Operator):
 
         self.report({'INFO'}, f"Converted {converted} drones to the new specification")
         return {'FINISHED'}
+
+    @staticmethod
+    def _convert_object(obj):
+        old_mesh = obj.data
+        new_mesh = bpy.data.meshes.new(name=f"{obj.name}_SingleVert")
+        new_mesh.from_pydata([(0.0, 0.0, 0.0)], [], [])
+        new_mesh.update()
+
+        obj.data = new_mesh
+        obj.data.materials.clear()
+
+        if old_mesh and old_mesh.users == 0:
+            bpy.data.meshes.remove(old_mesh)
 
 class DRONE_OT_ApplyProximityLimit(Operator):
     """Add Limit Distance constraints for drones closer than the safety threshold."""
@@ -2191,18 +2203,9 @@ class DRONE_PT_Utilities(Panel):
 
     def draw(self, context):
         layout = self.layout
-        # Some Blender builds complain about the icon kwarg; fall back to a plain button if needed
-        try:
-            layout.operator(
-                "drone.use_new_drone_spec",
-                text="Convert to New Drone Spec",
-                icon='NODETREE',
-            )
-        except TypeError:
-            layout.operator("drone.use_new_drone_spec", text="Convert to New Drone Spec")
+        layout.operator("drone.use_new_drone_spec", text="Convert to New Drone Spec", icon='MOD_NODES')
         if getattr(context.scene, "sbutil_use_patched_light_effects", False):
             layout.label(text="Patched light effects enabled", icon='CHECKMARK')
-        layout.prop(context.scene, "sbutil_update_light_effects")
         layout.separator()
         layout.prop(context.scene, "proximity_limit_mode", text="Clamp Region")
         layout.prop(context.scene, "proximity_skip_influence_keys")
