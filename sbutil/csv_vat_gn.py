@@ -343,7 +343,7 @@ def update_vat_animation_for_object(
     """Regenerate VAT textures and reapply the GN modifier on ``obj``."""
 
     if obj is None:
-        return None, 0, 0
+        return None, None, 0, 0
 
     image_name_prefix = f"{storyboard_name}_VAT" if storyboard_name else "VAT"
     pos_img, col_img, pos_min, pos_max, duration, drone_count = build_vat_images_from_tracks(
@@ -361,7 +361,7 @@ def update_vat_animation_for_object(
     )
     _apply_gn_to_object(obj, node_group)
 
-    return col_img, duration, drone_count
+    return col_img, pos_img, duration, drone_count
 
 
 def create_vat_animation_from_tracks(
@@ -400,4 +400,4 @@ def create_vat_animation_from_tracks(
     )
     _apply_gn_to_object(obj, node_group)
 
-    return obj, col_img
+    return obj, col_img, pos_img
