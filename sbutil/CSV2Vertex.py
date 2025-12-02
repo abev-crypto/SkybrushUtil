@@ -513,6 +513,25 @@ def _replace_light_effect_texture(light_effect, color_image):
 
 # ---------- Import Helper ----------
 
+
+def _hide_csv_mesh(obj):
+    if obj is None:
+        return
+
+    try:
+        obj.hide_set(True)
+    except Exception:
+        try:
+            obj.hide_viewport = True
+        except Exception:
+            pass
+
+    try:
+        obj.hide_select = True
+    except Exception:
+        pass
+
+
 def import_csv_folder(
     context,
     folder,
@@ -626,6 +645,8 @@ def import_csv_folder(
         )
 
     _update_frame_range_from_storyboard(context)
+
+    _hide_csv_mesh(obj)
 
     return obj, duration, key_entries
 

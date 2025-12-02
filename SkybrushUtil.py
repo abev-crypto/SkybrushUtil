@@ -580,6 +580,51 @@ class SBUTIL_OT_SetRenderRangeFromStoryboard(Operator):
         self.report({'INFO'}, f"Render range set to {getattr(entry, 'name', '')}")
         return {'FINISHED'}
 
+
+def _formation_meshes_for_entry(entry):
+    for attr in ("formation_collection", "collection", "formation"):
+        collection = getattr(entry, attr, None)
+        if isinstance(collection, bpy.types.Collection):
+            objects = getattr(collection, "all_objects", None) or collection.objects
+            return [obj for obj in objects if obj.type == 'MESH']
+    return []
+
+
+class SBUTIL_OT_IsolateActiveFormation(Operator):
+    bl_idname = "sbutil.isolate_active_formation"
+    bl_label = "Show Active Formation Only"
+    bl_description = (
+        "Hide meshes from inactive storyboard entries' formation collections"
+    )
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        storyboard = getattr(getattr(context.scene, "skybrush", None), "storyboard", None)
+        entries = getattr(storyboard, "entries", None)
+        active_index = getattr(storyboard, "active_index", -1)
+
+        if not entries or not (0 <= active_index < len(entries)):
+            self.report({'WARNING'}, "No active storyboard entry")
+            return {'CANCELLED'}
+
+        shown, hidden = 0, 0
+        for idx, entry in enumerate(entries):
+            for obj in _formation_meshes_for_entry(entry):
+                try:
+                    if idx == active_index:
+                        obj.hide_set(False)
+                        obj.hide_select = False
+                        shown += 1
+                    else:
+                        obj.hide_set(True)
+                        obj.hide_select = True
+                        hidden += 1
+                except Exception:
+                    continue
+
+        self.report({'INFO'}, f"Shown {shown} mesh(es); hidden {hidden} mesh(es)")
+        return {'FINISHED'}
+
 # -------------------------------
 # 抽出（保存）オペレーター
 # -------------------------------
@@ -2298,6 +2343,11 @@ def _draw_storyboard_extras(self, context):
         text="Render Range from Storyboard",
         icon='PREVIEW_RANGE',
     )
+    col.operator(
+        SBUTIL_OT_IsolateActiveFormation.bl_idname,
+        text="Show Active Formation",
+        icon='HIDE_OFF',
+    )
     col.prop(context.scene, "copyloc_hold_ratio", slider=True)
     col.operator("drone.linearize_copyloc_influence", text="Linearize CopyLoc")
     col.prop(context.scene, "vat_start_shift_frames", text="VAT Start Offset")
@@ -2643,6 +2693,7 @@ classes = (
     SBUTIL_OT_LoadStoryboardBatch,
     SBUTIL_OT_ExportStoryboardBatch,
     SBUTIL_OT_SetRenderRangeFromStoryboard,
+    SBUTIL_OT_IsolateActiveFormation,
     SBUTIL_PT_StoryboardBatchExport,
 )
 _PATCHED = False
