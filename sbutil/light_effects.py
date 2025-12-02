@@ -2254,6 +2254,15 @@ class PatchedLightEffect(PropertyGroup):
         ],
         default="COLOR_RAMP",
     )
+    mesh = PointerProperty(
+        type=bpy.types.Object,
+        name="Mesh",
+        description=(
+            'Mesh related to the light effect; used when the output is set to "Distance" or to limit the '
+            'light effect to the inside or one side of this mesh when "Inside the mesh" or '
+            '"Front side of plane" is checked'
+        ),
+    )
     cat_frame_offset = IntProperty(
         name="CAT Offset",
         description="Frame offset applied when sampling CAT textures",
@@ -3602,6 +3611,7 @@ def patch_light_effect_class():
         LightEffect, "cat_texture_index", None
     )
     LightEffect.type = PatchedLightEffect.type
+    LightEffect.mesh = PatchedLightEffect.mesh
     LightEffect.cat_frame_offset = PatchedLightEffect.cat_frame_offset
     LightEffect.cat_speed = PatchedLightEffect.cat_speed
     LightEffect.cat_texture_split = PatchedLightEffect.cat_texture_split
