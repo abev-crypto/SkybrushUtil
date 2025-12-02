@@ -580,7 +580,11 @@ def _apply_transition_durations(storyboard, entries_meta):
         if duration is None:
             continue
         try:
+            current_duration = getattr(transitions[idx], "duration", 0)
             transitions[idx].duration = duration
+            delta = duration - current_duration
+            if delta:
+                _shift_storyboard_after_transition(storyboard, idx, delta)
         except Exception:
             continue
 
