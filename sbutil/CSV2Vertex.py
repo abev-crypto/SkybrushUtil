@@ -104,7 +104,8 @@ def load_import_metadata(directory, report):
 
     The file is expected to contain a mapping from folder names to an object
     with the keys ``id`` (required), ``duration`` (optional) and ``midlayer``
-    (optional). ``duration`` defaults to :data:`DEFAULT_FOLDER_DURATION` and
+    (optional). ``duration`` represents the transition duration leading into
+    the formation. It defaults to :data:`DEFAULT_FOLDER_DURATION` and
     ``midlayer`` defaults to ``1`` when missing, but these defaults can be
     overridden by top-level ``duration`` / ``midlayer`` keys in the JSON.
     """
@@ -173,11 +174,30 @@ def load_import_metadata(directory, report):
 
         metadata[str(key)] = {
             "id": entry_id,
-            "duration": duration,
+            "transition_duration": duration,
+            "duration": duration,  # kept for backward compatibility
             "midlayer": midlayer,
         }
 
     return metadata
+
+
+def _metadata_transition_duration(meta, default=None):
+    """Return transition duration value from ``meta`` if present."""
+
+    meta = meta or {}
+    try:
+        duration = meta.get("transition_duration", meta.get("duration", default))
+    except Exception:
+        duration = default
+
+    if duration is None:
+        return default
+
+    try:
+        return int(duration)
+    except Exception:
+        return default
 
 def build_tracks_from_folder(folder, delimiter="auto"):
     files = []
@@ -285,20 +305,47 @@ def _create_grid_positions(count, *, spacing=1.0, bounds=None, layers=1):
         center = (min_v + max_v) * 0.5
         dims = max_v - min_v
 
-    side = max(1, math.ceil(math.sqrt(per_layer)))
-    spacing_x = dims.x / (side - 1) if side > 1 and dims.x > 0 else spacing
-    spacing_y = dims.y / (side - 1) if side > 1 and dims.y > 0 else spacing
-    spacing_z = dims.z / (layers - 1) if layers > 1 and dims.z > 0 else spacing
+    cols = max(1, math.ceil(math.sqrt(per_layer)))
+    rows = cols
+    if dims.x > 0 and dims.y > 0:
+        ideal_cols = max(1, int(round(math.sqrt(per_layer * dims.x / dims.y))))
+        candidates = {cols, ideal_cols, ideal_cols + 1, ideal_cols - 1}
+        best = cols
+        best_diff = float("inf")
+        for cand in candidates:
+            cand_cols = max(1, min(per_layer, cand))
+            cand_rows = max(1, math.ceil(per_layer / cand_cols))
+            cand_spacing_x = (
+                dims.x / (cand_cols - 1) if cand_cols > 1 and dims.x > 0 else spacing
+            )
+            cand_spacing_y = (
+                dims.y / (cand_rows - 1) if cand_rows > 1 and dims.y > 0 else spacing
+            )
+            diff = abs(cand_spacing_x - cand_spacing_y)
+            if diff < best_diff:
+                best_diff = diff
+                best = cand_cols
+                rows = cand_rows
+        cols = best
+    else:
+        rows = math.ceil(per_layer / cols)
 
-    start_x = -0.5 * spacing_x * (side - 1)
-    start_y = -0.5 * spacing_y * (side - 1)
+    spacing_x = dims.x / (cols - 1) if cols > 1 and dims.x > 0 else spacing
+    spacing_y = dims.y / (rows - 1) if rows > 1 and dims.y > 0 else spacing
+    base_layer_spacing = max(spacing_x, spacing_y, spacing)
+    spacing_z = (
+        dims.z / (layers - 1) if layers > 1 and dims.z > 0 else base_layer_spacing
+    )
+
+    start_x = -0.5 * spacing_x * (cols - 1)
+    start_y = -0.5 * spacing_y * (rows - 1)
     start_z = -0.5 * spacing_z * (layers - 1)
 
     positions = []
     for layer in range(layers):
         for idx in range(per_layer):
-            row = idx // side
-            col = idx % side
+            row = idx // cols
+            col = idx % cols
             x = start_x + col * spacing_x
             y = start_y + row * spacing_y
             z = start_z + layer * spacing_z
@@ -500,6 +547,26 @@ def _shift_subsequent_storyboard_entries(storyboard, start_index: int, delta: in
         entry = entries[idx]
         try:
             entry.frame_start = int(getattr(entry, "frame_start", 0)) + delta
+        except Exception:
+            continue
+
+
+def _apply_transition_durations(storyboard, entries_meta):
+    """Assign transition durations from metadata to storyboard transitions."""
+
+    transitions = getattr(storyboard, "transitions", None)
+    entries = getattr(storyboard, "entries", None)
+    if not transitions or not entries:
+        return
+
+    limit = min(len(transitions), len(entries_meta) - 1, len(entries) - 1)
+    for idx in range(limit):
+        target_meta = entries_meta[idx + 1]
+        duration = _metadata_transition_duration(target_meta)
+        if duration is None:
+            continue
+        try:
+            transitions[idx].duration = duration
         except Exception:
             continue
 
@@ -881,6 +948,7 @@ class CSVVA_OT_Import(Operator):
             if not export_dir:
                 return {"CANCELLED"}
         base_start = 0
+        existing_entry_count = len(storyboard.entries)
         if storyboard.entries:
             last = storyboard.entries[-1]
             base_start = last.frame_start + last.duration
@@ -905,6 +973,7 @@ class CSVVA_OT_Import(Operator):
 
         if subdirs:
             created = []
+            entries_meta = [None] * existing_entry_count
             next_start = base_start
             key_data_collection = []
             for idx, d in enumerate(ordered_subdirs):
@@ -913,6 +982,14 @@ class CSVVA_OT_Import(Operator):
                 meta = metadata_map.get(d, {}) if metadata_map else {}
                 display_name = _storyboard_name(base_name, meta)
                 mid_layers = meta.get("midlayer", 1) or 1
+                midpose_disabled = False
+                if meta:
+                    try:
+                        midpose_disabled = int(
+                            meta.get("transition_duration", meta.get("duration", 0))
+                        ) == 0
+                    except Exception:
+                        midpose_disabled = False
                 sf = next_start
                 obj, dur, key_entries = import_csv_folder(
                     context,
@@ -926,34 +1003,30 @@ class CSVVA_OT_Import(Operator):
                     if key_entries:
                         key_data_collection.append((key_entries, sf, obj, sub_path))
 
-                    if metadata_map:
-                        effective_duration = meta.get("duration", DEFAULT_FOLDER_DURATION)
-                    else:
-                        effective_duration = dur or DEFAULT_FOLDER_DURATION
-                    try:
-                        effective_duration = int(effective_duration)
-                    except Exception:
-                        effective_duration = dur or DEFAULT_FOLDER_DURATION
+                    effective_duration = dur or DEFAULT_FOLDER_DURATION
 
                     try:
                         entry = storyboard.entries[-1]
                         entry.name = display_name
                         entry.duration = effective_duration
+                        entries_meta.append(meta)
                     except Exception:
                         pass
 
                     gap_for_next = gap_frames
-                    if idx < len(ordered_subdirs) - 1:
+                    if idx < len(ordered_subdirs) - 1 and not midpose_disabled:
                         mid_gap = max(2, gap_frames)
                         mid_offset = max(1, int(round(mid_gap / 2)))
                         mid_frame = sf + effective_duration + mid_offset
-                        create_grid_mid_pose(
+                        mid_entry = create_grid_mid_pose(
                             context,
                             mid_frame,
                             base_name=f"{display_name}_MidPose",
                             reference_obj=obj,
                             layers=mid_layers,
                         )
+                        if mid_entry:
+                            entries_meta.append(None)
                         gap_for_next = max(gap_frames, mid_gap)
 
                     next_start = max(next_start, sf + effective_duration + gap_for_next)
@@ -966,6 +1039,7 @@ class CSVVA_OT_Import(Operator):
                 bpy.ops.skybrush.recalculate_transitions(scope="ALL")
             except Exception:
                 pass
+            _apply_transition_durations(storyboard, entries_meta)
             for key_entries, sf, obj, sub_path in key_data_collection:
                 current_frame = context.scene.frame_current
                 context.scene.frame_set(sf)
@@ -1007,11 +1081,12 @@ class CSVVA_OT_Import(Operator):
             bpy.ops.skybrush.recalculate_transitions(scope="ALL")
         except Exception:
             pass
+        _apply_transition_durations(
+            storyboard, [None] * existing_entry_count + [meta]
+        )
         try:
             entry = storyboard.entries[-1]
             entry.name = display_name
-            if metadata_map:
-                entry.duration = int(meta.get("duration", entry.duration))
         except Exception:
             pass
         if key_entries:
@@ -1292,14 +1367,6 @@ class CSVVA_OT_Preview(Operator):
             if duration == 0:
                 continue
 
-            effective_duration = duration
-            if metadata_map:
-                effective_duration = meta.get("duration", duration or DEFAULT_FOLDER_DURATION)
-            try:
-                effective_duration = int(effective_duration)
-            except Exception:
-                effective_duration = duration
-
             existing_entry = None
             for sb in storyboard.entries:
                 if sb.name == display_name:
@@ -1308,10 +1375,10 @@ class CSVVA_OT_Preview(Operator):
 
             frame_mismatch = False
             checked = False
-            display_duration = effective_duration
+            display_duration = duration
             if existing_entry:
                 start_frame = existing_entry.frame_start
-                frame_mismatch = existing_entry.duration != effective_duration
+                frame_mismatch = existing_entry.duration != duration
                 display_duration = existing_entry.duration
                 checked = frame_mismatch
             else:
