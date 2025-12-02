@@ -1112,8 +1112,6 @@ def _shape_copyloc_influence_curve(fcurve, hold_ratio: float) -> bool:
         key0, key1 = key1, key0
 
     span = key1.co.x - key0.co.x
-    if span <= 0:
-        return False
 
     clamped_ratio = max(0.0, min(hold_ratio, 0.49))
     handle_offset = span * clamped_ratio

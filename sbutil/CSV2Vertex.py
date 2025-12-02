@@ -763,8 +763,10 @@ class CSVVA_OT_PrepareFolders(Operator):
                 self.report({"WARNING"}, f"Could not remove {zip_name} after extraction")
 
             final_name = os.path.basename(target_dir)
-            if not re.search(r"_\d+$", final_name):
-                normalized = f"{final_name}_{matched_duration}"
+            expected_suffix = f"_{matched_duration}"
+            if not final_name.endswith(expected_suffix):
+                # Normalize to ensure the duration suffix is always appended, even after collisions
+                normalized = re.sub(r"_\d+$", "", final_name) + expected_suffix
                 normalized_path = os.path.join(folder, normalized)
                 if os.path.abspath(target_dir) != os.path.abspath(normalized_path):
                     if os.path.exists(normalized_path):
