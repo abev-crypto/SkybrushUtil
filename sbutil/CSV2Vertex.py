@@ -12,6 +12,7 @@ from sbutil.color_key_utils import apply_color_keys_from_key_data
 # ---------- Utilities ----------
 
 PREFIX_MAP_FILENAME = "prefix_map.json"
+DEFAULT_FOLDER_DURATION = 480
 
 def detect_delimiter(sample_path):
     # Try to sniff; fall back to tab if header matches the sample
@@ -85,11 +86,22 @@ def split_name_and_gap(folder_name, fps):
 
 
 def load_prefix_map(directory, report):
-    """Return a filename-to-prefix mapping from ``directory``.
+    """Return a filename-to-prefix-and-duration mapping from ``directory``.
 
     The mapping is read from :data:`PREFIX_MAP_FILENAME` when it exists. Keys are
-    matched as substrings in filenames, and values are converted to strings so
-    they can be used directly as prefixes.
+    matched as substrings in filenames. Each value can be a list or tuple where
+    the first element is the prefix (ID) and the optional second element is the
+    duration to append when missing. A scalar value is also accepted and treated
+    as only the prefix, with the duration falling back to
+    :data:`DEFAULT_FOLDER_DURATION`.
+
+    Example ``prefix_map.json`` content::
+
+        {
+            "key1": [1000, 480],
+            "key2": [1001, 360],
+            "key3": [2010]
+        }
     """
 
     mapping_path = os.path.join(directory, PREFIX_MAP_FILENAME)
@@ -114,7 +126,33 @@ def load_prefix_map(directory, report):
     for key, value in data.items():
         if value is None:
             continue
-        prefix_map[str(key)] = str(value)
+
+        prefix = None
+        duration = DEFAULT_FOLDER_DURATION
+
+        if isinstance(value, (list, tuple)):
+            if not value:
+                continue
+            prefix = value[0]
+            if len(value) > 1:
+                try:
+                    duration = int(value[1])
+                    if duration <= 0:
+                        raise ValueError("Duration must be positive")
+                except (TypeError, ValueError):
+                    report(
+                        {"WARNING"},
+                        f"Invalid duration for prefix_map key '{key}', using {DEFAULT_FOLDER_DURATION}",
+                    )
+                    duration = DEFAULT_FOLDER_DURATION
+        else:
+            prefix = value
+
+        if prefix is None:
+            continue
+
+        prefix_map[str(key)] = {"prefix": str(prefix), "duration": duration}
+
     return prefix_map
 
 def build_tracks_from_folder(folder, delimiter="auto"):
@@ -651,7 +689,7 @@ class CSVVA_OT_PrepareFolders(Operator):
     bl_label = "Prep Folders"
     bl_description = (
         "Unzip archives in the selected folder, normalize names, and apply"
-        " prefix_map.json prefixes when keys match"
+        " prefix_map.json prefixes/durations when keys match"
     )
 
     def execute(self, context):
@@ -672,12 +710,14 @@ class CSVVA_OT_PrepareFolders(Operator):
         for zip_name in sorted(zip_files):
             zip_path = os.path.join(folder, zip_name)
             base_name = os.path.splitext(zip_name)[0]
+            matched_duration = DEFAULT_FOLDER_DURATION
             if prefix_map:
                 for key, value in sorted(
                     prefix_map.items(), key=lambda item: (-len(item[0]), item[0])
                 ):
                     if key in base_name:
-                        base_name = f"{value}_{base_name}"
+                        base_name = f"{value['prefix']}_{base_name}"
+                        matched_duration = value.get("duration", DEFAULT_FOLDER_DURATION)
                         break
             target_dir = os.path.join(folder, base_name)
 
@@ -696,7 +736,7 @@ class CSVVA_OT_PrepareFolders(Operator):
 
             final_name = os.path.basename(target_dir)
             if not re.search(r"_\d+$", final_name):
-                normalized = f"{final_name}_480"
+                normalized = f"{final_name}_{matched_duration}"
                 normalized_path = os.path.join(folder, normalized)
                 if os.path.abspath(target_dir) != os.path.abspath(normalized_path):
                     if os.path.exists(normalized_path):
