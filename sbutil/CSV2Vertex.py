@@ -1,7 +1,7 @@
 import bpy
 from bpy.props import BoolProperty, CollectionProperty, IntProperty, StringProperty
 from bpy.types import Operator, Panel, PropertyGroup, UIList
-import csv, json, os, re, math, zipfile
+import csv, json, os, re, math, shutil, zipfile
 from mathutils import Vector
 
 from sbutil import csv_vat_gn
@@ -554,14 +554,11 @@ def import_csv_folder(
             base_name=f"{folder_name}_CSV",
             storyboard_name=folder_name,
         )
-        cat_image = color_image.copy()
-        cat_image.name = f"{folder_name}_CAT"
-
         export_dir = image_export_dir
         if export_dir and pos_image is not None and color_image is not None:
-            _export_cat_vat_images(pos_image, color_image, cat_image, export_dir)
+            _export_vat_images(pos_image, color_image, export_dir)
         key_entries = None
-        color_image_for_le = cat_image
+        color_image_for_le = color_image
     else:
         # Create mesh and armature with N bones/vertices
         # Name it after the storyboard entry + "_CSV" for clarity
@@ -720,6 +717,16 @@ class CSVVA_OT_PrepareFolders(Operator):
                         matched_duration = value.get("duration", DEFAULT_FOLDER_DURATION)
                         break
             target_dir = os.path.join(folder, base_name)
+
+            if os.path.isdir(target_dir):
+                try:
+                    shutil.rmtree(target_dir)
+                except Exception as exc:
+                    self.report(
+                        {"ERROR"},
+                        f"Failed to remove existing folder {base_name}: {exc}",
+                    )
+                    continue
 
             try:
                 os.makedirs(target_dir, exist_ok=True)
@@ -936,20 +943,18 @@ def _default_image_extension(image):
     return ".png"
 
 
-def _export_cat_vat_images(pos_img, vat_color_img, cat_img, export_dir):
+def _export_vat_images(pos_img, vat_color_img, export_dir):
     os.makedirs(export_dir, exist_ok=True)
 
     pos_path = os.path.join(export_dir, f"{pos_img.name}{_default_image_extension(pos_img)}")
     vat_color_path = os.path.join(
         export_dir, f"{vat_color_img.name}{_default_image_extension(vat_color_img)}"
     )
-    cat_path = os.path.join(export_dir, f"{cat_img.name}{_default_image_extension(cat_img)}")
 
     _link_image_to_file(pos_img, pos_path, "OPEN_EXR")
     _link_image_to_file(vat_color_img, vat_color_path, "PNG")
-    _link_image_to_file(cat_img, cat_path, "PNG")
 
-    return pos_path, vat_color_path, cat_path
+    return pos_path, vat_color_path
 
 
 def _iter_cat_vat_images():
@@ -1254,12 +1259,8 @@ class CSVVA_OT_Update(Operator):
                         _shift_subsequent_storyboard_entries(storyboard, existing_index, delta)
 
                     le_entry = _find_light_effect_entry(context.scene, existing_entry.name)
-                    cat_image = color_image.copy() if color_image else None
-                    if cat_image is not None:
-                        cat_image.name = f"{existing_entry.name}_CAT"
-                        if export_dir and pos_image is not None and color_image is not None:
-                            _export_cat_vat_images(pos_image, color_image, cat_image, export_dir)
-                        color_image = cat_image
+                    if export_dir and pos_image is not None and color_image is not None:
+                        _export_vat_images(pos_image, color_image, export_dir)
                     if le_entry is not None:
                         _replace_light_effect_texture(le_entry, color_image)
                         try:
