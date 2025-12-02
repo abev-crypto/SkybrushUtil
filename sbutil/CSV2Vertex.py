@@ -303,6 +303,7 @@ def _create_grid_positions(count, *, spacing=1.0, bounds=None, layers=1):
     if bounds:
         min_v, max_v = bounds
         center = (min_v + max_v) * 0.5
+        center.y = 0.0
         dims = max_v - min_v
 
     cols = max(1, math.ceil(math.sqrt(per_layer)))
@@ -330,12 +331,10 @@ def _create_grid_positions(count, *, spacing=1.0, bounds=None, layers=1):
     else:
         rows = math.ceil(per_layer / cols)
 
-    spacing_x = dims.x / (cols - 1) if cols > 1 and dims.x > 0 else spacing
-    spacing_y = dims.y / (rows - 1) if rows > 1 and dims.y > 0 else spacing
-    base_layer_spacing = max(spacing_x, spacing_y, spacing)
-    spacing_z = (
-        dims.z / (layers - 1) if layers > 1 and dims.z > 0 else base_layer_spacing
-    )
+    spacing_x = spacing
+    spacing_y = spacing
+    base_layer_spacing = spacing
+    spacing_z = dims.z / (layers - 1) if layers > 1 and dims.z > 0 else base_layer_spacing
 
     start_x = -0.5 * spacing_x * (cols - 1)
     start_y = -0.5 * spacing_y * (rows - 1)
@@ -533,22 +532,30 @@ def _update_frame_range_from_storyboard(context):
         scene.frame_end = max(scene.frame_end, max_end)
 
 
-def _shift_subsequent_storyboard_entries(storyboard, start_index: int, delta: int):
-    """Shift storyboard entries after ``start_index`` by ``delta`` frames."""
+def _shift_storyboard_after_transition(storyboard, start_index: int, delta: int):
+    """Shift storyboard entries and transitions after ``start_index`` by ``delta`` frames."""
 
     if delta == 0 or storyboard is None:
         return
 
     entries = getattr(storyboard, "entries", None)
-    if not entries:
-        return
+    transitions = getattr(storyboard, "transitions", None)
 
-    for idx in range(start_index + 1, len(entries)):
-        entry = entries[idx]
-        try:
-            entry.frame_start = int(getattr(entry, "frame_start", 0)) + delta
-        except Exception:
-            continue
+    if entries:
+        for idx in range(start_index + 1, len(entries)):
+            entry = entries[idx]
+            try:
+                entry.frame_start = int(getattr(entry, "frame_start", 0)) + delta
+            except Exception:
+                continue
+
+    if transitions:
+        for idx in range(start_index + 1, len(transitions)):
+            transition = transitions[idx]
+            try:
+                transition.frame_start = int(getattr(transition, "frame_start", 0)) + delta
+            except Exception:
+                continue
 
 
 def _apply_transition_durations(storyboard, entries_meta):
@@ -566,7 +573,11 @@ def _apply_transition_durations(storyboard, entries_meta):
         if duration is None:
             continue
         try:
+            current_duration = getattr(transitions[idx], "duration", 0)
             transitions[idx].duration = duration
+            delta = duration - current_duration
+            if delta:
+                _shift_storyboard_after_transition(storyboard, idx, delta)
         except Exception:
             continue
 
