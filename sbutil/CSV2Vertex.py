@@ -439,7 +439,14 @@ def _replace_light_effect_texture(light_effect, color_image):
 
 # ---------- Import Helper ----------
 
-def import_csv_folder(context, folder, start_frame, *, use_vat: bool = False):
+def import_csv_folder(
+    context,
+    folder,
+    start_frame,
+    *,
+    use_vat: bool = False,
+    image_export_dir: str | None = None,
+):
     """Import CSV tracks from ``folder`` and create a mesh with animation.
 
     Returns a tuple ``(object, duration, key_entries)`` where ``object`` is the
@@ -466,15 +473,21 @@ def import_csv_folder(context, folder, start_frame, *, use_vat: bool = False):
         first_positions.append((d0["x"], d0["y"], d0["z"]))
 
     if use_vat:
-        obj, color_image = csv_vat_gn.create_vat_animation_from_tracks(
+        obj, color_image, pos_image = csv_vat_gn.create_vat_animation_from_tracks(
             tracks,
             fps,
             start_frame=start_frame,
             base_name=f"{folder_name}_CSV",
             storyboard_name=folder_name,
         )
+        cat_image = color_image.copy()
+        cat_image.name = f"{folder_name}_CAT"
+
+        export_dir = image_export_dir
+        if export_dir and pos_image is not None and color_image is not None:
+            _export_cat_vat_images(pos_image, color_image, cat_image, export_dir)
         key_entries = None
-        color_image_for_le = color_image
+        color_image_for_le = cat_image
     else:
         # Create mesh and armature with N bones/vertices
         # Name it after the storyboard entry + "_CSV" for clarity
@@ -568,6 +581,11 @@ class CSVVA_Props(PropertyGroup):
     use_vat: BoolProperty(
         name="Use VAT",
         description="Generate vertex animation textures instead of bone-based animation",
+        default=False,
+    )
+    export_images: BoolProperty(
+        name="Link CAT/VAT images to files",
+        description="Save CAT/VAT images next to the .blend file and reference them instead of embedding",
         default=False,
     )
     preview_items: CollectionProperty(type=CSVVA_PreviewItem)
@@ -668,6 +686,11 @@ class CSVVA_OT_Import(Operator):
         prefs = context.scene.csvva_props
         folder = bpy.path.abspath(prefs.folder)
         storyboard = context.scene.skybrush.storyboard
+        export_dir = None
+        if prefs.use_vat and prefs.export_images:
+            export_dir = _ensure_export_directory(self.report, "//")
+            if not export_dir:
+                return {"CANCELLED"}
         base_start = 0
         if storyboard.entries:
             last = storyboard.entries[-1]
@@ -690,6 +713,7 @@ class CSVVA_OT_Import(Operator):
                     sub_path,
                     sf,
                     use_vat=prefs.use_vat,
+                    image_export_dir=export_dir,
                 )
                 if obj:
                     created.append(obj)
@@ -784,6 +808,70 @@ def _save_image(image, filepath, file_format):
     image.save()
 
 
+def _link_image_to_file(image, filepath, file_format):
+    """Save ``image`` to ``filepath`` and keep it linked to the file."""
+
+    _save_image(image, filepath, file_format)
+    image.filepath = filepath
+    try:
+        image.source = 'FILE'
+    except Exception:
+        pass
+    try:
+        image.reload()
+    except Exception:
+        pass
+
+
+def _ensure_export_directory(report_fn, export_dir):
+    if not export_dir:
+        return None
+
+    if not bpy.data.filepath:
+        report_fn({"ERROR"}, "Please save the .blend file first")
+        return None
+
+    resolved = bpy.path.abspath(export_dir)
+    if not os.path.isdir(resolved):
+        report_fn({"ERROR"}, f"Could not resolve export directory: {resolved}")
+        return None
+
+    return resolved
+
+
+def _default_image_extension(image):
+    name = image.name.upper()
+    file_format = getattr(image, "file_format", "").upper()
+    if "POS" in name or file_format == "OPEN_EXR":
+        return ".exr"
+    if file_format == "PNG":
+        return ".png"
+    return ".png"
+
+
+def _export_cat_vat_images(pos_img, vat_color_img, cat_img, export_dir):
+    os.makedirs(export_dir, exist_ok=True)
+
+    pos_path = os.path.join(export_dir, f"{pos_img.name}{_default_image_extension(pos_img)}")
+    vat_color_path = os.path.join(
+        export_dir, f"{vat_color_img.name}{_default_image_extension(vat_color_img)}"
+    )
+    cat_path = os.path.join(export_dir, f"{cat_img.name}{_default_image_extension(cat_img)}")
+
+    _link_image_to_file(pos_img, pos_path, "OPEN_EXR")
+    _link_image_to_file(vat_color_img, vat_color_path, "PNG")
+    _link_image_to_file(cat_img, cat_path, "PNG")
+
+    return pos_path, vat_color_path, cat_path
+
+
+def _iter_cat_vat_images():
+    for img in bpy.data.images:
+        name = img.name.upper()
+        if "VAT" in name or name.endswith("_CAT"):
+            yield img
+
+
 class CSVVA_OT_GenerateImages(Operator):
     bl_idname = "csvva.generate_images"
     bl_label = "Generate CAT/VAT Images"
@@ -854,6 +942,61 @@ class CSVVA_OT_GenerateImages(Operator):
                 f"{name}: VAT Pos -> {os.path.basename(pos_path)}, VAT Color -> {os.path.basename(vat_color_path)}, CAT -> {os.path.basename(cat_path)}"
             )
         self.report({"INFO"}, " | ".join(details))
+        return {"FINISHED"}
+
+
+class CSVVA_OT_PackImages(Operator):
+    bl_idname = "csvva.pack_cat_vat_images"
+    bl_label = "Pack CAT/VAT Images"
+    bl_description = "Embed all CAT/VAT images into the current .blend file"
+
+    def execute(self, context):
+        packed = 0
+        for img in _iter_cat_vat_images():
+            try:
+                img.pack()
+                packed += 1
+            except Exception:
+                continue
+
+        if not packed:
+            self.report({"ERROR"}, "No CAT/VAT images found to pack")
+            return {"CANCELLED"}
+
+        self.report({"INFO"}, f"Packed {packed} CAT/VAT image(s)")
+        return {"FINISHED"}
+
+
+class CSVVA_OT_UnpackImages(Operator):
+    bl_idname = "csvva.unpack_cat_vat_images"
+    bl_label = "Unpack CAT/VAT Images"
+    bl_description = "Save all CAT/VAT images next to the .blend file and link them"
+
+    def execute(self, context):
+        export_dir = _ensure_export_directory(self.report, "//")
+        if not export_dir:
+            return {"CANCELLED"}
+
+        saved = 0
+        for img in _iter_cat_vat_images():
+            ext = _default_image_extension(img)
+            target_path = bpy.path.abspath(img.filepath or img.filepath_raw)
+            if not target_path:
+                target_path = os.path.join(export_dir, f"{img.name}{ext}")
+            os.makedirs(os.path.dirname(target_path), exist_ok=True)
+            file_format = "OPEN_EXR" if ext == ".exr" else "PNG"
+            _link_image_to_file(img, target_path, file_format)
+            try:
+                img.unpack(method='USE_ORIGINAL')
+            except Exception:
+                pass
+            saved += 1
+
+        if not saved:
+            self.report({"ERROR"}, "No CAT/VAT images found to unpack")
+            return {"CANCELLED"}
+
+        self.report({"INFO"}, f"Unpacked {saved} CAT/VAT image(s) to {export_dir}")
         return {"FINISHED"}
 
 
@@ -945,6 +1088,12 @@ class CSVVA_OT_Update(Operator):
         storyboard = context.scene.skybrush.storyboard
         checked_items = [item for item in prefs.preview_items if item.checked]
 
+        export_dir = None
+        if prefs.use_vat and prefs.export_images:
+            export_dir = _ensure_export_directory(self.report, "//")
+            if not export_dir:
+                return {"CANCELLED"}
+
         if not checked_items:
             self.report({"ERROR"}, "No items selected for update")
             return {"CANCELLED"}
@@ -984,10 +1133,16 @@ class CSVVA_OT_Update(Operator):
                         break
 
                 color_image = None
+                pos_image = None
                 if obj:
                     old_end = existing_entry.frame_start + existing_entry.duration
                     try:
-                        color_image, imported_duration, _drone_count = csv_vat_gn.update_vat_animation_for_object(
+                        (
+                            color_image,
+                            pos_image,
+                            imported_duration,
+                            _drone_count,
+                        ) = csv_vat_gn.update_vat_animation_for_object(
                             obj,
                             tracks,
                             fps,
@@ -1012,6 +1167,12 @@ class CSVVA_OT_Update(Operator):
                         _shift_subsequent_storyboard_entries(storyboard, existing_index, delta)
 
                     le_entry = _find_light_effect_entry(context.scene, existing_entry.name)
+                    cat_image = color_image.copy() if color_image else None
+                    if cat_image is not None:
+                        cat_image.name = f"{existing_entry.name}_CAT"
+                        if export_dir and pos_image is not None and color_image is not None:
+                            _export_cat_vat_images(pos_image, color_image, cat_image, export_dir)
+                        color_image = cat_image
                     if le_entry is not None:
                         _replace_light_effect_texture(le_entry, color_image)
                         try:
@@ -1035,7 +1196,11 @@ class CSVVA_OT_Update(Operator):
                 storyboard.entries.remove(existing_index)
 
             obj, imported_duration, key_entries = import_csv_folder(
-                context, item.folder, target_start, use_vat=prefs.use_vat
+                context,
+                item.folder,
+                target_start,
+                use_vat=prefs.use_vat,
+                image_export_dir=export_dir,
             )
             if not obj:
                 self.report({"WARNING"}, f"Failed to import from {item.folder}")
@@ -1093,6 +1258,7 @@ class CSVVA_PT_UI(Panel):
         col = lay.column(align=True)
         col.prop(prefs, "folder")
         col.prop(prefs, "use_vat")
+        col.prop(prefs, "export_images")
         col.operator(CSVVA_OT_PrepareFolders.bl_idname, icon="FILE_FOLDER")
         row = col.row(align=True)
         row.operator(CSVVA_OT_Import.bl_idname, icon="IMPORT")
@@ -1107,6 +1273,9 @@ class CSVVA_PT_UI(Panel):
             rows=4,
         )
         col.operator(CSVVA_OT_GenerateImages.bl_idname, icon="IMAGE_DATA")
+        row = col.row(align=True)
+        row.operator(CSVVA_OT_PackImages.bl_idname, icon="PACKAGE")
+        row.operator(CSVVA_OT_UnpackImages.bl_idname, icon="FILE_IMAGE")
         col.operator(CSVVA_OT_Update.bl_idname, icon="FILE_REFRESH")
 
 
@@ -1119,6 +1288,8 @@ classes = (
     CSVVA_OT_PrepareFolders,
     CSVVA_OT_Import,
     CSVVA_OT_GenerateImages,
+    CSVVA_OT_PackImages,
+    CSVVA_OT_UnpackImages,
     CSVVA_OT_Preview,
     CSVVA_OT_Update,
     CSVVA_PT_UI,
