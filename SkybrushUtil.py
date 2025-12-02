@@ -405,10 +405,39 @@ class SBUTIL_OT_LoadStoryboardBatch(Operator):
         previous_entry = None
         previous_end = None
 
-        for entry in sorted_entries:
+        i = 0
+        while i < len(sorted_entries):
+            entry = sorted_entries[i]
             start = int(getattr(entry, "frame_start", 0))
             duration = int(getattr(entry, "duration", 0))
             end = start + max(duration, 0)
+
+            is_mid_pose = "MidPose" in getattr(entry, "name", "")
+
+            if (
+                settings.include_transitions
+                and is_mid_pose
+                and previous_entry is not None
+                and previous_end is not None
+                and i + 1 < len(sorted_entries)
+            ):
+                next_entry = sorted_entries[i + 1]
+                next_start = int(getattr(next_entry, "frame_start", 0))
+                transition_start = previous_end
+                transition_end = next_start - 1
+
+                if transition_end >= transition_start:
+                    transition = settings.entries.add()
+                    transition.name = f"{previous_entry.name}_To_{next_entry.name}"
+                    transition.start_frame = transition_start
+                    transition.end_frame = transition_end
+                    transition.duration = transition_end - transition_start + 1
+                    transition.is_transition = True
+
+                previous_entry = None
+                previous_end = None
+                i += 1
+                continue
 
             if (
                 settings.include_transitions
@@ -416,12 +445,16 @@ class SBUTIL_OT_LoadStoryboardBatch(Operator):
                 and previous_end is not None
                 and start > previous_end
             ):
-                transition = settings.entries.add()
-                transition.name = f"{previous_entry.name}_To_{entry.name}"
-                transition.start_frame = previous_end
-                transition.end_frame = start
-                transition.duration = start - previous_end
-                transition.is_transition = True
+                transition_start = previous_end
+                transition_end = start - 1
+
+                if transition_end >= transition_start:
+                    transition = settings.entries.add()
+                    transition.name = f"{previous_entry.name}_To_{entry.name}"
+                    transition.start_frame = transition_start
+                    transition.end_frame = transition_end
+                    transition.duration = transition_end - transition_start + 1
+                    transition.is_transition = True
 
             item = settings.entries.add()
             item.name = entry.name
@@ -432,6 +465,7 @@ class SBUTIL_OT_LoadStoryboardBatch(Operator):
 
             previous_entry = entry
             previous_end = end
+            i += 1
 
         settings.active_index = 0 if settings.entries else -1
         self.report({'INFO'}, f"Loaded {len(settings.entries)} range(s)")
