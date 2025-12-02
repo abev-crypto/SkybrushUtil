@@ -17,6 +17,7 @@ from mathutils import Vector
 import json, os, shutil, tempfile, urllib.request
 from sbstudio.plugin.operators import RecalculateTransitionsOperator
 from sbstudio.plugin.operators.base import StoryboardOperator
+from sbstudio.plugin.constants import Collections
 from sbutil import formation_patch
 from sbutil import light_effects as light_effects_patch
 from sbutil import light_effects_result_patch
@@ -620,12 +621,10 @@ class DRONE_OT_UseNewDroneSpec(Operator):
         if collection is None:
             self.report({'ERROR'}, "DroneCollection not found")
             return {'CANCELLED'}
-
         converted = 0
         for obj in _iter_drone_mesh_objects(collection):
             self._convert_object(obj)
             converted += 1
-
         drone_mesh_gn.setup_for_collection(collection)
 
         scene = context.scene
@@ -2319,6 +2318,11 @@ def register():
         ),
         default=False,
     )
+    bpy.types.Scene.sbutil_update_light_effects = BoolProperty(
+        name="Update Light Effects",
+        description="Run the SBUtil light effect updater on frame changes",
+        default=True,
+    )
     bpy.types.Scene.auto_proximity_check = BoolProperty(
         name="Auto Proximity Check",
         description="Run full proximity check when frame changes",
@@ -2396,6 +2400,8 @@ def unregister():
     del bpy.types.Scene.shift_prefix_list
     if hasattr(bpy.types.Scene, "sbutil_use_patched_light_effects"):
         del bpy.types.Scene.sbutil_use_patched_light_effects
+    if hasattr(bpy.types.Scene, "sbutil_update_light_effects"):
+        del bpy.types.Scene.sbutil_update_light_effects
     if hasattr(bpy.types.Scene, "auto_proximity_check"):
         del bpy.types.Scene.auto_proximity_check
     if hasattr(bpy.types.Scene, "proximity_limit_mode"):

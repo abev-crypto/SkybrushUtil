@@ -81,6 +81,27 @@ def _get_color_from_result_image(drone) -> RGBAColor | None:
     return tuple(image.pixels[offset : offset + 4])  # type: ignore[return-value]
 
 
+def _is_any_viewport_wireframe() -> bool:
+    wm = getattr(bpy.context, "window_manager", None)
+    if wm is None:
+        return False
+
+    for window in wm.windows:
+        screen = window.screen
+        if screen is None:
+            continue
+        for area in screen.areas:
+            if area.type != 'VIEW_3D':
+                continue
+            for space in area.spaces:
+                if space.type != 'VIEW_3D':
+                    continue
+                shading = getattr(space, "shading", None)
+                if shading and getattr(shading, "type", None) == 'WIREFRAME':
+                    return True
+    return False
+
+
 def _patched_update_light_effects(scene, depsgraph):
     _suspension_counter = getattr(_light_effects_mod, "_suspension_counter", 0)
     if _suspension_counter > 0:
@@ -92,19 +113,12 @@ def _patched_update_light_effects(scene, depsgraph):
 
     frame = scene.frame_current
     frame_start = scene.frame_start
-    frame_end = scene.frame_end
-    render_range = (frame_start, frame_end)
-    render_range_length = frame_end - frame_start + 1
 
     drones = Collections.find_drones().objects if Collections is not None else []
     mapping = scene.skybrush.storyboard.get_mapping_at_frame(frame)
     height = len(mapping) if mapping is not None else len(drones)
 
     if not drones or height == 0:
-        return
-
-    image = _get_or_create_result_image(render_range_length, height, render_range)
-    if image is None:
         return
 
     changed = False
@@ -115,23 +129,29 @@ def _patched_update_light_effects(scene, depsgraph):
     for effect in light_effects.iter_active_effects_in_frame(frame):
         if colors is None:
             positions = [get_position_of_object(drone) for drone in drones]
-            colors = _get_base_colors_for_frame(image, frame, frame_start, drones)
+            colors = [[0.0, 0.0, 0.0, 0.0] for _ in drones]
             changed = True
 
         effect.apply_on_colors(
-            colors,
+            drones=drones,
+            colors=colors,
             positions=positions,
             mapping=mapping,
             frame=frame,
             random_seq=random_seq,
         )
-
     if changed and colors is not None:
-        _write_column(image, frame - frame_start, colors)
+        _write_column_to_cache(frame - frame_start, colors)
+        _write_led_color_attribute(colors)
     else:
-        _copy_previous_column(image, frame - frame_start)
+        cached = _copy_previous_column_to_cache(frame - frame_start)
+        if cached is not None:
+            _write_led_color_attribute(cached)
 
 _base_color_cache: dict[int, RGBAColor] = {}
+
+_color_column_cache: dict[int, list[MutableRGBAColor]] = {}
+"""Caches columns of colors by frame index to avoid touching the result image."""
 
 _last_frame: Optional[int] = None
 """Number of the last frame that was evaluated with `update_light_effects()`"""
@@ -149,6 +169,12 @@ drone.
 @persistent
 def c_update_light_effects(scene):
     global _last_frame, _base_color_cache, _suspension_counter, WHITE
+
+    if _is_any_viewport_wireframe():
+        return
+
+    if not getattr(scene, "sbutil_update_light_effects", True):
+        return
 
     if getattr(scene, "sbutil_use_patched_light_effects", False):
         _patched_update_light_effects(scene, None)
@@ -224,39 +250,30 @@ def c_update_light_effects(scene):
             set_led_light_color(drone, color)
 
 
-def _copy_previous_column(image, column: int) -> None:
+def _copy_previous_column_to_cache(column: int) -> list[MutableRGBAColor] | None:
     if column <= 0:
-        return
+        return _color_column_cache.get(0)
 
-    width, height = image.size
-    if column >= width:
-        return
+    cached = _color_column_cache.get(column)
+    if cached is not None:
+        return cached
 
-    pixels = list(image.pixels[:])
-    prev_column = column - 1
+    prev = _color_column_cache.get(column - 1)
+    if prev is None:
+        return None
 
-    for row in range(height):
-        prev_offset = (prev_column + row * width) * 4
-        offset = (column + row * width) * 4
-        pixels[offset : offset + 4] = pixels[prev_offset : prev_offset + 4]
-
-    image.pixels[:] = pixels
+    copied = [list(color) for color in prev]
+    _color_column_cache[column] = copied
+    return copied
 
 
 def _get_base_colors_for_frame(
     image, frame: int, frame_start: int, drones
 ) -> list[MutableRGBAColor]:
-    width, height = image.size
     column = frame - frame_start
-    if 0 <= column - 1 < width:
-        pixels = list(image.pixels[:])
-        prev_column = column - 1
-        return [
-            list(
-                pixels[(prev_column + row * width) * 4 : (prev_column + row * width) * 4 + 4]
-            )
-            for row in range(height)
-        ]
+    prev = _color_column_cache.get(column - 1)
+    if prev is not None:
+        return [list(color) for color in prev]
 
     return [list(_patched_get_color_of_drone(drone)) for drone in drones]
 
@@ -266,6 +283,7 @@ stored_range: tuple[int, int] | None = None
 def _get_or_create_result_image(width: int, height: int, render_range: tuple[int, int]):
     global result_image
     global stored_range
+    global _color_column_cache
 
     image = result_image
     if image is None or image.name not in bpy.data.images:
@@ -280,25 +298,46 @@ def _get_or_create_result_image(width: int, height: int, render_range: tuple[int
         if image is not None:
             bpy.data.images.remove(image)
         image = bpy.data.images.new(name="Light effects result", width=width, height=height)
+        _color_column_cache.clear()
 
     result_image = image
     stored_range = render_range
     return image
 
 
-def _write_column(image, column: int, colors: list[MutableRGBAColor]) -> None:
-    width, height = image.size
-    if column < 0 or column >= width:
+def _write_column_to_cache(column: int, colors: list[MutableRGBAColor]) -> None:
+    _color_column_cache[column] = [list(color) for color in colors]
+
+
+def _write_led_color_attribute(colors: list[MutableRGBAColor]) -> None:
+    system_obj = bpy.data.objects.get("DroneSystem")
+    if system_obj is None or system_obj.type != 'MESH':
         return
 
-    pixels = list(image.pixels[:])
-    for row, color in enumerate(colors):
-        if row >= height:
-            break
-        offset = (column + row * width) * 4
-        pixels[offset : offset + 4] = color
+    mesh = system_obj.data
+    if mesh is None:
+        return
 
-    image.pixels[:] = pixels
+    point_count = len(colors)
+
+    if len(mesh.vertices) != point_count:
+        mesh.clear_geometry()
+        mesh.vertices.add(point_count)
+
+    attr = mesh.color_attributes.get("LEDColor")
+    if attr is None or attr.domain != 'POINT' or attr.data_type != 'BYTE_COLOR':
+        if attr is not None:
+            mesh.color_attributes.remove(attr)
+        attr = mesh.color_attributes.new(
+            name="LEDColor", domain='POINT', type='BYTE_COLOR'
+        )
+
+    for idx, color in enumerate(colors):
+        if idx >= len(attr.data):
+            break
+        attr.data[idx].color = color
+
+    mesh.update()
 
 
 def _reregister_update_light_effects() -> None:

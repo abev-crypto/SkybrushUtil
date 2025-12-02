@@ -2254,6 +2254,15 @@ class PatchedLightEffect(PropertyGroup):
         ],
         default="COLOR_RAMP",
     )
+    mesh = PointerProperty(
+        type=bpy.types.Object,
+        name="Mesh",
+        description=(
+            'Mesh related to the light effect; used when the output is set to "Distance" or to limit the '
+            'light effect to the inside or one side of this mesh when "Inside the mesh" or '
+            '"Front side of plane" is checked'
+        ),
+    )
     cat_frame_offset = IntProperty(
         name="CAT Offset",
         description="Frame offset applied when sampling CAT textures",
@@ -3602,6 +3611,7 @@ def patch_light_effect_class():
         LightEffect, "cat_texture_index", None
     )
     LightEffect.type = PatchedLightEffect.type
+    LightEffect.mesh = PatchedLightEffect.mesh
     LightEffect.cat_frame_offset = PatchedLightEffect.cat_frame_offset
     LightEffect.cat_speed = PatchedLightEffect.cat_speed
     LightEffect.cat_texture_split = PatchedLightEffect.cat_texture_split
@@ -4370,6 +4380,46 @@ class BakeLightEffectsToCatOperator(bpy.types.Operator):  # pragma: no cover - B
                     pass
 
         self.report({'INFO'}, "Baked light effects into a Color Animation Texture")
+        return {'FINISHED'}
+
+
+class BakeCurrentFrameToCatOperator(BakeLightEffectsToCatOperator):  # pragma: no cover - Blender UI
+    bl_idname = "skybrush.bake_current_frame_to_cat"
+    bl_label = "Bake CAT (Frame)"
+    bl_description = "Bake only the current frame's light colors into a CAT image"
+
+    def execute(self, context):
+        light_effects = context.scene.skybrush.light_effects
+        entry = getattr(light_effects, "active_entry", None)
+        if entry is None:
+            self.report({'ERROR'}, "No active light effect to bake")
+            return {'CANCELLED'}
+
+        drones = self._gather_drones()
+        if not drones:
+            self.report({'ERROR'}, "No objects found in the 'Drones' collection")
+            return {'CANCELLED'}
+
+        frame = context.scene.frame_current
+        rows = self._resolve_row_order(context.scene, drones, frame)
+
+        try:
+            pixels, width, height = self._collect_colors(
+                context, drones, rows, frame, frame
+            )
+        except Exception as exc:  # pragma: no cover - Blender runtime
+            self.report({'ERROR'}, f"Failed to bake CAT: {exc}")
+            return {'CANCELLED'}
+
+        try:
+            self._create_cat_entry(
+                context, light_effects, [entry], pixels, width, height, frame
+            )
+        except Exception as exc:  # pragma: no cover - Blender runtime
+            self.report({'ERROR'}, f"Failed to create CAT: {exc}")
+            return {'CANCELLED'}
+
+        self.report({'INFO'}, "Baked current frame into a Color Animation Texture")
         return {'FINISHED'}
 
 
@@ -6297,6 +6347,10 @@ class PatchedLightEffectsPanel(Panel):  # pragma: no cover - Blender UI code
                 BakeLightEffectsToCatOperator.bl_idname, text="Bake CAT (All)"
             )
             op_cat_all.scope = "VISIBLE"
+            col.operator(
+                BakeCurrentFrameToCatOperator.bl_idname,
+                text="Bake CAT (Frame)",
+            )
             col.separator()
             col.prop(entry, "fade_in_duration")
             col.prop(entry, "fade_out_duration")
@@ -6529,6 +6583,7 @@ def register():  # pragma: no cover - executed in Blender
     bpy.utils.register_class(BakeColorRampOperator)
     bpy.utils.register_class(BakeLightEffectToKeysOperator)
     bpy.utils.register_class(BakeLightEffectsToCatOperator)
+    bpy.utils.register_class(BakeCurrentFrameToCatOperator)
     bpy.utils.register_class(BakeMeshUVToVertexColorOperator)
     bpy.utils.register_class(GeneratePathGradientMeshOperator)
     bpy.utils.register_class(SetupFollowCurveOperator)
@@ -6569,6 +6624,7 @@ def unregister():  # pragma: no cover - executed in Blender
     bpy.utils.unregister_class(SetupFollowCurveOperator)
     bpy.utils.unregister_class(GeneratePathGradientMeshOperator)
     bpy.utils.unregister_class(BakeMeshUVToVertexColorOperator)
+    bpy.utils.unregister_class(BakeCurrentFrameToCatOperator)
     bpy.utils.unregister_class(BakeLightEffectsToCatOperator)
     bpy.utils.unregister_class(BakeLightEffectToKeysOperator)
     bpy.utils.unregister_class(BakeColorRampOperator)
