@@ -602,16 +602,33 @@ class SBUTIL_OT_IsolateActiveFormation(Operator):
         storyboard = getattr(getattr(context.scene, "skybrush", None), "storyboard", None)
         entries = getattr(storyboard, "entries", None)
         active_index = getattr(storyboard, "active_index", -1)
+        current_frame = getattr(context.scene, "frame_current", 0)
 
-        if not entries or not (0 <= active_index < len(entries)):
-            self.report({'WARNING'}, "No active storyboard entry")
+        def _entry_contains_frame(entry):
+            start = int(getattr(entry, "frame_start", 0))
+            end_attr = getattr(entry, "frame_end", None)
+            duration = getattr(entry, "duration", None)
+            end = int(end_attr) if end_attr is not None else start + max(int(duration or 0), 0)
+            return start <= current_frame <= end
+
+        target_index = -1
+        if entries and 0 <= active_index < len(entries) and _entry_contains_frame(entries[active_index]):
+            target_index = active_index
+        elif entries:
+            for idx, entry in enumerate(entries):
+                if _entry_contains_frame(entry):
+                    target_index = idx
+                    break
+
+        if not entries or target_index < 0:
+            self.report({'WARNING'}, "No storyboard entry contains the current frame")
             return {'CANCELLED'}
 
         shown, hidden = 0, 0
         for idx, entry in enumerate(entries):
             for obj in _formation_meshes_for_entry(entry):
                 try:
-                    if idx == active_index:
+                    if idx == target_index:
                         obj.hide_set(False)
                         obj.hide_select = False
                         shown += 1

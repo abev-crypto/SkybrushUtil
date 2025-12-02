@@ -14,6 +14,20 @@ from sbutil.color_key_utils import apply_color_keys_from_key_data
 PREFIX_MAP_FILENAME = "prefix_map.json"
 DEFAULT_FOLDER_DURATION = 480
 
+
+def _storyboard_name(base_name: str, meta: dict | None = None) -> str:
+    """Return a storyboard entry name composed of ID and ``base_name`` if present."""
+
+    meta = meta or {}
+    try:
+        meta_id = meta.get("id")
+    except Exception:
+        meta_id = None
+
+    if meta_id is not None:
+        return f"{meta_id}_{base_name}"
+    return base_name
+
 def detect_delimiter(sample_path):
     # Try to sniff; fall back to tab if header matches the sample
     try:
@@ -897,7 +911,7 @@ class CSVVA_OT_Import(Operator):
                 sub_path = os.path.join(folder, d)
                 base_name, gap_frames = split_name_and_gap(d, context.scene.render.fps)
                 meta = metadata_map.get(d, {}) if metadata_map else {}
-                display_name = str(meta.get("id", base_name))
+                display_name = _storyboard_name(base_name, meta)
                 mid_layers = meta.get("midlayer", 1) or 1
                 sf = next_start
                 obj, dur, key_entries = import_csv_folder(
@@ -928,8 +942,10 @@ class CSVVA_OT_Import(Operator):
                     except Exception:
                         pass
 
-                    if gap_frames >= 2 and idx < len(ordered_subdirs) - 1:
-                        mid_offset = max(1, int(round(gap_frames / 2)))
+                    gap_for_next = gap_frames
+                    if idx < len(ordered_subdirs) - 1:
+                        mid_gap = max(2, gap_frames)
+                        mid_offset = max(1, int(round(mid_gap / 2)))
                         mid_frame = sf + effective_duration + mid_offset
                         create_grid_mid_pose(
                             context,
@@ -938,8 +954,9 @@ class CSVVA_OT_Import(Operator):
                             reference_obj=obj,
                             layers=mid_layers,
                         )
+                        gap_for_next = max(gap_frames, mid_gap)
 
-                    next_start = max(next_start, sf + effective_duration + gap_frames)
+                    next_start = max(next_start, sf + effective_duration + gap_for_next)
                 if obj:
                     continue
             if not created:
@@ -964,10 +981,12 @@ class CSVVA_OT_Import(Operator):
         base_name, _gap = split_name_and_gap(
             folder_name, context.scene.render.fps
         )
+        meta = metadata_map.get(folder_name, {}) if metadata_map else {}
+        display_name = _storyboard_name(base_name, meta)
         start_frame = base_start
         storyboard = context.scene.skybrush.storyboard
         for idx, sb in enumerate(storyboard.entries):
-            if sb.name == base_name:
+            if sb.name == display_name:
                 old_obj = bpy.data.objects.get(sb.name)
                 if old_obj:
                     mesh = old_obj.data
@@ -986,6 +1005,13 @@ class CSVVA_OT_Import(Operator):
             return {"CANCELLED"}
         try:
             bpy.ops.skybrush.recalculate_transitions(scope="ALL")
+        except Exception:
+            pass
+        try:
+            entry = storyboard.entries[-1]
+            entry.name = display_name
+            if metadata_map:
+                entry.duration = int(meta.get("duration", entry.duration))
         except Exception:
             pass
         if key_entries:
@@ -1225,10 +1251,24 @@ class CSVVA_OT_Preview(Operator):
             return {"CANCELLED"}
 
         fps = context.scene.render.fps
+        metadata_map = load_import_metadata(folder, self.report)
         subdirs = [d for d in sorted(os.listdir(folder)) if os.path.isdir(os.path.join(folder, d))]
+        ordered_subdirs = list(subdirs)
+        if metadata_map:
+            ordered_subdirs = []
+            subdir_set = set(subdirs)
+            for key, meta in sorted(metadata_map.items(), key=lambda item: item[1]["id"]):
+                if key in subdir_set:
+                    ordered_subdirs.append(key)
+                else:
+                    self.report({"WARNING"}, f"No folder matched metadata key '{key}'")
+            for d in subdirs:
+                if d not in metadata_map:
+                    ordered_subdirs.append(d)
+
         target_folders = []
-        if subdirs:
-            target_folders = [os.path.join(folder, d) for d in subdirs]
+        if ordered_subdirs:
+            target_folders = [os.path.join(folder, d) for d in ordered_subdirs]
         else:
             target_folders = [folder]
 
@@ -1243,6 +1283,8 @@ class CSVVA_OT_Preview(Operator):
         for path in target_folders:
             folder_name = os.path.basename(os.path.normpath(path))
             base_name, gap_frames = split_name_and_gap(folder_name, fps)
+            meta = metadata_map.get(folder_name, {}) if metadata_map else {}
+            display_name = _storyboard_name(base_name, meta)
             start_frame = next_start
 
             tracks = build_tracks_from_folder(path)
@@ -1250,25 +1292,33 @@ class CSVVA_OT_Preview(Operator):
             if duration == 0:
                 continue
 
+            effective_duration = duration
+            if metadata_map:
+                effective_duration = meta.get("duration", duration or DEFAULT_FOLDER_DURATION)
+            try:
+                effective_duration = int(effective_duration)
+            except Exception:
+                effective_duration = duration
+
             existing_entry = None
             for sb in storyboard.entries:
-                if sb.name == base_name:
+                if sb.name == display_name:
                     existing_entry = sb
                     break
 
             frame_mismatch = False
             checked = False
-            display_duration = duration
+            display_duration = effective_duration
             if existing_entry:
                 start_frame = existing_entry.frame_start
-                frame_mismatch = existing_entry.duration != duration
+                frame_mismatch = existing_entry.duration != effective_duration
                 display_duration = existing_entry.duration
                 checked = frame_mismatch
             else:
                 checked = True
 
             item = prefs.preview_items.add()
-            item.name = base_name
+            item.name = display_name
             item.folder = path
             item.start_frame = start_frame
             item.duration = display_duration
