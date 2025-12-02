@@ -508,19 +508,42 @@ class SBUTIL_OT_SetRenderRangeFromStoryboard(Operator):
         storyboard = getattr(getattr(context.scene, "skybrush", None), "storyboard", None)
         entries = getattr(storyboard, "entries", None)
         index = getattr(storyboard, "active_index", -1)
+        current_frame = getattr(context.scene, "frame_current", 0)
 
-        if not entries or index < 0 or index >= len(entries):
-            self.report({'WARNING'}, "No active storyboard entry")
+        if not entries:
+            self.report({'WARNING'}, "No storyboard entries available")
             return {'CANCELLED'}
 
-        entry = entries[index]
+        def _entry_contains_frame(entry):
+            start = int(getattr(entry, "frame_start", 0))
+            end_attr = getattr(entry, "frame_end", None)
+            duration = getattr(entry, "duration", None)
+            end = int(end_attr) if end_attr is not None else start + max(int(duration or 0), 0)
+            return start <= current_frame <= end
+
+        entry = None
+        if 0 <= index < len(entries) and _entry_contains_frame(entries[index]):
+            entry = entries[index]
+        else:
+            for item in entries:
+                if _entry_contains_frame(item):
+                    entry = item
+                    break
+
+        if entry is None:
+            self.report({'WARNING'}, "No storyboard entry contains the current frame")
+            return {'CANCELLED'}
+
         start = int(getattr(entry, "frame_start", 0))
-        duration = int(getattr(entry, "duration", 0))
+        end_attr = getattr(entry, "frame_end", None)
+        duration = getattr(entry, "duration", None)
+        end = int(end_attr) if end_attr is not None else start + max(int(duration or 0), 0)
+
         context.scene.frame_start = start
-        context.scene.frame_end = start + max(duration, 0)
+        context.scene.frame_end = end
         context.scene.frame_set(start)
 
-        self.report({'INFO'}, f"Render range set to {entry.name}")
+        self.report({'INFO'}, f"Render range set to {getattr(entry, 'name', '')}")
         return {'FINISHED'}
 
 # -------------------------------
