@@ -103,11 +103,13 @@ def load_import_metadata(directory, report):
     """Return an import plan read from :data:`PREFIX_MAP_FILENAME`.
 
     The file is expected to contain a mapping from folder names to an object
-    with the keys ``id`` (required), ``duration`` (optional) and ``midlayer``
-    (optional). ``duration`` represents the transition duration leading into
-    the formation. It defaults to :data:`DEFAULT_FOLDER_DURATION` and
-    ``midlayer`` defaults to ``1`` when missing, but these defaults can be
-    overridden by top-level ``duration`` / ``midlayer`` keys in the JSON.
+    with the keys ``id`` (required), ``duration`` (optional), ``midlayer``
+    (optional), ``middur`` (optional mid-pose duration), and ``midpose``
+    (optional flag to disable mid-poses). ``duration`` represents the transition
+    duration leading into the formation. It defaults to
+    :data:`DEFAULT_FOLDER_DURATION`, ``midlayer`` defaults to ``1``,
+    ``middur`` defaults to ``1`` and ``midpose`` defaults to ``True`` when
+    missing, but these defaults can be overridden by top-level keys in the JSON.
     """
 
     mapping_path = os.path.join(directory, PREFIX_MAP_FILENAME)
@@ -142,6 +144,15 @@ def load_import_metadata(directory, report):
             default_midlayer = max(1, int(data["midlayer"]))
         except Exception:
             report({"WARNING"}, "Invalid top-level midlayer in prefix_map.json, using default")
+    default_middur = 1
+    if "middur" in data and not isinstance(data["middur"], dict):
+        try:
+            default_middur = max(1, int(data["middur"]))
+        except Exception:
+            report({"WARNING"}, "Invalid top-level middur in prefix_map.json, using default")
+    default_midpose = True
+    if "midpose" in data and not isinstance(data["midpose"], dict):
+        default_midpose = bool(data["midpose"])
 
     metadata = {}
     for key, value in data.items():
@@ -160,6 +171,8 @@ def load_import_metadata(directory, report):
 
         duration = value.get("duration", default_duration)
         midlayer = value.get("midlayer", default_midlayer)
+        middur = value.get("middur", default_middur)
+        midpose = value.get("midpose", default_midpose)
 
         try:
             duration = int(duration)
@@ -171,12 +184,19 @@ def load_import_metadata(directory, report):
             midlayer = max(1, int(midlayer))
         except Exception:
             midlayer = default_midlayer
+        try:
+            middur = max(1, int(middur))
+        except Exception:
+            middur = default_middur
+        midpose = bool(midpose)
 
         metadata[str(key)] = {
             "id": entry_id,
             "transition_duration": duration,
             "duration": duration,  # kept for backward compatibility
             "midlayer": midlayer,
+            "middur": middur,
+            "midpose": midpose,
         }
 
     return metadata
@@ -194,10 +214,7 @@ def _metadata_transition_duration(meta, default=None):
     if duration is None:
         return default
 
-    try:
-        return int(duration)
-    except Exception:
-        return default
+    return int(duration)
 
 def build_tracks_from_folder(folder, delimiter="auto"):
     files = []
@@ -364,11 +381,8 @@ def _create_grid_positions(count, *, spacing=1.0, bounds=None, layers=1):
 def _modifier_input_value(mod, socket_name):
     """Best-effort fetch of a Geometry Nodes input value by socket name."""
 
-    try:
-        if socket_name in mod:
-            return mod.get(socket_name)
-    except Exception:
-        pass
+    if socket_name in mod:
+        return mod.get(socket_name)
 
     try:
         return getattr(mod, socket_name)
@@ -388,42 +402,50 @@ def _modifier_input_value(mod, socket_name):
         ):
             if not candidate:
                 continue
-            try:
-                return mod.get(candidate)
-            except Exception:
-                try:
-                    return getattr(mod, candidate)
-                except Exception:
-                    continue
+            return mod.get(candidate)
     return None
-
-
-def _world_bounds(obj):
-    if obj is None:
-        return None
-    coords = [obj.matrix_world @ Vector(corner) for corner in obj.bound_box]
-    min_v = Vector((min(c.x for c in coords), min(c.y for c in coords), min(c.z for c in coords)))
-    max_v = Vector((max(c.x for c in coords), max(c.y for c in coords), max(c.z for c in coords)))
-    return min_v, max_v
 
 
 def _geometry_node_bounds(obj):
     if obj is None:
         return None
 
+    # Prefer explicit bounds exposed on a Geometry Nodes modifier
     for mod in getattr(obj, "modifiers", []):
         if getattr(mod, "type", None) != "NODES":
             continue
 
         min_pos = _modifier_input_value(mod, "MinPos")
         max_pos = _modifier_input_value(mod, "MaxPos")
-        try:
-            if min_pos is not None and max_pos is not None:
-                min_v = Vector(min_pos)
-                max_v = Vector(max_pos)
-                return min_v, max_v
-        except Exception:
-            continue
+        if min_pos is not None and max_pos is not None:
+            min_v = Vector(min_pos)
+            max_v = Vector(max_pos)
+            return min_v, max_v
+
+    # Fallback to the object's bounding box if no GN bounds are present
+    try:
+        bb = getattr(obj, "bound_box", None)
+        if bb:
+            corners = [Vector(c) for c in bb]
+            if hasattr(obj, "matrix_world"):
+                corners = [obj.matrix_world @ c for c in corners]
+            min_v = Vector(
+                (
+                    min(c.x for c in corners),
+                    min(c.y for c in corners),
+                    min(c.z for c in corners),
+                )
+            )
+            max_v = Vector(
+                (
+                    max(c.x for c in corners),
+                    max(c.y for c in corners),
+                    max(c.z for c in corners),
+                )
+            )
+            return min_v, max_v
+    except Exception:
+        pass
     return None
 
 
@@ -434,12 +456,13 @@ def create_grid_mid_pose(
     spacing=1.0,
     reference_obj=None,
     layers=1,
+    duration=1,
 ):
     """Create and add a grid-formation storyboard entry at ``frame_start``.
 
     The grid will have as many vertices as there are drone objects in the
-    "Drones" collection. The formation is appended to the storyboard with a
-    duration of 1 frame.
+    "Drones" collection. The formation is appended to the storyboard with the
+    given ``duration`` (default: 1 frame).
     """
 
     drones = bpy.data.collections.get("Drones")
@@ -491,7 +514,7 @@ def create_grid_mid_pose(
         entry = storyboard.entries[-1]
         entry.name = base_name
         entry.frame_start = frame_start
-        entry.duration = 1
+        entry.duration = max(1, int(duration))
         return entry
     except Exception:
         return None
@@ -715,11 +738,6 @@ def _hide_csv_mesh(obj):
         except Exception:
             pass
 
-    try:
-        obj.hide_select = True
-    except Exception:
-        pass
-
 
 def import_csv_folder(
     context,
@@ -848,6 +866,8 @@ class CSVVA_PreviewItem(PropertyGroup):
     folder: StringProperty(name="Folder")
     start_frame: IntProperty(name="Start Frame", default=0)
     duration: IntProperty(name="Duration", default=0)
+    midpose: BoolProperty(name="Add MidPose", default=True)
+    midpose_duration: IntProperty(name="MidPose Duration", default=1, min=1)
     checked: BoolProperty(name="Include", default=False)
     exists: BoolProperty(name="Exists", default=False)
     frame_mismatch: BoolProperty(name="Frame Mismatch", default=False)
@@ -1000,13 +1020,15 @@ class CSVVA_OT_Import(Operator):
                 meta = metadata_map.get(d, {}) if metadata_map else {}
                 display_name = _storyboard_name(base_name, meta)
                 mid_layers = meta.get("midlayer", 1) or 1
+                midpose_enabled = bool(meta.get("midpose", True))
+                mid_duration = max(1, int(meta.get("middur", 1) or 1))
                 next_meta = (
                     metadata_map.get(ordered_subdirs[idx + 1], {})
                     if idx < len(ordered_subdirs) - 1
                     else {}
                 )
                 transition_duration = _metadata_transition_duration(next_meta, default=0) or 0
-                midpose_disabled = transition_duration <= 0
+                midpose_disabled = (transition_duration <= 0) or (not midpose_enabled)
                 sf = next_start
                 obj, dur, key_entries = import_csv_folder(
                     context,
@@ -1040,36 +1062,37 @@ class CSVVA_OT_Import(Operator):
                             base_name=f"{display_name}_MidPose",
                             reference_obj=obj,
                             layers=mid_layers,
+                            duration=mid_duration,
                         )
                         if mid_entry:
                             entries_meta.append(None)
-                    transition_for_next = (
-                        transition_duration if idx < len(ordered_subdirs) - 1 else 0
+                        transition_for_next = (
+                            transition_duration if idx < len(ordered_subdirs) - 1 else 0
+                        )
+                        next_start = max(
+                            next_start,
+                            sf + effective_duration + gap_for_next + transition_for_next,
+                        )
+                    if obj:
+                        continue
+                if not created:
+                    self.report({"ERROR"}, "No CSV/TSV files found in subfolders")
+                    return {"CANCELLED"}
+                try:
+                    bpy.ops.skybrush.recalculate_transitions(scope="ALL")
+                except Exception:
+                    pass
+                _apply_transition_durations(storyboard, entries_meta)
+                for key_entries, sf, obj, sub_path in key_data_collection:
+                    current_frame = context.scene.frame_current
+                    context.scene.frame_set(sf)
+                    apply_color_keys_from_key_data(
+                        key_entries,
+                        sf,
                     )
-                    next_start = max(
-                        next_start,
-                        sf + effective_duration + gap_for_next + transition_for_next,
-                    )
-                if obj:
-                    continue
-            if not created:
-                self.report({"ERROR"}, "No CSV/TSV files found in subfolders")
-                return {"CANCELLED"}
-            try:
-                bpy.ops.skybrush.recalculate_transitions(scope="ALL")
-            except Exception:
-                pass
-            _apply_transition_durations(storyboard, entries_meta)
-            for key_entries, sf, obj, sub_path in key_data_collection:
-                current_frame = context.scene.frame_current
-                context.scene.frame_set(sf)
-                apply_color_keys_from_key_data(
-                    key_entries,
-                    sf,
-                )
-                context.scene.frame_set(current_frame)
-            self.report({"INFO"}, f"Setup complete for {len(created)} folders")
-            return {"FINISHED"}
+                    context.scene.frame_set(current_frame)
+                self.report({"INFO"}, f"Setup complete for {len(created)} folders")
+                return {"FINISHED"}
 
         folder_name = os.path.basename(os.path.normpath(folder))
         base_name, _gap = split_name_and_gap(
@@ -1379,8 +1402,12 @@ class CSVVA_OT_Preview(Operator):
             folder_name = os.path.basename(os.path.normpath(path))
             base_name, gap_frames = split_name_and_gap(folder_name, fps)
             meta = metadata_map.get(folder_name, {}) if metadata_map else {}
+            if meta:
+                gap_frames = _metadata_transition_duration(meta, default=gap_frames)
             display_name = _storyboard_name(base_name, meta)
             start_frame = next_start
+            mid_duration = max(1, int(meta.get("middur", 1) or 1))
+            midpose_enabled = bool(meta.get("midpose", True))
 
             tracks = build_tracks_from_folder(path)
             duration = calculate_duration_from_tracks(tracks, fps)
@@ -1409,6 +1436,8 @@ class CSVVA_OT_Preview(Operator):
             item.folder = path
             item.start_frame = start_frame
             item.duration = display_duration
+            item.midpose = midpose_enabled
+            item.midpose_duration = mid_duration
             item.checked = checked
             item.exists = existing_entry is not None
             item.frame_mismatch = frame_mismatch
