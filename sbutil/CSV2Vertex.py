@@ -6,6 +6,7 @@ from mathutils import Vector
 
 from sbutil import csv_vat_gn
 from sbutil.light_effects import OUTPUT_VERTEX_COLOR
+from sbutil.copyloc_utils import shape_copyloc_influence_curve
 
 from sbutil.color_key_utils import apply_color_keys_from_key_data
 
@@ -104,7 +105,10 @@ def load_import_metadata(directory, report):
 
     The file is expected to contain a mapping from folder names to an object
     with the keys ``id`` (required), ``duration`` (optional), ``midlayer``
-    (optional), ``middur`` (optional mid-pose duration), and ``midpose``
+    (optional), ``middur`` (optional mid-pose duration), ``midpose`` (optional
+    flag to disable mid-poses), ``fhandle`` (optional CopyLoc handle frames for
+    the formation), and ``mhandle`` (optional CopyLoc handle frames for the
+    mid-pose).
     (optional flag to disable mid-poses). ``duration`` represents the transition
     duration leading into the formation. It defaults to
     :data:`DEFAULT_FOLDER_DURATION`, ``midlayer`` defaults to ``1``,
@@ -153,10 +157,22 @@ def load_import_metadata(directory, report):
     default_midpose = True
     if "midpose" in data and not isinstance(data["midpose"], dict):
         default_midpose = bool(data["midpose"])
+    default_fhandle = 5.0
+    if "fhandle" in data and not isinstance(data["fhandle"], dict):
+        try:
+            default_fhandle = float(data["fhandle"])
+        except Exception:
+            report({"WARNING"}, "Invalid top-level fhandle in prefix_map.json, using default")
+    default_mhandle = 5.0
+    if "mhandle" in data and not isinstance(data["mhandle"], dict):
+        try:
+            default_mhandle = float(data["mhandle"])
+        except Exception:
+            report({"WARNING"}, "Invalid top-level mhandle in prefix_map.json, using default")
 
-    metadata = {}
+        metadata = {}
     for key, value in data.items():
-        if key in {"duration", "midlayer"}:
+        if key in {"duration", "midlayer", "middur", "midpose", "fhandle", "mhandle"}:
             continue
 
         if not isinstance(value, dict):
@@ -173,6 +189,8 @@ def load_import_metadata(directory, report):
         midlayer = value.get("midlayer", default_midlayer)
         middur = value.get("middur", default_middur)
         midpose = value.get("midpose", default_midpose)
+        fhandle = value.get("fhandle", default_fhandle)
+        mhandle = value.get("mhandle", default_mhandle)
 
         try:
             duration = int(duration)
@@ -189,6 +207,14 @@ def load_import_metadata(directory, report):
         except Exception:
             middur = default_middur
         midpose = bool(midpose)
+        try:
+            fhandle = float(fhandle)
+        except Exception:
+            fhandle = default_fhandle
+        try:
+            mhandle = float(mhandle)
+        except Exception:
+            mhandle = default_mhandle
 
         metadata[str(key)] = {
             "id": entry_id,
@@ -197,6 +223,8 @@ def load_import_metadata(directory, report):
             "midlayer": midlayer,
             "middur": middur,
             "midpose": midpose,
+            "fhandle": fhandle,
+            "mhandle": mhandle,
         }
 
     return metadata
@@ -215,6 +243,39 @@ def _metadata_transition_duration(meta, default=None):
         return default
 
     return int(duration)
+
+
+def _metadata_handle(meta, key, default=None):
+    """Return CopyLoc handle value from ``meta`` if present."""
+
+    meta = meta or {}
+    try:
+        val = meta.get(key, default)
+    except Exception:
+        val = default
+
+    if val is None:
+        return default
+
+    try:
+        return float(val)
+    except Exception:
+        return default
+
+
+def _entries_meta_from_metadata_map(metadata_map):
+    """Expand metadata_map into a list aligned with storyboard entries."""
+
+    if not metadata_map:
+        return []
+
+    entries_meta = []
+    for _key, meta in sorted(metadata_map.items(), key=lambda item: item[1]["id"]):
+        entries_meta.append(meta)
+        if bool(meta.get("midpose", True)):
+            mid_handle = _metadata_handle(meta, "mhandle", None)
+            entries_meta.append({"copyloc_handle": mid_handle})
+    return entries_meta
 
 def build_tracks_from_folder(folder, delimiter="auto"):
     files = []
@@ -457,6 +518,7 @@ def create_grid_mid_pose(
     reference_obj=None,
     layers=1,
     duration=1,
+    meta=None,
 ):
     """Create and add a grid-formation storyboard entry at ``frame_start``.
 
@@ -515,6 +577,11 @@ def create_grid_mid_pose(
         entry.name = base_name
         entry.frame_start = frame_start
         entry.duration = max(1, int(duration))
+        if meta is not None:
+            try:
+                entry["metadata"] = json.dumps(meta)
+            except Exception:
+                pass
         return entry
     except Exception:
         return None
@@ -610,6 +677,73 @@ def _apply_transition_durations(storyboard, entries_meta):
                 _shift_storyboard_after_transition(storyboard, idx, delta)
         except Exception:
             continue
+
+
+def _apply_copyloc_handles_from_metadata(context, storyboard, entries_meta):
+    """Shape CopyLoc influence curves per-entry using metadata handles."""
+
+    entries = getattr(storyboard, "entries", None)
+    if not entries or not entries_meta:
+        return 0
+
+    drones_collection = bpy.data.collections.get("Drones")
+    if not drones_collection:
+        return 0
+
+    handle_default = getattr(context.scene, "copyloc_handle_frames", 5.0)
+    targets = list(drones_collection.objects)
+    updated = 0
+
+    for idx, entry in enumerate(entries):
+        meta = entries_meta[idx] if idx < len(entries_meta) else None
+        handle = None
+        if meta:
+            if "copyloc_handle" in meta:
+                handle = meta.get("copyloc_handle")
+            elif getattr(entry, "name", "").endswith("_MidPose"):
+                handle = meta.get("mhandle")
+            else:
+                handle = meta.get("fhandle")
+
+        try:
+            handle_frames = float(handle if handle is not None else handle_default)
+        except Exception:
+            handle_frames = handle_default
+
+        try:
+            start = int(getattr(entry, "frame_start", 0))
+            duration = int(getattr(entry, "duration", 0))
+        except Exception:
+            continue
+        frame_min = start - 1
+        frame_max = start + max(duration, 0) + 1
+
+        def _key_in_range(key):
+            try:
+                frame = float(getattr(key.co, "x", None))
+            except Exception:
+                return False
+            return frame_min <= frame <= frame_max
+
+        for obj in targets:
+            anim = obj.animation_data
+            if not anim or not anim.action:
+                continue
+            action = anim.action
+            for const in obj.constraints:
+                if const.type != 'COPY_LOCATION':
+                    continue
+                fcurve = action.fcurves.find(
+                    f'constraints["{const.name}"].influence'
+                )
+                if not fcurve:
+                    continue
+                if shape_copyloc_influence_curve(
+                    fcurve, handle_frames, key_filter=_key_in_range
+                ):
+                    updated += 1
+
+    return updated
 
 
 def _create_light_effect_for_storyboard(
@@ -1022,6 +1156,7 @@ class CSVVA_OT_Import(Operator):
                 mid_layers = meta.get("midlayer", 1) or 1
                 midpose_enabled = bool(meta.get("midpose", True))
                 mid_duration = max(1, int(meta.get("middur", 1) or 1))
+                mid_handle = _metadata_handle(meta, "mhandle", None)
                 next_meta = (
                     metadata_map.get(ordered_subdirs[idx + 1], {})
                     if idx < len(ordered_subdirs) - 1
@@ -1063,9 +1198,10 @@ class CSVVA_OT_Import(Operator):
                             reference_obj=obj,
                             layers=mid_layers,
                             duration=mid_duration,
+                            meta={"copyloc_handle": mid_handle} if mid_handle is not None else None,
                         )
                         if mid_entry:
-                            entries_meta.append(None)
+                            entries_meta.append({"copyloc_handle": mid_handle})
                         transition_for_next = (
                             transition_duration if idx < len(ordered_subdirs) - 1 else 0
                         )
@@ -1083,6 +1219,7 @@ class CSVVA_OT_Import(Operator):
                 except Exception:
                     pass
                 _apply_transition_durations(storyboard, entries_meta)
+                _apply_copyloc_handles_from_metadata(context, storyboard, entries_meta)
                 for key_entries, sf, obj, sub_path in key_data_collection:
                     current_frame = context.scene.frame_current
                     context.scene.frame_set(sf)
@@ -1114,19 +1251,21 @@ class CSVVA_OT_Import(Operator):
                 storyboard.entries.remove(idx)
                 break
 
-        obj, _, key_entries = import_csv_folder(
-            context, folder, start_frame, use_vat=prefs.use_vat
-        )
+    obj, _, key_entries = import_csv_folder(
+        context, folder, start_frame, use_vat=prefs.use_vat
+    )
         if not obj:
             self.report({"ERROR"}, "No CSV/TSV files found in folder")
             return {"CANCELLED"}
-        try:
-            bpy.ops.skybrush.recalculate_transitions(scope="ALL")
-        except Exception:
-            pass
-        _apply_transition_durations(
-            storyboard, [None] * existing_entry_count + [meta]
-        )
+    try:
+        bpy.ops.skybrush.recalculate_transitions(scope="ALL")
+    except Exception:
+        pass
+    entries_meta = [None] * existing_entry_count + [meta]
+    _apply_transition_durations(
+        storyboard, entries_meta
+    )
+    _apply_copyloc_handles_from_metadata(context, storyboard, entries_meta)
         try:
             entry = storyboard.entries[-1]
             entry.name = display_name
@@ -1408,6 +1547,9 @@ class CSVVA_OT_Preview(Operator):
             start_frame = next_start
             mid_duration = max(1, int(meta.get("middur", 1) or 1))
             midpose_enabled = bool(meta.get("midpose", True))
+            # Preview only; handles are informational, shaping occurs on import/update
+            f_handle = _metadata_handle(meta, "fhandle", None)
+            m_handle = _metadata_handle(meta, "mhandle", None)
 
             tracks = build_tracks_from_folder(path)
             duration = calculate_duration_from_tracks(tracks, fps)
@@ -1438,6 +1580,11 @@ class CSVVA_OT_Preview(Operator):
             item.duration = display_duration
             item.midpose = midpose_enabled
             item.midpose_duration = mid_duration
+            # Store handles for display/reference if needed later
+            if f_handle is not None:
+                item["fhandle"] = f_handle
+            if m_handle is not None:
+                item["mhandle"] = m_handle
             item.checked = checked
             item.exists = existing_entry is not None
             item.frame_mismatch = frame_mismatch

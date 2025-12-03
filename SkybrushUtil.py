@@ -28,6 +28,7 @@ from sbutil import reflow_vertex
 from sbutil import drone_check_gn
 from sbutil import view_setup
 from sbutil import storyboard_patch
+from sbutil.copyloc_utils import shape_copyloc_influence_curve
 
 try:  # pragma: no cover - depends on sbstudio
     from sbstudio.plugin.operators.safety_check import RunFullProximityCheckOperator
@@ -1074,61 +1075,6 @@ class DRONE_OT_RemoveProximityLimit(Operator):
         return {'FINISHED'}
 
 
-def _shape_copyloc_influence_curve(
-    fcurve, handle_frames: float, key_filter=None
-) -> bool:
-    """Shape Copy Location influence handles with absolute offsets per key.
-
-    Every key’s handles are pushed horizontally by ``handle_frames`` (clamped so
-    they never cross neighbouring keys). Works with any number of keys. Returns
-    True when the curve was updated.
-    """
-
-    keys = list(getattr(fcurve, "keyframe_points", []))
-    if len(keys) < 2:
-        return False
-
-    keys.sort(key=lambda k: k.co.x)
-    eps = 1e-4
-    updated = False
-
-    for idx, key in enumerate(keys):
-        if key_filter and not key_filter(key):
-            continue
-
-        prev_x = keys[idx - 1].co.x if idx > 0 else None
-        next_x = keys[idx + 1].co.x if idx < len(keys) - 1 else None
-
-        key.interpolation = 'BEZIER'
-        key.handle_left_type = 'FREE'
-        key.handle_right_type = 'FREE'
-
-        target_left = key.co.x - handle_frames
-        target_right = key.co.x + handle_frames
-
-        if prev_x is not None:
-            min_left = prev_x + eps
-            key.handle_left.x = max(target_left, min_left)
-            key.handle_left.y = key.co.y
-        else:
-            key.handle_left.x = target_left
-            key.handle_left.y = key.co.y
-
-        if next_x is not None:
-            max_right = next_x - eps
-            key.handle_right.x = min(target_right, max_right)
-            key.handle_right.y = key.co.y
-        else:
-            key.handle_right.x = target_right
-            key.handle_right.y = key.co.y
-
-        updated = True
-
-    if updated:
-        fcurve.keyframe_points.update()
-    return updated
-
-
 class DRONE_OT_LinearizeCopyLocationInfluence(Operator):
     """Shape Copy Location influence keys into an S-curve"""
 
@@ -1169,7 +1115,7 @@ class DRONE_OT_LinearizeCopyLocationInfluence(Operator):
                 )
                 if not fcurve:
                     continue
-                if _shape_copyloc_influence_curve(fcurve, handle_frames):
+                if shape_copyloc_influence_curve(fcurve, handle_frames):
                     updated += 1
 
         if updated == 0:
@@ -1270,7 +1216,7 @@ class DRONE_OT_LinearizeCopyLocationInfluenceActiveFormation(Operator):
                 )
                 if not fcurve:
                     continue
-                if _shape_copyloc_influence_curve(
+                if shape_copyloc_influence_curve(
                     fcurve, handle_frames, key_filter=_key_in_range
                 ):
                     updated += 1
@@ -1283,6 +1229,45 @@ class DRONE_OT_LinearizeCopyLocationInfluenceActiveFormation(Operator):
             {'INFO'},
             f"Shaped {updated} Copy Location influence curves in frames {frame_min}-{frame_max}",
         )
+        return {'FINISHED'}
+
+
+class DRONE_OT_LinearizeCopyLocationFromMetadata(Operator):
+    """Shape Copy Location influence using prefix_map.json metadata"""
+
+    bl_idname = "drone.linearize_copyloc_from_metadata"
+    bl_label = "Linearize CopyLoc (Metadata)"
+    bl_description = (
+        "Shape Copy Location influence curves for storyboard entries using "
+        "metadata handles from prefix_map.json"
+    )
+
+    def execute(self, context):
+        csv_props = getattr(context.scene, "csvva_props", None)
+        folder = bpy.path.abspath(getattr(csv_props, "folder", "")) if csv_props else ""
+        if not folder or not os.path.isdir(folder):
+            self.report({'ERROR'}, "Invalid CSV folder for metadata")
+            return {'CANCELLED'}
+
+        metadata_map = CSV2Vertex.load_import_metadata(folder, self.report)
+        if not metadata_map:
+            self.report({'WARNING'}, "No metadata found in prefix_map.json")
+            return {'CANCELLED'}
+
+        storyboard = getattr(getattr(context.scene, "skybrush", None), "storyboard", None)
+        entries = getattr(storyboard, "entries", None)
+        if not entries:
+            self.report({'WARNING'}, "No storyboard entries available")
+            return {'CANCELLED'}
+
+        entries_meta = CSV2Vertex._entries_meta_from_metadata_map(metadata_map)
+        updated = CSV2Vertex._apply_copyloc_handles_from_metadata(context, storyboard, entries_meta)
+
+        if updated == 0:
+            self.report({'WARNING'}, "No Copy Location influence curves updated from metadata")
+            return {'CANCELLED'}
+
+        self.report({'INFO'}, f"Shaped {updated} Copy Location curves from metadata")
         return {'FINISHED'}
 
 
@@ -2455,6 +2440,10 @@ def _draw_storyboard_extras(self, context):
         "drone.linearize_copyloc_influence_active_formation",
         text="Linearize CopyLoc (Formation)",
     )
+    col.operator(
+        DRONE_OT_LinearizeCopyLocationFromMetadata.bl_idname,
+        text="Linearize CopyLoc (Metadata)",
+    )
     col.operator("drone.linearize_copyloc_influence", text="Linearize CopyLoc")
     col.prop(context.scene, "vat_start_shift_frames", text="VAT Start Offset")
     col.operator("drone.shift_vat_start_frames", text="Shift VAT Start")
@@ -2673,6 +2662,10 @@ class DRONE_PT_Utilities(Panel):
             text="Linearize CopyLoc (Formation)",
         )
         layout.operator(
+            DRONE_OT_LinearizeCopyLocationFromMetadata.bl_idname,
+            text="Linearize CopyLoc (Metadata)",
+        )
+        layout.operator(
             "drone.linearize_copyloc_influence", text="Linearize CopyLoc"
         )
         layout.prop(context.scene, "copyloc_stagger_frames")
@@ -2777,6 +2770,7 @@ classes = (
     DRONE_OT_ApplyProximityLimit,
     DRONE_OT_RemoveProximityLimit,
     DRONE_OT_LinearizeCopyLocationInfluence,
+    DRONE_OT_LinearizeCopyLocationFromMetadata,
     DRONE_OT_LinearizeCopyLocationInfluenceActiveFormation,
     DRONE_OT_ShiftVatStartFrames,
     DRONE_OT_StaggerCopyLocationInfluence,
