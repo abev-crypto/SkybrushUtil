@@ -1341,11 +1341,11 @@ class DRONE_OT_LinearizeCopyLocationFromMetadata(Operator):
 
 
 class DRONE_OT_GotoNextFormation(Operator):
-    """Jump current frame to the next formation start (non-midpose)."""
+    """Jump current frame to the next formation start (including MidPose)."""
 
     bl_idname = "drone.goto_next_formation"
     bl_label = "Next Formation"
-    bl_description = "Move current frame to the next formation's start (ignores MidPose)"
+    bl_description = "Move current frame to the next formation's start"
 
     def execute(self, context):
         storyboard = getattr(getattr(context.scene, "skybrush", None), "storyboard", None)
@@ -1356,7 +1356,7 @@ class DRONE_OT_GotoNextFormation(Operator):
 
         current = context.scene.frame_current
         target = None
-        for entry in _non_midpose_entries(entries):
+        for entry in entries:
             start = int(getattr(entry, "frame_start", 0))
             if start > current:
                 target = start
@@ -1372,11 +1372,11 @@ class DRONE_OT_GotoNextFormation(Operator):
 
 
 class DRONE_OT_GotoPrevFormation(Operator):
-    """Jump current frame to the previous formation start (non-midpose)."""
+    """Jump current frame to the previous formation start (including MidPose)."""
 
     bl_idname = "drone.goto_prev_formation"
     bl_label = "Prev Formation"
-    bl_description = "Move current frame to the previous formation's start (ignores MidPose)"
+    bl_description = "Move current frame to the previous formation's start"
 
     def execute(self, context):
         storyboard = getattr(getattr(context.scene, "skybrush", None), "storyboard", None)
@@ -1387,7 +1387,7 @@ class DRONE_OT_GotoPrevFormation(Operator):
 
         current = context.scene.frame_current
         target = None
-        for entry in reversed(_non_midpose_entries(entries)):
+        for entry in reversed(entries):
             start = int(getattr(entry, "frame_start", 0))
             if start < current:
                 target = start

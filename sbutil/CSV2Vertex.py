@@ -157,6 +157,13 @@ def load_import_metadata(directory, report):
     default_midpose = True
     if "midpose" in data and not isinstance(data["midpose"], dict):
         default_midpose = bool(data["midpose"])
+    default_ydepth = None
+    if "ydepth" in data and not isinstance(data["ydepth"], dict):
+        try:
+            val = float(data["ydepth"])
+            default_ydepth = max(0.0, val)
+        except Exception:
+            report({"WARNING"}, "Invalid top-level ydepth in prefix_map.json, using default")
     default_fhandle = 5.0
     if "fhandle" in data and not isinstance(data["fhandle"], dict):
         try:
@@ -169,10 +176,16 @@ def load_import_metadata(directory, report):
             default_mhandle = float(data["mhandle"])
         except Exception:
             report({"WARNING"}, "Invalid top-level mhandle in prefix_map.json, using default")
+    default_traled = False
+    if "traled" in data and not isinstance(data["traled"], dict):
+        default_traled = bool(data["traled"])
+    default_tracolor = None
+    if "tracolor" in data and not isinstance(data["tracolor"], dict):
+        default_tracolor = str(data["tracolor"])
 
         metadata = {}
     for key, value in data.items():
-        if key in {"duration", "midlayer", "middur", "midpose", "fhandle", "mhandle"}:
+        if key in {"duration", "midlayer", "middur", "midpose", "fhandle", "mhandle", "ydepth"}:
             continue
 
         if not isinstance(value, dict):
@@ -191,6 +204,9 @@ def load_import_metadata(directory, report):
         midpose = value.get("midpose", default_midpose)
         fhandle = value.get("fhandle", default_fhandle)
         mhandle = value.get("mhandle", default_mhandle)
+        ydepth = value.get("ydepth", default_ydepth)
+        traled = value.get("traled", default_traled)
+        tracolor = value.get("tracolor", default_tracolor)
 
         try:
             duration = int(duration)
@@ -216,6 +232,13 @@ def load_import_metadata(directory, report):
         except Exception:
             mhandle = default_mhandle
 
+        try:
+            ydepth = max(0.0, float(ydepth)) if ydepth is not None else None
+        except Exception:
+            ydepth = default_ydepth
+        traled = bool(traled)
+        tracolor = str(tracolor) if tracolor is not None else None
+
         metadata[str(key)] = {
             "id": entry_id,
             "transition_duration": duration,
@@ -225,6 +248,9 @@ def load_import_metadata(directory, report):
             "midpose": midpose,
             "fhandle": fhandle,
             "mhandle": mhandle,
+            "ydepth": ydepth,
+            "traled": traled,
+            "tracolor": tracolor,
         }
 
     return metadata
@@ -276,6 +302,21 @@ def _entries_meta_from_metadata_map(metadata_map):
             mid_handle = _metadata_handle(meta, "mhandle", None)
             entries_meta.append({"copyloc_handle": mid_handle})
     return entries_meta
+
+
+def _hex_to_rgba(hex_str):
+    if not hex_str:
+        return None
+    s = hex_str.strip().lstrip("#")
+    if len(s) != 6:
+        return None
+    try:
+        r = int(s[0:2], 16) / 255.0
+        g = int(s[2:4], 16) / 255.0
+        b = int(s[4:6], 16) / 255.0
+        return (r, g, b, 1.0)
+    except Exception:
+        return None
 
 def build_tracks_from_folder(folder, delimiter="auto"):
     files = []
@@ -367,7 +408,7 @@ def ensure_mesh_with_armature(name="CSV_Tracks", count=1, first_positions=None):
     return obj
 
 
-def _create_grid_positions(count, *, spacing=1.0, bounds=None, layers=1):
+def _create_grid_positions(count, *, spacing=1.0, bounds=None, layers=1, layer_depth=None):
     """Return grid positions for ``count`` items, optionally stacked in layers."""
 
     if count <= 0:
@@ -384,7 +425,10 @@ def _create_grid_positions(count, *, spacing=1.0, bounds=None, layers=1):
         center = Vector(((min_v.x + max_v.x) * 0.5, 0.0, (min_v.z + max_v.z) * 0.5))
         dims = Vector((max_v.x - min_v.x, 0.0, max_v.z - min_v.z))
 
-    layer_spacing = spacing
+    if layers > 1 and layer_depth is not None:
+        layer_spacing = float(layer_depth) / float(max(layers - 1, 1))
+    else:
+        layer_spacing = spacing
     start_layer = -0.5 * layer_spacing * (layers - 1)
 
     positions = []
@@ -510,6 +554,48 @@ def _geometry_node_bounds(obj):
     return None
 
 
+def _bounds_from_tracks(tracks):
+    """Compute XY bounds from track data (using x,z axes)."""
+
+    if not tracks:
+        return None
+
+    min_x = min_y = min_z = float("inf")
+    max_x = max_y = max_z = float("-inf")
+
+    for tr in tracks:
+        for row in tr.get("data", []):
+            x, y, z = row.get("x"), row.get("y"), row.get("z")
+            if x is None or y is None or z is None:
+                continue
+            min_x = min(min_x, x)
+            min_y = min(min_y, y)
+            min_z = min(min_z, z)
+            max_x = max(max_x, x)
+            max_y = max(max_y, y)
+            max_z = max(max_z, z)
+
+    if min_x == float("inf"):
+        return None
+
+    return Vector((min_x, min_y, min_z)), Vector((max_x, max_y, max_z))
+
+
+def _combine_bounds(b1, b2):
+    """Return midpoint bounds averaged from two bounds."""
+
+    if not b1:
+        return b2
+    if not b2:
+        return b1
+
+    min_v1, max_v1 = b1
+    min_v2, max_v2 = b2
+    min_v = Vector(((min_v1.x + min_v2.x) * 0.5, (min_v1.y + min_v2.y) * 0.5, (min_v1.z + min_v2.z) * 0.5))
+    max_v = Vector(((max_v1.x + max_v2.x) * 0.5, (max_v1.y + max_v2.y) * 0.5, (max_v1.z + max_v2.z) * 0.5))
+    return min_v, max_v
+
+
 def create_grid_mid_pose(
     context,
     frame_start,
@@ -519,6 +605,9 @@ def create_grid_mid_pose(
     layers=1,
     duration=1,
     meta=None,
+    next_bounds=None,
+    layer_depth=None,
+    transition_le_meta=None,
 ):
     """Create and add a grid-formation storyboard entry at ``frame_start``.
 
@@ -534,6 +623,10 @@ def create_grid_mid_pose(
 
     ref_spacing = spacing
     bounds = _geometry_node_bounds(reference_obj)
+    if bounds and next_bounds:
+        bounds = _combine_bounds(bounds, next_bounds)
+    elif next_bounds and not bounds:
+        bounds = next_bounds
     if bounds:
         min_v, max_v = bounds
         dims = Vector((max_v.x - min_v.x, 0.0, max_v.z - min_v.z))
@@ -549,6 +642,7 @@ def create_grid_mid_pose(
         spacing=ref_spacing,
         bounds=bounds,
         layers=layers,
+        layer_depth=layer_depth,
     )
     mesh = bpy.data.meshes.new(f"{base_name}_mesh")
     mesh.from_pydata(positions, [], [])
@@ -580,6 +674,11 @@ def create_grid_mid_pose(
         if meta is not None:
             try:
                 entry["metadata"] = json.dumps(meta)
+            except Exception:
+                pass
+        if transition_le_meta:
+            try:
+                entry["transition_le"] = json.dumps(transition_le_meta)
             except Exception:
                 pass
         return entry
@@ -817,6 +916,48 @@ def _create_light_effect_for_storyboard(
 
         if tex is not None:
             tex.image = color_image
+
+    return le_entry
+
+
+def _create_color_light_effect(context, name, frame_start, duration, color):
+    """Create a simple COLOR_RAMP light effect with a flat color."""
+
+    try:
+        skybrush = getattr(context.scene, "skybrush", None)
+        light_effects = getattr(skybrush, "light_effects", None)
+        entries = getattr(light_effects, "entries", None)
+        if entries is None:
+            return None
+
+        le_entry = entries.add()
+        le_entry.name = name
+        le_entry.frame_start = int(frame_start)
+        le_entry.duration = int(duration)
+        if hasattr(le_entry, "type"):
+            le_entry.type = "COLOR_RAMP"
+
+        tex = getattr(le_entry, "texture", None)
+        if tex is None:
+            tex = bpy.data.textures.new(name=f"{name}_ColorTex", type="NONE")
+            le_entry.texture = tex
+
+        ramp = None
+        try:
+            ramp = tex.color_ramp
+        except Exception:
+            ramp = None
+        if ramp:
+            while len(ramp.elements) > 1:
+                ramp.elements.remove(ramp.elements[-1])
+            if len(ramp.elements) == 0:
+                ramp.elements.new(0.0)
+            ramp.elements[0].position = 0.0
+            ramp.elements[0].color = color
+            elem = ramp.elements.new(1.0)
+            elem.color = color
+    except Exception:
+        return None
 
     return le_entry
 
@@ -1156,7 +1297,10 @@ class CSVVA_OT_Import(Operator):
                 mid_layers = meta.get("midlayer", 1) or 1
                 midpose_enabled = bool(meta.get("midpose", True))
                 mid_duration = max(1, int(meta.get("middur", 1) or 1))
+                ydepth = meta.get("ydepth", None)
                 mid_handle = _metadata_handle(meta, "mhandle", None)
+                traled = bool(meta.get("traled", False))
+                tracolor = _hex_to_rgba(meta.get("tracolor")) or (1.0, 1.0, 1.0, 1.0)
                 next_meta = (
                     metadata_map.get(ordered_subdirs[idx + 1], {})
                     if idx < len(ordered_subdirs) - 1
@@ -1165,6 +1309,10 @@ class CSVVA_OT_Import(Operator):
                 transition_duration = _metadata_transition_duration(next_meta, default=0) or 0
                 midpose_disabled = (transition_duration <= 0) or (not midpose_enabled)
                 sf = next_start
+                next_bounds = None
+                if idx < len(ordered_subdirs) - 1:
+                    next_tracks = build_tracks_from_folder(os.path.join(folder, ordered_subdirs[idx + 1]))
+                    next_bounds = _bounds_from_tracks(next_tracks)
                 obj, dur, key_entries = import_csv_folder(
                     context,
                     sub_path,
@@ -1199,9 +1347,21 @@ class CSVVA_OT_Import(Operator):
                             layers=mid_layers,
                             duration=mid_duration,
                             meta={"copyloc_handle": mid_handle} if mid_handle is not None else None,
+                            next_bounds=next_bounds,
+                            layer_depth=ydepth,
                         )
                         if mid_entry:
                             entries_meta.append({"copyloc_handle": mid_handle})
+                            if traled:
+                                trans_start = sf + effective_duration
+                                trans_duration = max(1, gap_for_next + transition_duration)
+                                _create_color_light_effect(
+                                    context,
+                                    f"{display_name}_TransitionLE",
+                                    trans_start,
+                                    trans_duration,
+                                    tracolor,
+                                )
                         transition_for_next = (
                             transition_duration if idx < len(ordered_subdirs) - 1 else 0
                         )
@@ -1209,27 +1369,25 @@ class CSVVA_OT_Import(Operator):
                             next_start,
                             sf + effective_duration + gap_for_next + transition_for_next,
                         )
-                    if obj:
-                        continue
-                if not created:
-                    self.report({"ERROR"}, "No CSV/TSV files found in subfolders")
-                    return {"CANCELLED"}
-                try:
-                    bpy.ops.skybrush.recalculate_transitions(scope="ALL")
-                except Exception:
-                    pass
-                _apply_transition_durations(storyboard, entries_meta)
-                _apply_copyloc_handles_from_metadata(context, storyboard, entries_meta)
-                for key_entries, sf, obj, sub_path in key_data_collection:
-                    current_frame = context.scene.frame_current
-                    context.scene.frame_set(sf)
-                    apply_color_keys_from_key_data(
-                        key_entries,
-                        sf,
-                    )
-                    context.scene.frame_set(current_frame)
-                self.report({"INFO"}, f"Setup complete for {len(created)} folders")
-                return {"FINISHED"}
+            if not created:
+                self.report({"ERROR"}, "No CSV/TSV files found in subfolders")
+                return {"CANCELLED"}
+            try:
+                bpy.ops.skybrush.recalculate_transitions(scope="ALL")
+            except Exception:
+                pass
+            _apply_transition_durations(storyboard, entries_meta)
+            _apply_copyloc_handles_from_metadata(context, storyboard, entries_meta)
+            for key_entries, sf, obj, sub_path in key_data_collection:
+                current_frame = context.scene.frame_current
+                context.scene.frame_set(sf)
+                apply_color_keys_from_key_data(
+                    key_entries,
+                    sf,
+                )
+                context.scene.frame_set(current_frame)
+            self.report({"INFO"}, f"Setup complete for {len(created)} folders")
+            return {"FINISHED"}
 
         folder_name = os.path.basename(os.path.normpath(folder))
         base_name, _gap = split_name_and_gap(
@@ -1266,6 +1424,16 @@ class CSVVA_OT_Import(Operator):
             storyboard, entries_meta
         )
         _apply_copyloc_handles_from_metadata(context, storyboard, entries_meta)
+        if bool(meta.get("traled", False)):
+            color = _hex_to_rgba(meta.get("tracolor")) or (1.0, 1.0, 1.0, 1.0)
+            duration = max(1, int(meta.get("middur", 1) or 1))
+            _create_color_light_effect(
+                context,
+                f"{display_name}_TransitionLE",
+                start_frame + max(0, int(getattr(storyboard.entries[-1], "duration", 0))),
+                duration,
+                color,
+            )
         try:
             entry = storyboard.entries[-1]
             entry.name = display_name
@@ -1550,6 +1718,9 @@ class CSVVA_OT_Preview(Operator):
             # Preview only; handles are informational, shaping occurs on import/update
             f_handle = _metadata_handle(meta, "fhandle", None)
             m_handle = _metadata_handle(meta, "mhandle", None)
+            ydepth = meta.get("ydepth", None)
+            traled = bool(meta.get("traled", False))
+            tracolor = _hex_to_rgba(meta.get("tracolor"))
 
             tracks = build_tracks_from_folder(path)
             duration = calculate_duration_from_tracks(tracks, fps)
@@ -1585,6 +1756,14 @@ class CSVVA_OT_Preview(Operator):
                 item["fhandle"] = f_handle
             if m_handle is not None:
                 item["mhandle"] = m_handle
+            if ydepth is not None:
+                try:
+                    item["ydepth"] = float(ydepth)
+                except Exception:
+                    pass
+            item["traled"] = traled
+            if tracolor:
+                item["tracolor"] = meta.get("tracolor")
             item.checked = checked
             item.exists = existing_entry is not None
             item.frame_mismatch = frame_mismatch
