@@ -539,39 +539,13 @@ class SBUTIL_OT_SetRenderRangeFromStoryboard(Operator):
     bl_description = "Match the render range to the active storyboard entry"
 
     def execute(self, context):
-        storyboard = getattr(getattr(context.scene, "skybrush", None), "storyboard", None)
-        entries = getattr(storyboard, "entries", None)
-        index = getattr(storyboard, "active_index", -1)
-        current_frame = getattr(context.scene, "frame_current", 0)
-
+        entry, start, end, entries = _active_storyboard_entry_with_range(context)
         if not entries:
             self.report({'WARNING'}, "No storyboard entries available")
             return {'CANCELLED'}
-
-        def _entry_contains_frame(entry):
-            start = int(getattr(entry, "frame_start", 0))
-            end_attr = getattr(entry, "frame_end", None)
-            duration = getattr(entry, "duration", None)
-            end = int(end_attr) if end_attr is not None else start + max(int(duration or 0), 0)
-            return start <= current_frame <= end
-
-        entry = None
-        if 0 <= index < len(entries) and _entry_contains_frame(entries[index]):
-            entry = entries[index]
-        else:
-            for item in entries:
-                if _entry_contains_frame(item):
-                    entry = item
-                    break
-
         if entry is None:
             self.report({'WARNING'}, "No storyboard entry contains the current frame")
             return {'CANCELLED'}
-
-        start = int(getattr(entry, "frame_start", 0))
-        end_attr = getattr(entry, "frame_end", None)
-        duration = getattr(entry, "duration", None)
-        end = int(end_attr) if end_attr is not None else start + max(int(duration or 0), 0)
 
         context.scene.frame_start = start
         context.scene.frame_end = end
@@ -599,28 +573,16 @@ class SBUTIL_OT_IsolateActiveFormation(Operator):
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
-        storyboard = getattr(getattr(context.scene, "skybrush", None), "storyboard", None)
-        entries = getattr(storyboard, "entries", None)
-        active_index = getattr(storyboard, "active_index", -1)
-        current_frame = getattr(context.scene, "frame_current", 0)
+        entry, _, _, entries = _active_storyboard_entry_with_range(context)
+        if not entries:
+            self.report({'WARNING'}, "No storyboard entries available")
+            return {'CANCELLED'}
+        target_index = next(
+            (idx for idx, item in enumerate(entries) if item == entry),
+            -1,
+        )
 
-        def _entry_contains_frame(entry):
-            start = int(getattr(entry, "frame_start", 0))
-            end_attr = getattr(entry, "frame_end", None)
-            duration = getattr(entry, "duration", None)
-            end = int(end_attr) if end_attr is not None else start + max(int(duration or 0), 0)
-            return start <= current_frame <= end
-
-        target_index = -1
-        if entries and 0 <= active_index < len(entries) and _entry_contains_frame(entries[active_index]):
-            target_index = active_index
-        elif entries:
-            for idx, entry in enumerate(entries):
-                if _entry_contains_frame(entry):
-                    target_index = idx
-                    break
-
-        if not entries or target_index < 0:
+        if target_index < 0:
             self.report({'WARNING'}, "No storyboard entry contains the current frame")
             return {'CANCELLED'}
 
@@ -1112,7 +1074,9 @@ class DRONE_OT_RemoveProximityLimit(Operator):
         return {'FINISHED'}
 
 
-def _shape_copyloc_influence_curve(fcurve, handle_frames: float) -> bool:
+def _shape_copyloc_influence_curve(
+    fcurve, handle_frames: float, key_filter=None
+) -> bool:
     """Shape Copy Location influence handles with absolute offsets per key.
 
     Every key’s handles are pushed horizontally by ``handle_frames`` (clamped so
@@ -1126,8 +1090,12 @@ def _shape_copyloc_influence_curve(fcurve, handle_frames: float) -> bool:
 
     keys.sort(key=lambda k: k.co.x)
     eps = 1e-4
+    updated = False
 
     for idx, key in enumerate(keys):
+        if key_filter and not key_filter(key):
+            continue
+
         prev_x = keys[idx - 1].co.x if idx > 0 else None
         next_x = keys[idx + 1].co.x if idx < len(keys) - 1 else None
 
@@ -1154,8 +1122,11 @@ def _shape_copyloc_influence_curve(fcurve, handle_frames: float) -> bool:
             key.handle_right.x = target_right
             key.handle_right.y = key.co.y
 
-    fcurve.keyframe_points.update()
-    return True
+        updated = True
+
+    if updated:
+        fcurve.keyframe_points.update()
+    return updated
 
 
 class DRONE_OT_LinearizeCopyLocationInfluence(Operator):
@@ -1206,6 +1177,112 @@ class DRONE_OT_LinearizeCopyLocationInfluence(Operator):
             return {'CANCELLED'}
 
         self.report({'INFO'}, f"Shaped {updated} Copy Location influence curves")
+        return {'FINISHED'}
+
+
+def _active_storyboard_entry_with_range(context):
+    storyboard = getattr(getattr(context.scene, "skybrush", None), "storyboard", None)
+    entries = getattr(storyboard, "entries", None)
+    index = getattr(storyboard, "active_index", -1)
+    current_frame = getattr(context.scene, "frame_current", 0)
+
+    def _entry_range(entry):
+        start = int(getattr(entry, "frame_start", 0))
+        end_attr = getattr(entry, "frame_end", None)
+        duration = getattr(entry, "duration", None)
+        end = int(end_attr) if end_attr is not None else start + max(int(duration or 0), 0)
+        return start, end
+
+    def _entry_contains_frame(entry):
+        start, end = _entry_range(entry)
+        return start <= current_frame <= end
+
+    entry = None
+    if entries and 0 <= index < len(entries) and _entry_contains_frame(entries[index]):
+        entry = entries[index]
+    elif entries:
+        for item in entries:
+            if _entry_contains_frame(item):
+                entry = item
+                break
+
+    if entry is None:
+        return None, None, None, entries
+
+    start, end = _entry_range(entry)
+    return entry, start, end, entries
+
+
+class DRONE_OT_LinearizeCopyLocationInfluenceActiveFormation(Operator):
+    """Shape Copy Location influence keys for the active formation range"""
+
+    bl_idname = "drone.linearize_copyloc_influence_active_formation"
+    bl_label = "Linearize CopyLoc (Formation)"
+    bl_description = (
+        "Shape Copy Location influence curves near the active formation range for "
+        "selected drones, or all drones when none are selected"
+    )
+
+    def execute(self, context):
+        entry, start, end, entries = _active_storyboard_entry_with_range(context)
+        if not entries:
+            self.report({'WARNING'}, "No storyboard entries available")
+            return {'CANCELLED'}
+        if entry is None:
+            self.report({'WARNING'}, "No storyboard entry contains the current frame")
+            return {'CANCELLED'}
+
+        drones_collection = bpy.data.collections.get("Drones")
+        if not drones_collection:
+            self.report({'ERROR'}, "Drones collection not found")
+            return {'CANCELLED'}
+
+        handle_frames = getattr(context.scene, "copyloc_handle_frames", 5.0)
+
+        collection_objects = list(drones_collection.objects)
+        drone_names = {obj.name for obj in collection_objects}
+        selected = [
+            obj for obj in context.selected_objects if obj.name in drone_names
+        ]
+        targets = selected if selected else collection_objects
+
+        frame_min = start - 1
+        frame_max = end + 1
+
+        def _key_in_range(key):
+            try:
+                frame = float(getattr(key.co, "x", None))
+            except Exception:
+                return False
+            return frame_min <= frame <= frame_max
+
+        updated = 0
+        for obj in targets:
+            anim = obj.animation_data
+            if not anim or not anim.action:
+                continue
+            action = anim.action
+            for const in obj.constraints:
+                if const.type != 'COPY_LOCATION':
+                    continue
+                fcurve = action.fcurves.find(
+                    f'constraints["{const.name}"].influence'
+                )
+                if not fcurve:
+                    continue
+                if _shape_copyloc_influence_curve(
+                    fcurve, handle_frames, key_filter=_key_in_range
+                ):
+                    updated += 1
+
+        if updated == 0:
+            self.report({'WARNING'}, "No Copy Location influence keys in range")
+            return {'CANCELLED'}
+
+        self.report(
+            {'INFO'},
+            f"Shaped {updated} Copy Location influence curves in frames {frame_min}-{frame_max}",
+        )
         return {'FINISHED'}
 
 
@@ -2374,6 +2451,10 @@ def _draw_storyboard_extras(self, context):
         icon='HIDE_OFF',
     )
     col.prop(context.scene, "copyloc_handle_frames", slider=True)
+    col.operator(
+        "drone.linearize_copyloc_influence_active_formation",
+        text="Linearize CopyLoc (Formation)",
+    )
     col.operator("drone.linearize_copyloc_influence", text="Linearize CopyLoc")
     col.prop(context.scene, "vat_start_shift_frames", text="VAT Start Offset")
     col.operator("drone.shift_vat_start_frames", text="Shift VAT Start")
@@ -2588,6 +2669,10 @@ class DRONE_PT_Utilities(Panel):
         )
         layout.prop(context.scene, "copyloc_handle_frames", slider=True)
         layout.operator(
+            "drone.linearize_copyloc_influence_active_formation",
+            text="Linearize CopyLoc (Formation)",
+        )
+        layout.operator(
             "drone.linearize_copyloc_influence", text="Linearize CopyLoc"
         )
         layout.prop(context.scene, "copyloc_stagger_frames")
@@ -2692,6 +2777,7 @@ classes = (
     DRONE_OT_ApplyProximityLimit,
     DRONE_OT_RemoveProximityLimit,
     DRONE_OT_LinearizeCopyLocationInfluence,
+    DRONE_OT_LinearizeCopyLocationInfluenceActiveFormation,
     DRONE_OT_ShiftVatStartFrames,
     DRONE_OT_StaggerCopyLocationInfluence,
     DRONE_OT_RestoreCopyLocationInfluence,
