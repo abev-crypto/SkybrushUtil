@@ -544,9 +544,34 @@ class SBUTIL_OT_SetRenderRangeFromStoryboard(Operator):
         if not entries:
             self.report({'WARNING'}, "No storyboard entries available")
             return {'CANCELLED'}
+
         if entry is None:
-            self.report({'WARNING'}, "No storyboard entry contains the current frame")
-            return {'CANCELLED'}
+            prev_entry, next_entry = _prev_next_entries(entries, context.scene.frame_current, ignore_midpose=True)
+            start = None
+            end = None
+            if not prev_entry and not next_entry:
+                self.report({'WARNING'}, "No storyboard entry contains the current frame")
+                return {'CANCELLED'}
+
+            if prev_entry:
+                _, prev_end = _entry_range(prev_entry)
+                start = prev_end
+            if next_entry:
+                next_start, _ = _entry_range(next_entry)
+                end = next_start - 1
+
+            if start is None and next_entry:
+                start = next_entry.frame_start
+                end = next_entry.frame_start + max(int(getattr(next_entry, "duration", 0) or 0), 0)
+            if end is None and prev_entry:
+                start = int(getattr(prev_entry, "frame_start", 0))
+                end = int(getattr(prev_entry, "frame_start", 0)) + max(int(getattr(prev_entry, "duration", 0) or 0), 0)
+
+            context.scene.frame_start = int(start)
+            context.scene.frame_end = int(max(start, end))
+            context.scene.frame_set(int(start))
+            self.report({'INFO'}, "Render range set using neighboring formations")
+            return {'FINISHED'}
 
         context.scene.frame_start = start
         context.scene.frame_end = end
@@ -584,8 +609,24 @@ class SBUTIL_OT_IsolateActiveFormation(Operator):
         )
 
         if target_index < 0:
-            self.report({'WARNING'}, "No storyboard entry contains the current frame")
-            return {'CANCELLED'}
+            # fallback: prefer nearest mid-pose entry
+            frame = context.scene.frame_current
+            mid_before = None
+            mid_after = None
+            for candidate in entries:
+                if not _is_midpose_entry(candidate):
+                    continue
+                start, end = _entry_range(candidate)
+                if end <= frame:
+                    mid_before = candidate
+                elif start > frame and mid_after is None:
+                    mid_after = candidate
+            target_entry = mid_before or mid_after
+            if target_entry:
+                target_index = entries[:].index(target_entry)
+            else:
+                self.report({'WARNING'}, "No storyboard entry contains the current frame")
+                return {'CANCELLED'}
 
         shown, hidden = 0, 0
         for idx, entry in enumerate(entries):
@@ -1132,13 +1173,6 @@ def _active_storyboard_entry_with_range(context):
     index = getattr(storyboard, "active_index", -1)
     current_frame = getattr(context.scene, "frame_current", 0)
 
-    def _entry_range(entry):
-        start = int(getattr(entry, "frame_start", 0))
-        end_attr = getattr(entry, "frame_end", None)
-        duration = getattr(entry, "duration", None)
-        end = int(end_attr) if end_attr is not None else start + max(int(duration or 0), 0)
-        return start, end
-
     def _entry_contains_frame(entry):
         start, end = _entry_range(entry)
         return start <= current_frame <= end
@@ -1157,6 +1191,41 @@ def _active_storyboard_entry_with_range(context):
 
     start, end = _entry_range(entry)
     return entry, start, end, entries
+
+
+def _entry_range(entry):
+    start = int(getattr(entry, "frame_start", 0))
+    end_attr = getattr(entry, "frame_end", None)
+    duration = getattr(entry, "duration", None)
+    end = int(end_attr) if end_attr is not None else start + max(int(duration or 0), 0)
+    return start, end
+
+
+def _is_midpose_entry(entry):
+    name = getattr(entry, "name", "") or ""
+    return "_MidPose" in name
+
+
+def _prev_next_entries(entries, frame, *, ignore_midpose=False):
+    prev_entry = None
+    next_entry = None
+    for entry in entries or []:
+        if ignore_midpose and _is_midpose_entry(entry):
+            continue
+        start = int(getattr(entry, "frame_start", 0))
+        end_attr = getattr(entry, "frame_end", None)
+        duration = getattr(entry, "duration", None)
+        end = int(end_attr) if end_attr is not None else start + max(int(duration or 0), 0)
+        if end <= frame:
+            prev_entry = entry
+        elif start > frame and next_entry is None:
+            next_entry = entry
+            break
+    return prev_entry, next_entry
+
+
+def _non_midpose_entries(entries):
+    return [e for e in entries or [] if not _is_midpose_entry(e)]
 
 
 class DRONE_OT_LinearizeCopyLocationInfluenceActiveFormation(Operator):
@@ -1268,6 +1337,95 @@ class DRONE_OT_LinearizeCopyLocationFromMetadata(Operator):
             return {'CANCELLED'}
 
         self.report({'INFO'}, f"Shaped {updated} Copy Location curves from metadata")
+        return {'FINISHED'}
+
+
+class DRONE_OT_GotoNextFormation(Operator):
+    """Jump current frame to the next formation start (non-midpose)."""
+
+    bl_idname = "drone.goto_next_formation"
+    bl_label = "Next Formation"
+    bl_description = "Move current frame to the next formation's start (ignores MidPose)"
+
+    def execute(self, context):
+        storyboard = getattr(getattr(context.scene, "skybrush", None), "storyboard", None)
+        entries = getattr(storyboard, "entries", None)
+        if not entries:
+            self.report({'WARNING'}, "No storyboard entries available")
+            return {'CANCELLED'}
+
+        current = context.scene.frame_current
+        target = None
+        for entry in _non_midpose_entries(entries):
+            start = int(getattr(entry, "frame_start", 0))
+            if start > current:
+                target = start
+                break
+
+        if target is None:
+            self.report({'WARNING'}, "No next formation found")
+            return {'CANCELLED'}
+
+        context.scene.frame_set(target)
+        self.report({'INFO'}, f"Jumped to frame {target}")
+        return {'FINISHED'}
+
+
+class DRONE_OT_GotoPrevFormation(Operator):
+    """Jump current frame to the previous formation start (non-midpose)."""
+
+    bl_idname = "drone.goto_prev_formation"
+    bl_label = "Prev Formation"
+    bl_description = "Move current frame to the previous formation's start (ignores MidPose)"
+
+    def execute(self, context):
+        storyboard = getattr(getattr(context.scene, "skybrush", None), "storyboard", None)
+        entries = getattr(storyboard, "entries", None)
+        if not entries:
+            self.report({'WARNING'}, "No storyboard entries available")
+            return {'CANCELLED'}
+
+        current = context.scene.frame_current
+        target = None
+        for entry in reversed(_non_midpose_entries(entries)):
+            start = int(getattr(entry, "frame_start", 0))
+            if start < current:
+                target = start
+                break
+
+        if target is None:
+            self.report({'WARNING'}, "No previous formation found")
+            return {'CANCELLED'}
+
+        context.scene.frame_set(target)
+        self.report({'INFO'}, f"Jumped to frame {target}")
+        return {'FINISHED'}
+
+
+class DRONE_OT_SetRenderRangeAllFormations(Operator):
+    """Set render range to cover all non-midpose formations."""
+
+    bl_idname = "drone.set_render_range_all_formations"
+    bl_label = "Render Range (All Formations)"
+    bl_description = "Set render start/end to the first and last formation (ignores MidPose)"
+
+    def execute(self, context):
+        storyboard = getattr(getattr(context.scene, "skybrush", None), "storyboard", None)
+        entries = getattr(storyboard, "entries", None)
+        entries = _non_midpose_entries(entries)
+        if not entries:
+            self.report({'WARNING'}, "No formations available")
+            return {'CANCELLED'}
+
+        first = entries[0]
+        last = entries[-1]
+        start = int(getattr(first, "frame_start", 0))
+        _, end = _entry_range(last)
+
+        context.scene.frame_start = start
+        context.scene.frame_end = end
+        context.scene.frame_set(start)
+        self.report({'INFO'}, f"Render range set to {start}-{end}")
         return {'FINISHED'}
 
 
@@ -2435,6 +2593,14 @@ def _draw_storyboard_extras(self, context):
         text="Show Active Formation",
         icon='HIDE_OFF',
     )
+    nav = col.row(align=True)
+    nav.operator("drone.goto_prev_formation", text="Prev Formation", icon='TRIA_LEFT')
+    nav.operator("drone.goto_next_formation", text="Next Formation", icon='TRIA_RIGHT')
+    col.operator(
+        "drone.set_render_range_all_formations",
+        text="Render Range (All Formations)",
+        icon='PREVIEW_RANGE',
+    )
     col.prop(context.scene, "copyloc_handle_frames", slider=True)
     col.operator(
         "drone.linearize_copyloc_influence_active_formation",
@@ -2665,6 +2831,14 @@ class DRONE_PT_Utilities(Panel):
             DRONE_OT_LinearizeCopyLocationFromMetadata.bl_idname,
             text="Linearize CopyLoc (Metadata)",
         )
+        row = layout.row(align=True)
+        row.operator("drone.goto_prev_formation", text="Prev Formation", icon='TRIA_LEFT')
+        row.operator("drone.goto_next_formation", text="Next Formation", icon='TRIA_RIGHT')
+        layout.operator(
+            "drone.set_render_range_all_formations",
+            text="Render Range (All Formations)",
+            icon='PREVIEW_RANGE',
+        )
         layout.operator(
             "drone.linearize_copyloc_influence", text="Linearize CopyLoc"
         )
@@ -2772,6 +2946,9 @@ classes = (
     DRONE_OT_LinearizeCopyLocationInfluence,
     DRONE_OT_LinearizeCopyLocationFromMetadata,
     DRONE_OT_LinearizeCopyLocationInfluenceActiveFormation,
+    DRONE_OT_GotoPrevFormation,
+    DRONE_OT_GotoNextFormation,
+    DRONE_OT_SetRenderRangeAllFormations,
     DRONE_OT_ShiftVatStartFrames,
     DRONE_OT_StaggerCopyLocationInfluence,
     DRONE_OT_RestoreCopyLocationInfluence,

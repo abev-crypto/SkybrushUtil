@@ -6,9 +6,9 @@ from mathutils import Vector
 
 from sbutil import csv_vat_gn
 from sbutil.light_effects import OUTPUT_VERTEX_COLOR
-from sbutil.copyloc_utils import shape_copyloc_influence_curve
 
 from sbutil.color_key_utils import apply_color_keys_from_key_data
+from sbutil.copyloc_utils import shape_copyloc_influence_curve
 
 # ---------- Utilities ----------
 
@@ -1251,21 +1251,21 @@ class CSVVA_OT_Import(Operator):
                 storyboard.entries.remove(idx)
                 break
 
-    obj, _, key_entries = import_csv_folder(
-        context, folder, start_frame, use_vat=prefs.use_vat
-    )
+        obj, _, key_entries = import_csv_folder(
+            context, folder, start_frame, use_vat=prefs.use_vat
+        )
         if not obj:
             self.report({"ERROR"}, "No CSV/TSV files found in folder")
             return {"CANCELLED"}
-    try:
-        bpy.ops.skybrush.recalculate_transitions(scope="ALL")
-    except Exception:
-        pass
-    entries_meta = [None] * existing_entry_count + [meta]
-    _apply_transition_durations(
-        storyboard, entries_meta
-    )
-    _apply_copyloc_handles_from_metadata(context, storyboard, entries_meta)
+        try:
+            bpy.ops.skybrush.recalculate_transitions(scope="ALL")
+        except Exception:
+            pass
+        entries_meta = [None] * existing_entry_count + [meta]
+        _apply_transition_durations(
+            storyboard, entries_meta
+        )
+        _apply_copyloc_handles_from_metadata(context, storyboard, entries_meta)
         try:
             entry = storyboard.entries[-1]
             entry.name = display_name
