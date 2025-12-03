@@ -930,17 +930,33 @@ def _create_color_light_effect(context, name, frame_start, duration, color):
         if entries is None:
             return None
 
-        le_entry = entries.add()
-        le_entry.name = name
-        le_entry.frame_start = int(frame_start)
-        le_entry.duration = int(duration)
-        if hasattr(le_entry, "type"):
-            le_entry.type = "COLOR_RAMP"
+        append_entry = getattr(light_effects, "append_new_entry", None)
+        le_entry = None
+        if callable(append_entry):
+            try:
+                le_entry = append_entry(
+                    name,
+                    frame_start=int(frame_start),
+                    duration=int(duration),
+                    select=False,
+                    context=context,
+                )
+            except Exception:
+                le_entry = None
 
-        tex = getattr(le_entry, "texture", None)
-        if tex is None:
-            tex = bpy.data.textures.new(name=f"{name}_ColorTex", type="NONE")
-            le_entry.texture = tex
+        if le_entry is None:
+            le_entry = entries.add()
+            le_entry.name = name
+            le_entry.frame_start = int(frame_start)
+            le_entry.duration = int(duration)
+            if hasattr(le_entry, "type"):
+                le_entry.type = "COLOR_RAMP"
+            tex = getattr(le_entry, "texture", None)
+            if tex is None:
+                tex = bpy.data.textures.new(name=f"{name}_ColorTex", type="IMAGE")
+                le_entry.texture = tex
+        else:
+            tex = getattr(le_entry, "texture", None)
 
         ramp = None
         try:
@@ -1352,23 +1368,23 @@ class CSVVA_OT_Import(Operator):
                         )
                         if mid_entry:
                             entries_meta.append({"copyloc_handle": mid_handle})
-                            if traled:
-                                trans_start = sf + effective_duration
-                                trans_duration = max(1, gap_for_next + transition_duration)
-                                _create_color_light_effect(
-                                    context,
-                                    f"{display_name}_TransitionLE",
-                                    trans_start,
-                                    trans_duration,
-                                    tracolor,
-                                )
-                        transition_for_next = (
-                            transition_duration if idx < len(ordered_subdirs) - 1 else 0
+                    if traled and idx < len(ordered_subdirs) - 1:
+                        trans_start = sf + effective_duration
+                        trans_duration = max(1, gap_for_next + transition_duration)
+                        _create_color_light_effect(
+                            context,
+                            f"{display_name}_TransitionLE",
+                            trans_start,
+                            trans_duration,
+                            tracolor,
                         )
-                        next_start = max(
-                            next_start,
-                            sf + effective_duration + gap_for_next + transition_for_next,
-                        )
+                    transition_for_next = (
+                        transition_duration if idx < len(ordered_subdirs) - 1 else 0
+                    )
+                    next_start = max(
+                        next_start,
+                        sf + effective_duration + gap_for_next + transition_for_next,
+                    )
             if not created:
                 self.report({"ERROR"}, "No CSV/TSV files found in subfolders")
                 return {"CANCELLED"}
@@ -1424,21 +1440,24 @@ class CSVVA_OT_Import(Operator):
             storyboard, entries_meta
         )
         _apply_copyloc_handles_from_metadata(context, storyboard, entries_meta)
-        if bool(meta.get("traled", False)):
-            color = _hex_to_rgba(meta.get("tracolor")) or (1.0, 1.0, 1.0, 1.0)
-            duration = max(1, int(meta.get("middur", 1) or 1))
-            _create_color_light_effect(
-                context,
-                f"{display_name}_TransitionLE",
-                start_frame + max(0, int(getattr(storyboard.entries[-1], "duration", 0))),
-                duration,
-                color,
-            )
         try:
             entry = storyboard.entries[-1]
             entry.name = display_name
         except Exception:
             pass
+        if bool(meta.get("traled", False)):
+            color = _hex_to_rgba(meta.get("tracolor")) or (1.0, 1.0, 1.0, 1.0)
+            duration = max(1, int(meta.get("middur", 1) or 1))
+            trans_start = int(getattr(entry, "frame_start", start_frame)) + max(
+                0, int(getattr(entry, "duration", 0) or 0)
+            )
+            _create_color_light_effect(
+                context,
+                f"{display_name}_TransitionLE",
+                trans_start,
+                duration,
+                color,
+            )
         if key_entries:
             current_frame = context.scene.frame_current
             context.scene.frame_set(start_frame)
