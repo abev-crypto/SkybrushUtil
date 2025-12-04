@@ -4154,12 +4154,6 @@ class BakeLightEffectsToCatOperator(bpy.types.Operator):  # pragma: no cover - B
         default="ACTIVE",
     )
 
-    @classmethod
-    def poll(cls, context):
-        light_effects = getattr(getattr(context.scene, "skybrush", None), "light_effects", None)
-        entry = getattr(light_effects, "active_entry", None) if light_effects else None
-        return entry is not None
-
     def _get_entries_to_bake(self, light_effects):
         entries = list(getattr(light_effects, "entries", []))
         if self.scope == "ACTIVE":
