@@ -35,6 +35,7 @@ from uuid import uuid4
 
 from mathutils import Matrix, Vector
 from mathutils.bvhtree import BVHTree
+from mathutils.kdtree import KDTree
 
 from sbstudio.math.colors import blend_in_place, BlendMode
 from sbstudio.math.rng import RandomSequence
@@ -162,6 +163,7 @@ def _copy_patched_light_effect_properties(source, target) -> None:
         "color_function_text",
         "convert_srgb",
         "uv_tiling_mode",
+        "output_offset",
         "formation_collection",
         "sequence_mode",
         "sequence_mask_collection",
@@ -511,42 +513,31 @@ def sample_vertex_color_factors(mesh_obj, positions: Sequence[Coordinate3D]) -> 
         domain = getattr(color_layer, "domain", None)
         if domain not in {"POINT", "CORNER"}:
             return None
-        eval_mesh.calc_loop_triangles()
-        if not eval_mesh.loop_triangles:
+
+        color_by_vertex = _collect_vertex_colors(eval_mesh)
+        if not color_by_vertex:
             return None
-        tree = _build_bvh_tree(eval_mesh)
-        if tree is None:
+
+        vertices = getattr(eval_mesh, "vertices", [])
+        if not vertices:
             return None
-        inv_world = mesh_obj.matrix_world.inverted()
+
+        tree = KDTree(len(vertices))
+        world_matrix = mesh_obj.matrix_world
+        for vertex in vertices:
+            tree.insert(world_matrix @ vertex.co, vertex.index)
+        tree.balance()
+
         outputs: list[Optional[float]] = []
         for pos in positions:
             co = Vector(pos) if not isinstance(pos, Vector) else pos.copy()
-            local = inv_world @ co
-            nearest = tree.find_nearest(local)
+            nearest = tree.find(co)
             if nearest is None:
                 outputs.append(None)
                 continue
-            location, _normal, tri_index, _dist = nearest
-            if tri_index is None:
-                outputs.append(None)
-                continue
-            tri = eval_mesh.loop_triangles[tri_index]
-            verts = tri.vertices
-            loops = tri.loops
-            v0 = eval_mesh.vertices[verts[0]].co
-            v1 = eval_mesh.vertices[verts[1]].co
-            v2 = eval_mesh.vertices[verts[2]].co
-            w0, w1, w2 = _barycentric_weights(location, v0, v1, v2)
-            if domain == "POINT":
-                c0 = color_layer.data[verts[0]].color
-                c1 = color_layer.data[verts[1]].color
-                c2 = color_layer.data[verts[2]].color
-            else:  # CORNER
-                c0 = color_layer.data[loops[0]].color
-                c1 = color_layer.data[loops[1]].color
-                c2 = color_layer.data[loops[2]].color
-            value = (c0[0] * w0 + c1[0] * w1 + c2[0] * w2)
-            outputs.append(float(value))
+            _location, vertex_index, _dist = nearest
+            color = color_by_vertex.get(vertex_index)
+            outputs.append(float(color[0]) if color is not None else None)
         return outputs
     finally:
         eval_obj.to_mesh_clear()
@@ -2318,6 +2309,14 @@ class PatchedLightEffect(PropertyGroup):
         ],
         default="NONE",
     )
+    output_offset = FloatVectorProperty(
+        name="Output Offset",
+        description="Offset added to the evaluated output values before sampling",
+        size=2,
+        default=(0.0, 0.0),
+        soft_min=-1.0,
+        soft_max=1.0,
+    )
     formation_collection = PointerProperty(
         name="Formation Collection",
         description="Collection containing formation meshes for UV sampling",
@@ -3226,6 +3225,20 @@ class PatchedLightEffect(PropertyGroup):
                     outputs_y, common_output_y
                 )
 
+            offset_x, offset_y = 0.0, 0.0
+            try:
+                offset_x = float(self.output_offset[0])
+                offset_y = float(self.output_offset[1])
+            except Exception:
+                pass
+
+            outputs_x_arr = (outputs_x_arr + offset_x) % 1.0
+            valid_x_mask = np.isfinite(outputs_x_arr)
+
+            if outputs_y_arr is not None:
+                outputs_y_arr = (outputs_y_arr + offset_y) % 1.0
+                valid_y_mask = np.isfinite(outputs_y_arr)
+
             if self.randomness != 0:
                 random_offsets_x = np.fromiter(
                     (random_seq.get_float(i) for i in range(num_positions)),
@@ -3724,6 +3737,7 @@ def patch_light_effect_class():
         poll=_mesh_object_poll,
     )
     LightEffect.uv_tiling_mode = PatchedLightEffect.uv_tiling_mode
+    LightEffect.output_offset = PatchedLightEffect.output_offset
     LightEffect.formation_collection = PatchedLightEffect.formation_collection
     LightEffect.target_collection = PointerProperty(
         name="Collection", type=bpy.types.Collection
@@ -3763,6 +3777,7 @@ def patch_light_effect_class():
     LightEffect.__annotations__["target"] = LightEffect.target
     LightEffect.__annotations__["uv_mesh"] = LightEffect.uv_mesh
     LightEffect.__annotations__["uv_tiling_mode"] = LightEffect.uv_tiling_mode
+    LightEffect.__annotations__["output_offset"] = LightEffect.output_offset
     LightEffect.__annotations__["formation_collection"] = (
         LightEffect.formation_collection
     )
@@ -3858,6 +3873,9 @@ def unpatch_light_effect_class():
     if hasattr(LightEffect, "uv_tiling_mode"):
         delattr(LightEffect, "uv_tiling_mode")
         LightEffect.__annotations__.pop("uv_tiling_mode", None)
+    if hasattr(LightEffect, "output_offset"):
+        delattr(LightEffect, "output_offset")
+        LightEffect.__annotations__.pop("output_offset", None)
     if getattr(LightEffect, "original_formation_collection", None) is not None:
         LightEffect.formation_collection = LightEffect.original_formation_collection
         LightEffect.__annotations__["formation_collection"] = (
@@ -6500,6 +6518,8 @@ class PatchedLightEffectsPanel(Panel):  # pragma: no cover - Blender UI code
             )
             if show_uv_tiling_mode:
                 col.prop(entry, "uv_tiling_mode")
+            if hasattr(entry, "output_offset"):
+                col.prop(entry, "output_offset")
             col.prop(entry, "target")
             col.prop(entry, "invert_target")
             if hasattr(entry, "baked_target_indices"):
