@@ -3232,12 +3232,16 @@ class PatchedLightEffect(PropertyGroup):
             except Exception:
                 pass
 
-            outputs_x_arr = (outputs_x_arr + offset_x) % 1.0
-            valid_x_mask = np.isfinite(outputs_x_arr)
+            apply_x_offset = self.output not in {"FIRST_COLOR", "LAST_COLOR"}
+            if apply_x_offset:
+                outputs_x_arr = (outputs_x_arr + offset_x) % 1.0
+                valid_x_mask = np.isfinite(outputs_x_arr)
 
             if outputs_y_arr is not None:
-                outputs_y_arr = (outputs_y_arr + offset_y) % 1.0
-                valid_y_mask = np.isfinite(outputs_y_arr)
+                apply_y_offset = self.output_y not in {"FIRST_COLOR", "LAST_COLOR"}
+                if apply_y_offset:
+                    outputs_y_arr = (outputs_y_arr + offset_y) % 1.0
+                    valid_y_mask = np.isfinite(outputs_y_arr)
 
             if self.randomness != 0:
                 random_offsets_x = np.fromiter(
