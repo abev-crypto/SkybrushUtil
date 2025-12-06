@@ -164,7 +164,7 @@ def _create_gn_vat_group(
     frame_count,
     drone_count,
     *,
-    start_frame: int,
+    start_frame: int | None,
     base_name: str,
 ):
     group_name = f"GN_DroneVAT_{base_name}"
@@ -220,7 +220,7 @@ def _create_gn_vat_group(
 
     posmin_in.default_value = pos_min
     posmax_in.default_value = pos_max
-    startframe_in.default_value = float(start_frame)
+    startframe_in.default_value = float(start_frame) if start_frame is not None else 0.0
     framecount_in.default_value = float(frame_count)
     dronecount_in.default_value = int(drone_count)
 
