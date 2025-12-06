@@ -108,33 +108,41 @@ def load_import_metadata(directory, report):
     (optional), ``middur`` (optional mid-pose duration), ``midpose`` (optional
     flag to disable mid-poses), ``fhandle`` (optional CopyLoc handle frames for
     the formation), and ``mhandle`` (optional CopyLoc handle frames for the
-    mid-pose).
-    (optional flag to disable mid-poses). ``duration`` represents the transition
-    duration leading into the formation. It defaults to
-    :data:`DEFAULT_FOLDER_DURATION`, ``midlayer`` defaults to ``1``,
-    ``middur`` defaults to ``1`` and ``midpose`` defaults to ``True`` when
-    missing, but these defaults can be overridden by top-level keys in the JSON.
+    mid-pose). ``StartFrame`` can be added either at the top level or per-entry
+    to control the starting frame offset for storyboard placement.
+    ``duration`` represents the transition duration leading into the formation.
+    It defaults to :data:`DEFAULT_FOLDER_DURATION`, ``midlayer`` defaults to
+    ``1``, ``middur`` defaults to ``1`` and ``midpose`` defaults to ``True``
+    when missing, but these defaults can be overridden by top-level keys in the
+    JSON.
     """
 
     mapping_path = os.path.join(directory, PREFIX_MAP_FILENAME)
     if not os.path.isfile(mapping_path):
-        return {}
+        return {}, {"start_frame": None}
 
     try:
         with open(mapping_path, "r", encoding="utf-8") as f:
             data = json.load(f)
     except Exception as exc:
         report({"WARNING"}, f"Could not read {PREFIX_MAP_FILENAME}: {exc}")
-        return {}
+        return {}, {"start_frame": None}
 
     if not isinstance(data, dict):
         report(
             {"WARNING"},
             f"{PREFIX_MAP_FILENAME} must contain an object that maps keys to metadata",
         )
-        return {}
+        return {}, {"start_frame": None}
 
     # Global defaults that can be overridden by top-level keys
+    default_start_frame = None
+    if "StartFrame" in data and not isinstance(data["StartFrame"], dict):
+        try:
+            default_start_frame = int(data["StartFrame"])
+        except Exception:
+            report({"WARNING"}, "Invalid top-level StartFrame in prefix_map.json, using default")
+
     default_duration = DEFAULT_FOLDER_DURATION
     if "duration" in data and not isinstance(data["duration"], dict):
         try:
@@ -185,7 +193,7 @@ def load_import_metadata(directory, report):
 
         metadata = {}
     for key, value in data.items():
-        if key in {"duration", "midlayer", "middur", "midpose", "fhandle", "mhandle", "ydepth"}:
+        if key in {"duration", "midlayer", "middur", "midpose", "fhandle", "mhandle", "ydepth", "StartFrame"}:
             continue
 
         if not isinstance(value, dict):
@@ -207,6 +215,7 @@ def load_import_metadata(directory, report):
         ydepth = value.get("ydepth", default_ydepth)
         traled = value.get("traled", default_traled)
         tracolor = value.get("tracolor", default_tracolor)
+        start_frame = value.get("StartFrame", default_start_frame)
 
         try:
             duration = int(duration)
@@ -238,6 +247,10 @@ def load_import_metadata(directory, report):
             ydepth = default_ydepth
         traled = bool(traled)
         tracolor = str(tracolor) if tracolor is not None else None
+        try:
+            start_frame = int(start_frame) if start_frame is not None else None
+        except Exception:
+            start_frame = default_start_frame
 
         metadata[str(key)] = {
             "id": entry_id,
@@ -251,9 +264,10 @@ def load_import_metadata(directory, report):
             "ydepth": ydepth,
             "traled": traled,
             "tracolor": tracolor,
+            "start_frame": start_frame,
         }
 
-    return metadata
+    return metadata, {"start_frame": default_start_frame}
 
 
 def _metadata_transition_duration(meta, default=None):
@@ -1284,7 +1298,9 @@ class CSVVA_OT_Import(Operator):
         if not os.path.isdir(folder):
             self.report({"ERROR"}, "Invalid CSV folder")
             return {"CANCELLED"}
-        metadata_map = load_import_metadata(folder, self.report)
+        metadata_map, metadata_defaults = load_import_metadata(folder, self.report)
+        if metadata_defaults.get("start_frame") is not None:
+            base_start = metadata_defaults["start_frame"]
 
         subdirs = [d for d in sorted(os.listdir(folder)) if os.path.isdir(os.path.join(folder, d))]
         ordered_subdirs = list(subdirs)
@@ -1324,7 +1340,7 @@ class CSVVA_OT_Import(Operator):
                 )
                 transition_duration = _metadata_transition_duration(next_meta, default=0) or 0
                 midpose_disabled = (transition_duration <= 0) or (not midpose_enabled)
-                sf = next_start
+                sf = meta.get("start_frame", next_start) if meta else next_start
                 next_bounds = None
                 if idx < len(ordered_subdirs) - 1:
                     next_tracks = build_tracks_from_folder(os.path.join(folder, ordered_subdirs[idx + 1]))
@@ -1411,7 +1427,7 @@ class CSVVA_OT_Import(Operator):
         )
         meta = metadata_map.get(folder_name, {}) if metadata_map else {}
         display_name = _storyboard_name(base_name, meta)
-        start_frame = base_start
+        start_frame = meta.get("start_frame", base_start) if meta else base_start
         storyboard = context.scene.skybrush.storyboard
         for idx, sb in enumerate(storyboard.entries):
             if sb.name == display_name:
@@ -1695,7 +1711,7 @@ class CSVVA_OT_Preview(Operator):
             return {"CANCELLED"}
 
         fps = context.scene.render.fps
-        metadata_map = load_import_metadata(folder, self.report)
+        metadata_map, metadata_defaults = load_import_metadata(folder, self.report)
         subdirs = [d for d in sorted(os.listdir(folder)) if os.path.isdir(os.path.join(folder, d))]
         ordered_subdirs = list(subdirs)
         if metadata_map:
@@ -1720,6 +1736,8 @@ class CSVVA_OT_Preview(Operator):
         if storyboard.entries:
             last = storyboard.entries[-1]
             base_start = last.frame_start + last.duration
+        if metadata_defaults.get("start_frame") is not None:
+            base_start = metadata_defaults["start_frame"]
 
         next_start = base_start
         created = 0
@@ -1731,7 +1749,7 @@ class CSVVA_OT_Preview(Operator):
             if meta:
                 gap_frames = _metadata_transition_duration(meta, default=gap_frames)
             display_name = _storyboard_name(base_name, meta)
-            start_frame = next_start
+            start_frame = meta.get("start_frame", next_start) if meta else next_start
             mid_duration = max(1, int(meta.get("middur", 1) or 1))
             midpose_enabled = bool(meta.get("midpose", True))
             # Preview only; handles are informational, shaping occurs on import/update

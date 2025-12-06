@@ -1318,7 +1318,7 @@ class DRONE_OT_LinearizeCopyLocationFromMetadata(Operator):
             self.report({'ERROR'}, "Invalid CSV folder for metadata")
             return {'CANCELLED'}
 
-        metadata_map = CSV2Vertex.load_import_metadata(folder, self.report)
+        metadata_map, _metadata_defaults = CSV2Vertex.load_import_metadata(folder, self.report)
         if not metadata_map:
             self.report({'WARNING'}, "No metadata found in prefix_map.json")
             return {'CANCELLED'}
