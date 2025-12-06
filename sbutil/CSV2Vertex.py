@@ -742,6 +742,32 @@ def _update_frame_range_from_storyboard(context):
         scene.frame_end = max(scene.frame_end, max_end)
 
 
+def _shift_subsequent_storyboard_entries(storyboard, start_index: int, delta: int):
+    """Shift storyboard entries and transitions after ``start_index`` by ``delta`` frames."""
+
+    if delta == 0 or storyboard is None or start_index is None:
+        return
+
+    entries = getattr(storyboard, "entries", None)
+    transitions = getattr(storyboard, "transitions", None)
+
+    if entries:
+        for idx in range(start_index + 1, len(entries)):
+            entry = entries[idx]
+            try:
+                entry.frame_start = int(getattr(entry, "frame_start", 0)) + delta
+            except Exception:
+                continue
+
+    if transitions:
+        for idx in range(max(start_index, 0), len(transitions)):
+            transition = transitions[idx]
+            try:
+                transition.frame_start = int(getattr(transition, "frame_start", 0)) + delta
+            except Exception:
+                continue
+
+
 def _shift_storyboard_after_transition(storyboard, start_index: int, delta: int):
     """Shift storyboard entries and transitions after ``start_index`` by ``delta`` frames."""
 
