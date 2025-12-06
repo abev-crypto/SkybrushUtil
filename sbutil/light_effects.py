@@ -2711,6 +2711,19 @@ class PatchedLightEffect(PropertyGroup):
                     def predicate(pos, _idx=None, base_predicate=base_predicate):
                         return base_predicate(pos)
 
+        if predicate is None and getattr(self, "mesh", None):
+            if self.target == "INSIDE_MESH":
+                inside_predicate = inside_mesh(self.mesh)
+
+                def predicate(pos, _idx=None):
+                    return inside_predicate(pos)
+
+            elif self.target == "OUTSIDE_MESH":
+                inside_predicate = inside_mesh(self.mesh)
+
+                def predicate(pos, _idx=None):
+                    return not inside_predicate(pos)
+
         if predicate is None:
             predicate = lambda _pos, _idx=None: True
 
