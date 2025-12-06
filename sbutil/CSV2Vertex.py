@@ -1463,10 +1463,10 @@ class CSVVA_OT_Import(Operator):
                     except Exception:
                         pass
 
-                    gap_for_next = gap_frames
+                    gap_for_next = gap_frames if gap_frames is not None else 0
                     if idx < len(ordered_subdirs) - 1 and not midpose_disabled:
                         mid_offset = max(1, int(round(transition_duration * 0.5)))
-                        mid_frame = sf + effective_duration + mid_offset
+                        mid_frame = int(sf or 0) + int(effective_duration or 0) + mid_offset
                         mid_entry = create_grid_mid_pose(
                             context,
                             mid_frame,
@@ -1481,8 +1481,8 @@ class CSVVA_OT_Import(Operator):
                         if mid_entry:
                             entries_meta.append({"copyloc_handle": mid_handle})
                     if traled and idx < len(ordered_subdirs) - 1:
-                        trans_start = sf + effective_duration
-                        trans_duration = max(1, gap_for_next + transition_duration)
+                        trans_start = int(sf or 0) + int(effective_duration or 0)
+                        trans_duration = max(1, int(gap_for_next or 0) + int(transition_duration or 0))
                         _create_color_light_effect(
                             context,
                             f"{display_name}_TransitionLE",
