@@ -1054,6 +1054,76 @@ def _replace_light_effect_texture(light_effect, color_image):
         except Exception:
             pass
 
+
+def _remove_light_effect_entries(scene, name: str):
+    light_effects = getattr(getattr(scene, "skybrush", None), "light_effects", None)
+    entries = getattr(light_effects, "entries", None)
+    if not entries:
+        return
+
+    for idx in reversed(range(len(entries))):
+        entry = entries[idx]
+        if getattr(entry, "name", None) != name:
+            continue
+
+        tex = getattr(entry, "texture", None)
+        if tex is not None:
+            img = getattr(tex, "image", None)
+            try:
+                entries.remove(idx)
+            except Exception:
+                pass
+            if img is not None:
+                try:
+                    bpy.data.images.remove(img)
+                except Exception:
+                    pass
+            try:
+                bpy.data.textures.remove(tex)
+            except Exception:
+                pass
+        else:
+            try:
+                entries.remove(idx)
+            except Exception:
+                pass
+
+
+def _remove_vat_images_for_storyboard(name: str):
+    image_names = (
+        f"{name}_VAT_Pos",
+        f"{name}_VAT_Color",
+        f"{name}_CAT_Pos",
+        f"{name}_CAT_Color",
+    )
+
+    for img_name in image_names:
+        img = bpy.data.images.get(img_name)
+        if img is not None:
+            try:
+                bpy.data.images.remove(img)
+            except Exception:
+                pass
+
+
+def _remove_objects_for_storyboard(name: str):
+    for candidate_name in (name, f"{name}_CSV"):
+        obj = bpy.data.objects.get(candidate_name)
+        if obj is None:
+            continue
+
+        mesh = getattr(obj, "data", None)
+        try:
+            bpy.data.objects.remove(obj, do_unlink=True)
+        except Exception:
+            pass
+
+        if mesh and mesh.users == 0:
+            try:
+                bpy.data.meshes.remove(mesh)
+            except Exception:
+                pass
+
 # ---------- Import Helper ----------
 
 
@@ -1889,71 +1959,16 @@ class CSVVA_OT_Update(Operator):
                 self.report({"WARNING"}, f"No CSV/TSV files found in {item.folder}")
                 continue
 
-            if existing_entry and prefs.use_vat:
-                obj = None
-                for candidate_name in (f"{existing_entry.name}_CSV", existing_entry.name):
-                    obj = bpy.data.objects.get(candidate_name)
-                    if obj:
-                        break
-
-                color_image = None
-                pos_image = None
-                if obj:
-                    old_end = existing_entry.frame_start + existing_entry.duration
-                    try:
-                        (
-                            color_image,
-                            pos_image,
-                            imported_duration,
-                            _drone_count,
-                        ) = csv_vat_gn.update_vat_animation_for_object(
-                            obj,
-                            tracks,
-                            fps,
-                            start_frame=target_start,
-                            base_name=obj.name,
-                            storyboard_name=existing_entry.name,
-                        )
-                        duration = imported_duration
-                    except Exception:
-                        color_image = None
-                        imported_duration = duration
-
-                    try:
-                        existing_entry.frame_start = target_start
-                        existing_entry.duration = duration
-                    except Exception:
-                        pass
-
-                    if existing_index is not None:
-                        new_end = target_start + duration
-                        delta = new_end - old_end
-                        _shift_subsequent_storyboard_entries(storyboard, existing_index, delta)
-
-                    le_entry = _find_light_effect_entry(context.scene, existing_entry.name)
-                    if export_dir and pos_image is not None and color_image is not None:
-                        _export_vat_images(pos_image, color_image, export_dir)
-                    if le_entry is not None:
-                        _replace_light_effect_texture(le_entry, color_image)
-                        try:
-                            le_entry.frame_start = existing_entry.frame_start
-                            le_entry.duration = duration
-                        except Exception:
-                            pass
-
-                    processed += 1
-                    continue
-
             if existing_entry:
                 clear_drone_keys(existing_entry.frame_start, existing_entry.duration)
-                for candidate_name in (existing_entry.name, f"{existing_entry.name}_CSV"):
-                    old_obj = bpy.data.objects.get(candidate_name)
-                    if old_obj:
-                        mesh = old_obj.data
-                        bpy.data.objects.remove(old_obj, do_unlink=True)
-                        if mesh and mesh.users == 0:
-                            bpy.data.meshes.remove(mesh)
-                storyboard.entries.remove(existing_index)
+            _remove_objects_for_storyboard(item.name)
+            _remove_light_effect_entries(context.scene, item.name)
+            _remove_vat_images_for_storyboard(item.name)
+            if existing_index is not None:
+                try:
+                    storyboard.entries.remove(existing_index)
+                except Exception:
+                    pass
 
             obj, imported_duration, key_entries = import_csv_folder(
                 context,
@@ -1967,8 +1982,10 @@ class CSVVA_OT_Update(Operator):
                 continue
 
             entry = storyboard.entries[-1]
-            if existing_entry is not None:
-                storyboard.entries.move(len(storyboard.entries) - 1, existing_index)
+            entry_index = len(storyboard.entries) - 1
+            if existing_entry is not None and existing_index is not None:
+                entry_index = min(existing_index, len(storyboard.entries) - 1)
+                storyboard.entries.move(len(storyboard.entries) - 1, entry_index)
                 if not item.frame_mismatch:
                     entry.frame_start = keep_start
                     entry.duration = keep_duration
@@ -1978,7 +1995,7 @@ class CSVVA_OT_Update(Operator):
 
                 old_end = (keep_start or 0) + (keep_duration or 0)
                 new_end = entry.frame_start + entry.duration
-                _shift_subsequent_storyboard_entries(storyboard, existing_index, new_end - old_end)
+                _shift_subsequent_storyboard_entries(storyboard, entry_index, new_end - old_end)
 
             if key_entries:
                 key_data_collection.append((key_entries, entry.frame_start))
