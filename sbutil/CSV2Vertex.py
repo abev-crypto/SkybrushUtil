@@ -3,6 +3,7 @@ from bpy.props import BoolProperty, CollectionProperty, IntProperty, StringPrope
 from bpy.types import Operator, Panel, PropertyGroup, UIList
 import csv, json, os, re, math, shutil, zipfile
 from mathutils import Vector
+import numpy as np
 
 from sbutil import csv_vat_gn
 from sbutil.light_effects import OUTPUT_VERTEX_COLOR
@@ -331,6 +332,106 @@ def _hex_to_rgba(hex_str):
         return (r, g, b, 1.0)
     except Exception:
         return None
+
+
+_SAMPLED_TRACOLOR_PATTERN = re.compile(r"sampled_(\d+)", re.IGNORECASE)
+
+
+def _sample_count_from_tracolor(tracolor: str | None) -> int | None:
+    """Return the requested sample count from a ``tracolor`` string, if any."""
+
+    if not isinstance(tracolor, str):
+        return None
+
+    match = _SAMPLED_TRACOLOR_PATTERN.fullmatch(tracolor.strip())
+    if not match:
+        return None
+
+    try:
+        return max(1, int(match.group(1)))
+    except Exception:
+        return None
+
+
+def _apply_colors_to_color_ramp(light_effect_entry, colors: list[tuple[float, float, float, float]]):
+    """Configure or create a color ramp on ``light_effect_entry`` using ``colors``."""
+
+    if not colors:
+        return False
+
+    tex = getattr(light_effect_entry, "texture", None)
+    if tex is None:
+        try:
+            tex = bpy.data.textures.new(
+                name=f"{getattr(light_effect_entry, 'name', 'LE')}_ColorTex", type="IMAGE"
+            )
+            light_effect_entry.texture = tex
+        except Exception:
+            return False
+
+    try:
+        ramp = tex.color_ramp
+    except Exception:
+        ramp = None
+
+    if ramp is None:
+        return False
+
+    while len(ramp.elements) > 1:
+        ramp.elements.remove(ramp.elements[-1])
+
+    if len(ramp.elements) == 0:
+        ramp.elements.new(0.0)
+
+    ramp.elements[0].position = 0.0
+    ramp.elements[0].color = colors[0]
+
+    num_colors = len(colors)
+    if num_colors == 1:
+        return True
+
+    last_index = max(num_colors - 1, 1)
+    for idx, color in enumerate(colors[1:], start=1):
+        elem = ramp.elements.new(idx / last_index)
+        elem.color = color
+
+    return True
+
+
+def _sample_colors_from_cat_effect(context, candidates: list[str], sample_count: int):
+    """Return up to ``sample_count`` colors sampled from the CAT image of a target effect."""
+
+    for candidate in candidates:
+        le_entry = _find_light_effect_entry(context.scene, candidate)
+        tex = getattr(le_entry, "texture", None) if le_entry is not None else None
+        image = getattr(tex, "image", None) if tex is not None else None
+        if image is None:
+            continue
+
+        try:
+            pixels = np.array(image.pixels[:], dtype=float)
+        except Exception:
+            continue
+
+        if pixels.size == 0:
+            continue
+
+        pixels = pixels.reshape(-1, 4)
+        rounded = np.clip(np.round(pixels[:, :4], 4), 0.0, 1.0)
+        unique_colors, counts = np.unique(rounded, axis=0, return_counts=True)
+        if unique_colors.size == 0:
+            continue
+
+        order = np.argsort(counts)[::-1]
+        selected = unique_colors[order][:sample_count]
+        colors = [tuple(color.tolist()) for color in selected]
+        if colors:
+            last_color = colors[-1]
+            while len(colors) < sample_count:
+                colors.append(last_color)
+            return colors
+
+    return None
 
 def build_tracks_from_folder(folder, delimiter="auto"):
     files = []
@@ -960,7 +1061,15 @@ def _create_light_effect_for_storyboard(
     return le_entry
 
 
-def _create_color_light_effect(context, name, frame_start, duration, color):
+def _create_color_light_effect(
+    context,
+    name,
+    frame_start,
+    duration,
+    color,
+    *,
+    ramp_colors: list[tuple[float, float, float, float]] | None = None,
+):
     """Create a simple COLOR_RAMP light effect with a flat color."""
 
     try:
@@ -997,25 +1106,49 @@ def _create_color_light_effect(context, name, frame_start, duration, color):
                 le_entry.texture = tex
         else:
             tex = getattr(le_entry, "texture", None)
-
-        ramp = None
-        try:
-            ramp = tex.color_ramp
-        except Exception:
-            ramp = None
-        if ramp:
-            while len(ramp.elements) > 1:
-                ramp.elements.remove(ramp.elements[-1])
-            if len(ramp.elements) == 0:
-                ramp.elements.new(0.0)
-            ramp.elements[0].position = 0.0
-            ramp.elements[0].color = color
-            elem = ramp.elements.new(1.0)
-            elem.color = color
+        _apply_colors_to_color_ramp(
+            le_entry, ramp_colors if ramp_colors else [color]
+        )
     except Exception:
         return None
 
     return le_entry
+
+
+def _apply_pending_sampled_transitions(
+    context,
+    candidates: set[str],
+    pending: list[dict],
+):
+    """Apply color ramp updates for transitions waiting on CAT colors."""
+
+    remaining = []
+    for item in pending:
+        target_candidates = item.get("target_candidates", set())
+        if not candidates.intersection(target_candidates):
+            remaining.append(item)
+            continue
+
+        transition_name = item.get("transition_name")
+        sample_count = item.get("sample_count")
+        if not transition_name or not sample_count:
+            continue
+
+        colors = _sample_colors_from_cat_effect(
+            context, list(target_candidates), int(sample_count)
+        )
+        if not colors:
+            remaining.append(item)
+            continue
+
+        le_entry = _find_light_effect_entry(context.scene, transition_name)
+        if le_entry is None:
+            remaining.append(item)
+            continue
+
+        _apply_colors_to_color_ramp(le_entry, colors)
+
+    pending[:] = remaining
 
 
 def _find_light_effect_entry(scene, name: str):
@@ -1417,6 +1550,7 @@ class CSVVA_OT_Import(Operator):
             entries_meta = [None] * existing_entry_count
             next_start = base_start
             key_data_collection = []
+            pending_sampled_transitions: list[dict] = []
             for idx, d in enumerate(ordered_subdirs):
                 sub_path = os.path.join(folder, d)
                 base_name, gap_frames = split_name_and_gap(d, context.scene.render.fps)
@@ -1428,7 +1562,9 @@ class CSVVA_OT_Import(Operator):
                 ydepth = meta.get("ydepth", None)
                 mid_handle = _metadata_handle(meta, "mhandle", None)
                 traled = bool(meta.get("traled", False))
-                tracolor = _hex_to_rgba(meta.get("tracolor")) or (1.0, 1.0, 1.0, 1.0)
+                tracolor_value = meta.get("tracolor")
+                sample_count = _sample_count_from_tracolor(tracolor_value)
+                tracolor = _hex_to_rgba(tracolor_value) or (1.0, 1.0, 1.0, 1.0)
                 next_meta = (
                     metadata_map.get(ordered_subdirs[idx + 1], {})
                     if idx < len(ordered_subdirs) - 1
@@ -1453,6 +1589,10 @@ class CSVVA_OT_Import(Operator):
                     created.append(obj)
                     if key_entries:
                         key_data_collection.append((key_entries, sf, obj, sub_path))
+
+                    _apply_pending_sampled_transitions(
+                        context, {display_name, base_name}, pending_sampled_transitions
+                    )
 
                     effective_duration = dur or DEFAULT_FOLDER_DURATION
 
@@ -1488,13 +1628,33 @@ class CSVVA_OT_Import(Operator):
                     if traled and idx < len(ordered_subdirs) - 1:
                         trans_start = int(sf or 0) + int(effective_duration or 0)
                         trans_duration = max(1, int(gap_for_next or 0) + int(transition_duration or 0))
+                        transition_name = f"{display_name}_TransitionLE"
                         _create_color_light_effect(
                             context,
-                            f"{display_name}_TransitionLE",
+                            transition_name,
                             trans_start,
                             trans_duration,
                             tracolor,
+                            ramp_colors=[tracolor],
                         )
+                        if sample_count:
+                            next_base_name, _ = split_name_and_gap(
+                                ordered_subdirs[idx + 1], context.scene.render.fps
+                            )
+                            next_display_name = _storyboard_name(
+                                next_base_name, metadata_map.get(ordered_subdirs[idx + 1], {})
+                            )
+                            targets = {next_display_name, next_base_name}
+                            pending_sampled_transitions.append(
+                                {
+                                    "transition_name": transition_name,
+                                    "sample_count": sample_count,
+                                    "target_candidates": targets,
+                                }
+                            )
+                            _apply_pending_sampled_transitions(
+                                context, targets, pending_sampled_transitions
+                            )
                     transition_for_next = (
                         transition_duration if idx < len(ordered_subdirs) - 1 else 0
                     )
