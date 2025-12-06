@@ -1436,7 +1436,8 @@ class CSVVA_OT_Import(Operator):
                 )
                 transition_duration = _metadata_transition_duration(next_meta, default=0) or 0
                 midpose_disabled = (transition_duration <= 0) or (not midpose_enabled)
-                sf = meta.get("start_frame", next_start) if meta else next_start
+                sf_meta = meta.get("start_frame", None) if meta else None
+                sf = sf_meta if sf_meta is not None else next_start
                 next_bounds = None
                 if idx < len(ordered_subdirs) - 1:
                     next_tracks = build_tracks_from_folder(os.path.join(folder, ordered_subdirs[idx + 1]))
@@ -1457,7 +1458,11 @@ class CSVVA_OT_Import(Operator):
 
                     try:
                         entry = storyboard.entries[-1]
-                        entry.name = display_name
+                        entry.name = (
+                            f"{meta.get('id', '')}_{display_name}"
+                            if meta and meta.get("id") is not None
+                            else display_name
+                        )
                         entry.duration = effective_duration
                         entries_meta.append(meta)
                     except Exception:
@@ -1495,7 +1500,10 @@ class CSVVA_OT_Import(Operator):
                     )
                     next_start = max(
                         next_start,
-                        sf + effective_duration + gap_for_next + transition_for_next,
+                        int(sf or 0)
+                        + int(effective_duration or 0)
+                        + int(gap_for_next or 0)
+                        + int(transition_for_next or 0),
                     )
             if not created:
                 self.report({"ERROR"}, "No CSV/TSV files found in subfolders")
@@ -1523,7 +1531,8 @@ class CSVVA_OT_Import(Operator):
         )
         meta = metadata_map.get(folder_name, {}) if metadata_map else {}
         display_name = _storyboard_name(base_name, meta)
-        start_frame = meta.get("start_frame", base_start) if meta else base_start
+        sf_meta = meta.get("start_frame", None) if meta else None
+        start_frame = sf_meta if sf_meta is not None else base_start
         storyboard = context.scene.skybrush.storyboard
         for idx, sb in enumerate(storyboard.entries):
             if sb.name == display_name:
@@ -1554,7 +1563,11 @@ class CSVVA_OT_Import(Operator):
         _apply_copyloc_handles_from_metadata(context, storyboard, entries_meta)
         try:
             entry = storyboard.entries[-1]
-            entry.name = display_name
+            entry.name = (
+                f"{meta.get('id', '')}_{display_name}"
+                if meta and meta.get("id") is not None
+                else display_name
+            )
         except Exception:
             pass
         if bool(meta.get("traled", False)):
@@ -1845,7 +1858,8 @@ class CSVVA_OT_Preview(Operator):
             if meta:
                 gap_frames = _metadata_transition_duration(meta, default=gap_frames)
             display_name = _storyboard_name(base_name, meta)
-            start_frame = meta.get("start_frame", next_start) if meta else next_start
+            sf_meta = meta.get("start_frame", None) if meta else None
+            start_frame = sf_meta if sf_meta is not None else next_start
             mid_duration = max(1, int(meta.get("middur", 1) or 1))
             midpose_enabled = bool(meta.get("midpose", True))
             # Preview only; handles are informational, shaping occurs on import/update
