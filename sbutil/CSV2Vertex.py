@@ -334,27 +334,54 @@ def _hex_to_rgba(hex_str):
         return None
 
 
-_SAMPLED_TRACOLOR_PATTERN = re.compile(r"sampled_(\d+)", re.IGNORECASE)
+_SAMPLED_TRACOLOR_PATTERN = re.compile(r"(pre)?sampled_(\d+)", re.IGNORECASE)
 
 
-def _sample_count_from_tracolor(tracolor: str | None) -> int | None:
-    """Return the requested sample count from a ``tracolor`` string, if any."""
+def _sample_info_from_tracolor(tracolor: str | None) -> tuple[str | None, int | None]:
+    """Return sampling mode and count from a ``tracolor`` string if present."""
 
     if not isinstance(tracolor, str):
-        return None
+        return None, None
 
     match = _SAMPLED_TRACOLOR_PATTERN.fullmatch(tracolor.strip())
     if not match:
-        return None
+        return None, None
+
+    mode = "presampled" if match.group(1) else "sampled"
 
     try:
-        return max(1, int(match.group(1)))
+        return mode, max(1, int(match.group(2)))
     except Exception:
-        return None
+        return mode, None
 
 
-def _apply_colors_to_color_ramp(light_effect_entry, colors: list[tuple[float, float, float, float]]):
+def _colors_with_black_endpoints(colors):
+    black = (0.0, 0.0, 0.0, 1.0)
+    normalized = []
+    for color in colors or []:
+        try:
+            normalized.append(tuple(_normalize_float_sequence(color, 4, 1.0)))
+        except Exception:
+            continue
+    if not normalized:
+        normalized = [black]
+    if normalized[0] != black:
+        normalized.insert(0, black)
+    if normalized[-1] != black:
+        normalized.append(black)
+    return normalized
+
+
+def _apply_colors_to_color_ramp(
+    light_effect_entry,
+    colors: list[tuple[float, float, float, float]],
+    *,
+    black_endpoints: bool = False,
+):
     """Configure or create a color ramp on ``light_effect_entry`` using ``colors``."""
+
+    if black_endpoints:
+        colors = _colors_with_black_endpoints(colors)
 
     if not colors:
         return False
@@ -396,6 +423,92 @@ def _apply_colors_to_color_ramp(light_effect_entry, colors: list[tuple[float, fl
         elem.color = color
 
     return True
+
+
+def _apply_transition_metadata(
+    light_effect_entry,
+    meta: dict | None,
+    *,
+    ramp_colors: list[tuple[float, float, float, float]] | None = None,
+    black_endpoints: bool = False,
+):
+    """Apply transition customization stored in ``meta`` to ``light_effect_entry``."""
+
+    meta = meta or {}
+    applied_colors = None
+
+    if ramp_colors:
+        colors_to_apply = (
+            _colors_with_black_endpoints(ramp_colors)
+            if black_endpoints
+            else list(ramp_colors)
+        )
+        if _apply_colors_to_color_ramp(
+            light_effect_entry, colors_to_apply, black_endpoints=False
+        ):
+            applied_colors = [tuple(color) for color in colors_to_apply]
+
+    try:
+        fifo = meta.get("ledfifo", None)
+        if fifo is not None:
+            value = max(0.0, float(fifo))
+            if hasattr(light_effect_entry, "fade_in_duration"):
+                light_effect_entry.fade_in_duration = value
+            if hasattr(light_effect_entry, "fade_out_duration"):
+                light_effect_entry.fade_out_duration = value
+    except Exception:
+        pass
+
+    try:
+        loop_count = meta.get("ledloop", None)
+        if loop_count is not None and hasattr(light_effect_entry, "loop_count"):
+            light_effect_entry.loop_count = max(0, int(loop_count))
+    except Exception:
+        pass
+
+    try:
+        randomness = meta.get("ledrandom", None)
+        if randomness is not None and hasattr(light_effect_entry, "randomness"):
+            light_effect_entry.randomness = float(randomness)
+    except Exception:
+        pass
+
+    mode = meta.get("ledmode")
+    if mode and hasattr(light_effect_entry, "output"):
+        target_mode = str(mode).upper()
+        try:
+            items = getattr(
+                getattr(light_effect_entry, "bl_rna", None).properties.get("output", None),
+                "enum_items",
+                None,
+            )
+            valid = {item.identifier for item in items} if items else None
+            if not valid or target_mode in valid:
+                light_effect_entry.output = target_mode
+        except Exception:
+            try:
+                light_effect_entry.output = target_mode
+            except Exception:
+                pass
+
+    return applied_colors
+
+
+def _adjust_transition_timing(frame_start: int, duration: int, meta: dict | None):
+    """Adjust transition timing using ``ledsubdur`` metadata if present."""
+
+    meta = meta or {}
+    try:
+        subdur = max(0, int(meta.get("ledsubdur", 0) or 0))
+    except Exception:
+        subdur = 0
+
+    if subdur <= 0:
+        return frame_start, duration
+
+    adjusted_start = int(frame_start) + int(round(subdur * 0.5))
+    adjusted_duration = max(1, int(duration) - subdur)
+    return adjusted_start, adjusted_duration
 
 
 def _sample_colors_from_cat_effect(context, candidates: list[str], sample_count: int):
@@ -1069,6 +1182,8 @@ def _create_color_light_effect(
     color,
     *,
     ramp_colors: list[tuple[float, float, float, float]] | None = None,
+    meta: dict | None = None,
+    black_endpoints: bool = False,
 ):
     """Create a simple COLOR_RAMP light effect with a flat color."""
 
@@ -1112,6 +1227,14 @@ def _create_color_light_effect(
     except Exception:
         return None
 
+    if le_entry:
+        _apply_transition_metadata(
+            le_entry,
+            meta,
+            ramp_colors=ramp_colors if ramp_colors else [color],
+            black_endpoints=black_endpoints,
+        )
+
     return le_entry
 
 
@@ -1119,10 +1242,13 @@ def _apply_pending_sampled_transitions(
     context,
     candidates: set[str],
     pending: list[dict],
+    *,
+    color_cache: dict[str, list[tuple[float, float, float, float]]] | None = None,
 ):
     """Apply color ramp updates for transitions waiting on CAT colors."""
 
     remaining = []
+    last_applied_colors = None
     for item in pending:
         target_candidates = item.get("target_candidates", set())
         if not candidates.intersection(target_candidates):
@@ -1131,6 +1257,7 @@ def _apply_pending_sampled_transitions(
 
         transition_name = item.get("transition_name")
         sample_count = item.get("sample_count")
+        black_edges = bool(item.get("black_edges", False))
         if not transition_name or not sample_count:
             continue
 
@@ -1146,9 +1273,18 @@ def _apply_pending_sampled_transitions(
             remaining.append(item)
             continue
 
-        _apply_colors_to_color_ramp(le_entry, colors)
+        _apply_transition_metadata(
+            le_entry,
+            item.get("meta"),
+            ramp_colors=colors,
+            black_endpoints=black_edges,
+        )
+        last_applied_colors = _colors_with_black_endpoints(colors) if black_edges else colors
+        if color_cache is not None:
+            color_cache[transition_name] = last_applied_colors
 
     pending[:] = remaining
+    return last_applied_colors
 
 
 def _find_light_effect_entry(scene, name: str):
@@ -1551,6 +1687,8 @@ class CSVVA_OT_Import(Operator):
             next_start = base_start
             key_data_collection = []
             pending_sampled_transitions: list[dict] = []
+            transition_color_cache: dict[str, list[tuple[float, float, float, float]]] = {}
+            last_transition_colors: list[tuple[float, float, float, float]] | None = None
             for idx, d in enumerate(ordered_subdirs):
                 sub_path = os.path.join(folder, d)
                 base_name, gap_frames = split_name_and_gap(d, context.scene.render.fps)
@@ -1563,7 +1701,7 @@ class CSVVA_OT_Import(Operator):
                 mid_handle = _metadata_handle(meta, "mhandle", None)
                 traled = bool(meta.get("traled", False))
                 tracolor_value = meta.get("tracolor")
-                sample_count = _sample_count_from_tracolor(tracolor_value)
+                sample_mode, sample_count = _sample_info_from_tracolor(tracolor_value)
                 tracolor = _hex_to_rgba(tracolor_value) or (1.0, 1.0, 1.0, 1.0)
                 next_meta = (
                     metadata_map.get(ordered_subdirs[idx + 1], {})
@@ -1590,9 +1728,14 @@ class CSVVA_OT_Import(Operator):
                     if key_entries:
                         key_data_collection.append((key_entries, sf, obj, sub_path))
 
-                    _apply_pending_sampled_transitions(
-                        context, {display_name, base_name}, pending_sampled_transitions
+                    applied_colors = _apply_pending_sampled_transitions(
+                        context,
+                        {display_name, base_name},
+                        pending_sampled_transitions,
+                        color_cache=transition_color_cache,
                     )
+                    if applied_colors:
+                        last_transition_colors = applied_colors
 
                     effective_duration = dur or DEFAULT_FOLDER_DURATION
 
@@ -1628,16 +1771,33 @@ class CSVVA_OT_Import(Operator):
                     if traled and idx < len(ordered_subdirs) - 1:
                         trans_start = int(sf or 0) + int(effective_duration or 0)
                         trans_duration = max(1, int(gap_for_next or 0) + int(transition_duration or 0))
+                        trans_start, trans_duration = _adjust_transition_timing(
+                            trans_start, trans_duration, meta
+                        )
                         transition_name = f"{display_name}_TransitionLE"
-                        _create_color_light_effect(
+                        le_entry = _create_color_light_effect(
                             context,
                             transition_name,
                             trans_start,
                             trans_duration,
                             tracolor,
                             ramp_colors=[tracolor],
+                            meta=meta,
+                            black_endpoints=bool(sample_mode),
                         )
-                        if sample_count:
+                        applied_colors = None
+                        if sample_mode == "presampled":
+                            source_colors = last_transition_colors or transition_color_cache.get(
+                                transition_name
+                            )
+                            if source_colors:
+                                applied_colors = _apply_transition_metadata(
+                                    le_entry,
+                                    meta,
+                                    ramp_colors=source_colors,
+                                    black_endpoints=True,
+                                )
+                        elif sample_mode == "sampled" and sample_count:
                             next_base_name, _ = split_name_and_gap(
                                 ordered_subdirs[idx + 1], context.scene.render.fps
                             )
@@ -1650,11 +1810,22 @@ class CSVVA_OT_Import(Operator):
                                     "transition_name": transition_name,
                                     "sample_count": sample_count,
                                     "target_candidates": targets,
+                                    "black_edges": True,
+                                    "meta": meta,
                                 }
                             )
-                            _apply_pending_sampled_transitions(
-                                context, targets, pending_sampled_transitions
+                            applied_colors = _apply_pending_sampled_transitions(
+                                context,
+                                targets,
+                                pending_sampled_transitions,
+                                color_cache=transition_color_cache,
                             )
+                        else:
+                            applied_colors = [tuple(tracolor)]
+
+                        if applied_colors:
+                            transition_color_cache[transition_name] = applied_colors
+                            last_transition_colors = applied_colors
                     transition_for_next = (
                         transition_duration if idx < len(ordered_subdirs) - 1 else 0
                     )
@@ -1694,6 +1865,9 @@ class CSVVA_OT_Import(Operator):
         sf_meta = meta.get("start_frame", None) if meta else None
         start_frame = sf_meta if sf_meta is not None else base_start
         storyboard = context.scene.skybrush.storyboard
+        tracolor_value = meta.get("tracolor")
+        sample_mode, _sample_count = _sample_info_from_tracolor(tracolor_value)
+        tracolor = _hex_to_rgba(tracolor_value) or (1.0, 1.0, 1.0, 1.0)
         for idx, sb in enumerate(storyboard.entries):
             if sb.name == display_name:
                 old_obj = bpy.data.objects.get(sb.name)
@@ -1731,17 +1905,22 @@ class CSVVA_OT_Import(Operator):
         except Exception:
             pass
         if bool(meta.get("traled", False)):
-            color = _hex_to_rgba(meta.get("tracolor")) or (1.0, 1.0, 1.0, 1.0)
             duration = max(1, int(meta.get("middur", 1) or 1))
             trans_start = int(getattr(entry, "frame_start", start_frame)) + max(
                 0, int(getattr(entry, "duration", 0) or 0)
+            )
+            trans_start, duration = _adjust_transition_timing(
+                trans_start, duration, meta
             )
             _create_color_light_effect(
                 context,
                 f"{display_name}_TransitionLE",
                 trans_start,
                 duration,
-                color,
+                tracolor,
+                ramp_colors=[tracolor],
+                meta=meta,
+                black_endpoints=bool(sample_mode),
             )
         if key_entries:
             current_frame = context.scene.frame_current
@@ -2196,6 +2375,134 @@ class CSVVA_OT_Update(Operator):
         )
         return {"FINISHED"}
 
+class CSVVA_OT_ApplyTransitionMetadata(Operator):
+    bl_idname = "csvva.apply_transition_metadata"
+    bl_label = "Apply Transition Metadata"
+    bl_description = "Apply transition-related metadata to existing light effects"
+
+    def execute(self, context):
+        prefs = context.scene.csvva_props
+        folder = bpy.path.abspath(prefs.folder)
+        if not os.path.isdir(folder):
+            self.report({"ERROR"}, "Invalid CSV folder")
+            return {"CANCELLED"}
+
+        metadata_map, _metadata_defaults = load_import_metadata(folder, self.report)
+        if not metadata_map:
+            self.report({"WARNING"}, "No metadata found to apply")
+            return {"CANCELLED"}
+
+        subdirs = [d for d in sorted(os.listdir(folder)) if os.path.isdir(os.path.join(folder, d))]
+        ordered_subdirs = []
+        subdir_set = set(subdirs)
+        for key, meta in sorted(metadata_map.items(), key=lambda item: item[1]["id"]):
+            if key in subdir_set:
+                ordered_subdirs.append(key)
+            else:
+                self.report({"WARNING"}, f"No folder matched metadata key '{key}'")
+        for d in subdirs:
+            if d not in metadata_map:
+                ordered_subdirs.append(d)
+
+        pending_sampled_transitions: list[dict] = []
+        transition_color_cache: dict[str, list[tuple[float, float, float, float]]] = {}
+        last_transition_colors: list[tuple[float, float, float, float]] | None = None
+        processed = 0
+
+        for idx, d in enumerate(ordered_subdirs):
+            meta = metadata_map.get(d, {})
+            if not meta.get("traled", False):
+                continue
+
+            base_name, _gap_frames = split_name_and_gap(d, context.scene.render.fps)
+            display_name = _storyboard_name(base_name, meta)
+            applied_from_pending = _apply_pending_sampled_transitions(
+                context,
+                {display_name, base_name},
+                pending_sampled_transitions,
+                color_cache=transition_color_cache,
+            )
+            if applied_from_pending:
+                last_transition_colors = applied_from_pending
+
+            transition_name = f"{display_name}_TransitionLE"
+            le_entry = _find_light_effect_entry(context.scene, transition_name)
+            if le_entry is None:
+                self.report({"WARNING"}, f"Missing transition effect: {transition_name}")
+                continue
+
+            sample_mode, sample_count = _sample_info_from_tracolor(meta.get("tracolor"))
+            tracolor = _hex_to_rgba(meta.get("tracolor")) or (1.0, 1.0, 1.0, 1.0)
+
+            try:
+                start, duration = _adjust_transition_timing(
+                    getattr(le_entry, "frame_start", 0), getattr(le_entry, "duration", 1), meta
+                )
+                le_entry.frame_start = start
+                le_entry.duration = duration
+            except Exception:
+                pass
+
+            applied_colors = None
+            if sample_mode == "presampled":
+                source_colors = last_transition_colors or transition_color_cache.get(transition_name)
+                _apply_transition_metadata(le_entry, meta)
+                if source_colors:
+                    applied_colors = _apply_transition_metadata(
+                        le_entry,
+                        meta,
+                        ramp_colors=source_colors,
+                        black_endpoints=True,
+                    )
+            elif sample_mode == "sampled" and sample_count:
+                _apply_transition_metadata(le_entry, meta)
+                if idx < len(ordered_subdirs) - 1:
+                    next_base_name, _ = split_name_and_gap(
+                        ordered_subdirs[idx + 1], context.scene.render.fps
+                    )
+                    next_display_name = _storyboard_name(
+                        next_base_name, metadata_map.get(ordered_subdirs[idx + 1], {})
+                    )
+                    targets = {next_display_name, next_base_name}
+                    pending_sampled_transitions.append(
+                        {
+                            "transition_name": transition_name,
+                            "sample_count": sample_count,
+                            "target_candidates": targets,
+                            "black_edges": True,
+                            "meta": meta,
+                        }
+                    )
+                    applied_colors = _apply_pending_sampled_transitions(
+                        context,
+                        targets,
+                        pending_sampled_transitions,
+                        color_cache=transition_color_cache,
+                    )
+            else:
+                applied_colors = _apply_transition_metadata(
+                    le_entry,
+                    meta,
+                    ramp_colors=[tracolor],
+                    black_endpoints=bool(sample_mode),
+                )
+
+            if applied_colors:
+                transition_color_cache[transition_name] = applied_colors
+                last_transition_colors = applied_colors
+
+            processed += 1
+
+        if processed == 0:
+            self.report({"WARNING"}, "No transition metadata applied")
+            return {"CANCELLED"}
+
+        if pending_sampled_transitions:
+            self.report({"INFO"}, "Some sampled transitions will update after target effects are available")
+
+        return {"FINISHED"}
+
+
 class CSVVA_PT_UI(Panel):
     bl_label = "CSV Vertex Anim"
     bl_idname = "CSVVA_PT_UI"
@@ -2227,6 +2534,7 @@ class CSVVA_PT_UI(Panel):
         row = col.row(align=True)
         row.operator(CSVVA_OT_PackImages.bl_idname, icon="PACKAGE")
         row.operator(CSVVA_OT_UnpackImages.bl_idname, icon="FILE_IMAGE")
+        col.operator(CSVVA_OT_ApplyTransitionMetadata.bl_idname, icon="KEYFRAME_HLT")
         col.operator(CSVVA_OT_Update.bl_idname, icon="FILE_REFRESH")
 
 
@@ -2242,6 +2550,7 @@ classes = (
     CSVVA_OT_PackImages,
     CSVVA_OT_UnpackImages,
     CSVVA_OT_Preview,
+    CSVVA_OT_ApplyTransitionMetadata,
     CSVVA_OT_Update,
     CSVVA_PT_UI,
 )
