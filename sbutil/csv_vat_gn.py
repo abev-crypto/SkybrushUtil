@@ -87,10 +87,30 @@ def build_vat_images_from_tracks(
     if not tracks:
         raise RuntimeError("No CSV tracks supplied for VAT generation")
 
-    max_t_ms = max(tr["data"][-1]["t_ms"] for tr in tracks if tr["data"])
+    # Normalize times to start at the earliest sample so VAT starts at the render range
+    min_t_ms = min((tr["data"][0]["t_ms"] for tr in tracks if tr.get("data")), default=0.0)
+    adjusted_tracks = []
+    for tr in tracks:
+        data = tr.get("data") or []
+        if not data:
+            adjusted_tracks.append({"name": tr.get("name", ""), "data": []})
+            continue
+        adjusted = []
+        for row in data:
+            adjusted.append(
+                {
+                    **row,
+                    "t_ms": float(row.get("t_ms", 0.0)) - float(min_t_ms),
+                }
+            )
+        adjusted_tracks.append({"name": tr.get("name", ""), "data": adjusted})
+
+    max_t_ms = max(
+        (tr["data"][-1]["t_ms"] for tr in adjusted_tracks if tr["data"]), default=0.0
+    )
     duration = int(ms_to_frame(max_t_ms, fps))
     frame_count = max(duration + 1, 1)
-    samples = _gather_samples(tracks, fps, frame_count)
+    samples = _gather_samples(adjusted_tracks, fps, frame_count)
     pos_min, pos_max = _determine_bounds(samples)
 
     drone_count = len(tracks)

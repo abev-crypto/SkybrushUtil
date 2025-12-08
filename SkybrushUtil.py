@@ -15,6 +15,7 @@ from bpy.props import BoolProperty, EnumProperty, StringProperty
 from bpy.types import Panel, Operator, PropertyGroup, AddonPreferences
 from mathutils import Vector
 import json, os, shutil, tempfile, urllib.request
+from decimal import Decimal, ROUND_HALF_UP
 from typing import Iterable
 from sbstudio.plugin.operators import RecalculateTransitionsOperator
 from sbstudio.plugin.operators.base import StoryboardOperator
@@ -209,6 +210,17 @@ def _gather_drone_objects_for_export(collection) -> list:
     drones = list(_iter_drone_mesh_objects(collection)) if collection else []
     return sorted(drones, key=lambda obj: getattr(obj, "name", ""))
 
+_POSITION_QUANTUM = Decimal("0.00001")
+
+def _round_position_value(value: float) -> float:
+    try:
+        return float(
+            Decimal(str(value)).quantize(_POSITION_QUANTUM, rounding=ROUND_HALF_UP)
+        )
+    except Exception:
+        return round(float(value), 5)
+
+
 
 def _color_to_255(color) -> tuple[float, float, float]:
     if not color:
@@ -236,7 +248,8 @@ def _build_tracks_from_scene(
         if view_layer is not None:
             view_layer.update()
 
-        t_ms = ((frame - frame_start) / fps) * 1000.0
+        # Use absolute scene time so VAT starts at the render range start, not frame 0
+        t_ms = (frame / fps) * 1000.0
         if time_sec is not None:
             try:
                 t_ms = float(time_sec) * 1000.0
@@ -293,20 +306,15 @@ def _export_vat_cat(
     vat_base = f"{name}_VAT_{bounds_suffix}"
 
     pos_img.name = f"{vat_base}_Pos"
-    vat_color_img.name = f"{vat_base}_Color"
-
-    cat_img = vat_color_img.copy()
-    cat_img.name = f"{name}_CAT"
+    vat_color_img.name = f"{name}_Color"
 
     pos_path = os.path.join(export_dir, f"{pos_img.name}.exr")
     vat_color_path = os.path.join(export_dir, f"{vat_color_img.name}.png")
-    cat_path = os.path.join(export_dir, f"{cat_img.name}.png")
 
     CSV2Vertex._save_image(pos_img, pos_path, "OPEN_EXR")
     CSV2Vertex._save_image(vat_color_img, vat_color_path, "PNG")
-    CSV2Vertex._save_image(cat_img, cat_path, "PNG")
 
-    return True, f"VAT: {os.path.basename(pos_path)}, {os.path.basename(vat_color_path)} | CAT: {os.path.basename(cat_path)}"
+    return True, f"VAT: {os.path.basename(pos_path)}, {os.path.basename(vat_color_path)}"
 
 # -------------------------------
 # LightEffect Export Helpers
@@ -646,7 +654,7 @@ class SBUTIL_OT_ExportStoryboardBatch(Operator):
                     return {'CANCELLED'}
             else:
                 success, message = _export_vat_cat(
-                    context, item.name, start, end, export_dir=base_dir
+                    context, item.name, scene.frame_start, scene.frame_end, export_dir=base_dir
                 )
                 if not success:
                     self.report({'ERROR'}, message)

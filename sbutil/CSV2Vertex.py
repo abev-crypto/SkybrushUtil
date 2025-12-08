@@ -594,17 +594,15 @@ def _find_vat_cat_set(folder: str):
             continue
 
         color_candidate = os.path.join(
-            folder, f"{base_name}_VAT_{bounds_suffix}_Color.png"
+            folder, f"{base_name}_Color.png"
         )
-        cat_candidate = os.path.join(folder, f"{base_name}_CAT.png")
         pos_path = os.path.join(folder, filename)
 
-        if os.path.isfile(color_candidate) and os.path.isfile(cat_candidate):
+        if os.path.isfile(color_candidate):
             return {
                 "base_name": base_name,
                 "pos_path": pos_path,
                 "color_path": color_candidate,
-                "cat_path": cat_candidate,
                 "pos_min": bounds[0],
                 "pos_max": bounds[1],
             }
@@ -617,15 +615,12 @@ def _load_vat_assets(folder: str):
     if not found:
         return None
 
-    try:
-        pos_img = bpy.data.images.load(found["pos_path"])
-        color_img = bpy.data.images.load(found["color_path"])
-        cat_img = bpy.data.images.load(found["cat_path"])
-    except Exception:
-        return None
+    
+    pos_img = bpy.data.images.load(found["pos_path"])
+    color_img = bpy.data.images.load(found["color_path"])
 
     duration = max(int(getattr(pos_img, "size", (1,))[0] or 1) - 1, 0)
-    return pos_img, color_img, cat_img, found["pos_min"], found["pos_max"], duration
+    return pos_img, color_img, found["pos_min"], found["pos_max"], duration
 
 
 def calculate_duration_from_tracks(tracks, fps):
@@ -635,6 +630,19 @@ def calculate_duration_from_tracks(tracks, fps):
         return 0
     max_t_ms = max(tr["data"][-1]["t_ms"] for tr in tracks if tr["data"])
     return int(ms_to_frame(max_t_ms, fps))
+
+
+def _has_vat_cat_images(folder: str) -> bool:
+    """Return True if the folder appears to contain VAT/CAT images."""
+
+    names = os.listdir(folder)
+
+    for name in names:
+        lower = name.lower()
+        if lower.endswith(".exr") or lower.endswith(".png"):
+            if "vat" in lower or lower.endswith("_Color.png") or "_vat_" in lower:
+                return True
+    return False
 
 
 def tracks_to_keydata(tracks, fps):
@@ -1503,7 +1511,7 @@ def import_csv_folder(
 
 
     if vat_assets is not None:
-        pos_img, color_img, cat_img, pos_min, pos_max, duration = vat_assets
+        pos_img, color_img, pos_min, pos_max, duration = vat_assets
         obj = csv_vat_gn.create_vat_animation_from_images(
             pos_img,
             color_img,
@@ -1512,7 +1520,7 @@ def import_csv_folder(
             start_frame=start_frame,
             base_name=f"{folder_name}_CSV",
         )
-        color_image_for_le = cat_img or color_img
+        color_image_for_le = color_img
         key_entries = None
     else:
         # Determine total animation duration strictly from the CSV content
@@ -2151,21 +2159,16 @@ class CSVVA_OT_GenerateImages(Operator):
             _save_image(pos_img, pos_path, "OPEN_EXR")
             _save_image(vat_col_img, vat_color_path, "PNG")
 
-            cat_img = vat_col_img.copy()
-            cat_img.name = f"{item.name}_CAT"
-            cat_path = os.path.join(export_dir, f"{cat_img.name}.png")
-            _save_image(cat_img, cat_path, "PNG")
-
-            created.append((item.name, pos_path, vat_color_path, cat_path))
+            created.append((item.name, pos_path, vat_color_path))
 
         if not created:
             self.report({"ERROR"}, "No images were generated")
             return {"CANCELLED"}
 
         details = []
-        for name, pos_path, vat_color_path, cat_path in created:
+        for name, pos_path, vat_color_path in created:
             details.append(
-                f"{name}: VAT Pos -> {os.path.basename(pos_path)}, VAT Color -> {os.path.basename(vat_color_path)}, CAT -> {os.path.basename(cat_path)}"
+                f"{name}: VAT Pos -> {os.path.basename(pos_path)}, VAT Color -> {os.path.basename(vat_color_path)}"
             )
         self.report({"INFO"}, " | ".join(details))
         return {"FINISHED"}
@@ -2293,6 +2296,12 @@ class CSVVA_OT_Preview(Operator):
 
             tracks = build_tracks_from_folder(path)
             duration = calculate_duration_from_tracks(tracks, fps)
+            if duration == 0:
+                vat_assets = _load_vat_assets(path)
+                if vat_assets is not None:
+                    duration = vat_assets[4]
+                elif _has_vat_cat_images(path):
+                    duration = DEFAULT_FOLDER_DURATION
             if duration == 0:
                 continue
 
