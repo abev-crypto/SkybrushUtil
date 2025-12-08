@@ -11,24 +11,29 @@ bl_info = {
 import bpy
 import importlib
 from bpy.app.handlers import persistent
-from bpy.props import BoolProperty, StringProperty
+from bpy.props import BoolProperty, EnumProperty, StringProperty
 from bpy.types import Panel, Operator, PropertyGroup, AddonPreferences
 from mathutils import Vector
 import json, os, shutil, tempfile, urllib.request
+from typing import Iterable
 from sbstudio.plugin.operators import RecalculateTransitionsOperator
 from sbstudio.plugin.operators.base import StoryboardOperator
 from sbstudio.plugin.constants import Collections
+from sbstudio.plugin.utils.sampling import each_frame_in
+
+from sbutil import CSV2Vertex
 from sbutil import formation_patch
 from sbutil import light_effects as light_effects_patch
 from sbutil import light_effects_result_patch
 from sbutil import recalculate_transitions_patch
-from sbutil import CSV2Vertex
 from sbutil import drone_mesh_gn
 from sbutil import reflow_vertex
 from sbutil import drone_check_gn
 from sbutil import view_setup
 from sbutil import storyboard_patch
 from sbutil.copyloc_utils import shape_copyloc_influence_curve
+from sbutil.csv_vat_gn import build_vat_images_from_tracks
+from sbutil.light_effects import _get_emission_color
 
 try:  # pragma: no cover - depends on sbstudio
     from sbstudio.plugin.operators.safety_check import RunFullProximityCheckOperator
@@ -199,6 +204,110 @@ def _iter_drone_mesh_objects(collection):
         if getattr(obj, "type", None) == 'MESH':
             yield obj
 
+
+def _gather_drone_objects_for_export(collection) -> list:
+    drones = list(_iter_drone_mesh_objects(collection)) if collection else []
+    return sorted(drones, key=lambda obj: getattr(obj, "name", ""))
+
+
+def _color_to_255(color) -> tuple[float, float, float]:
+    if not color:
+        return (0.0, 0.0, 0.0)
+    return tuple(float(channel) * 255.0 for channel in color[:3])
+
+
+def _build_tracks_from_scene(
+    context,
+    frame_start: int,
+    frame_end: int,
+    drones: Iterable,
+    fps: float,
+):
+    scene = context.scene
+    view_layer = context.view_layer
+    original_frame = scene.frame_current
+    drones = list(drones)
+    tracks = [{"name": obj.name, "data": []} for obj in drones]
+
+    for frame, time_sec in each_frame_in(
+        range(frame_start, frame_end + 1), context=context, redraw=True
+    ):
+        scene.frame_set(frame)
+        if view_layer is not None:
+            view_layer.update()
+
+        t_ms = ((frame - frame_start) / fps) * 1000.0
+        if time_sec is not None:
+            try:
+                t_ms = float(time_sec) * 1000.0
+            except Exception:
+                pass
+
+        for idx, obj in enumerate(drones):
+            try:
+                location = obj.matrix_world.translation
+            except Exception:
+                continue
+            color = _color_to_255(_get_emission_color(obj))
+            tracks[idx]["data"].append(
+                {
+                    "t_ms": t_ms,
+                    "x": float(location.x),
+                    "y": float(location.y),
+                    "z": float(location.z),
+                    "r": color[0],
+                    "g": color[1],
+                    "b": color[2],
+                }
+            )
+
+    scene.frame_set(original_frame)
+    if view_layer is not None:
+        view_layer.update()
+
+    return tracks
+
+
+def _export_vat_cat(
+    context,
+    name: str,
+    frame_start: int,
+    frame_end: int,
+    export_dir: str,
+):
+    collection = _find_drone_collection()
+    drones = _gather_drone_objects_for_export(collection)
+    if not drones:
+        return False, "No drone meshes found for VAT/CAT export"
+
+    fps = 24.0
+    tracks = _build_tracks_from_scene(context, frame_start, frame_end, drones, fps)
+    if not any(tr["data"] for tr in tracks):
+        return False, "No animation data captured for VAT/CAT export"
+
+    pos_img, vat_color_img, pos_min, pos_max, _duration, _drone_count = (
+        build_vat_images_from_tracks(tracks, fps, image_name_prefix=f"{name}_VAT")
+    )
+
+    bounds_suffix = CSV2Vertex._format_bounds_suffix(pos_min, pos_max)
+    vat_base = f"{name}_VAT_{bounds_suffix}"
+
+    pos_img.name = f"{vat_base}_Pos"
+    vat_color_img.name = f"{vat_base}_Color"
+
+    cat_img = vat_color_img.copy()
+    cat_img.name = f"{name}_CAT"
+
+    pos_path = os.path.join(export_dir, f"{pos_img.name}.exr")
+    vat_color_path = os.path.join(export_dir, f"{vat_color_img.name}.png")
+    cat_path = os.path.join(export_dir, f"{cat_img.name}.png")
+
+    CSV2Vertex._save_image(pos_img, pos_path, "OPEN_EXR")
+    CSV2Vertex._save_image(vat_color_img, vat_color_path, "PNG")
+    CSV2Vertex._save_image(cat_img, cat_path, "PNG")
+
+    return True, f"VAT: {os.path.basename(pos_path)}, {os.path.basename(vat_color_path)} | CAT: {os.path.basename(cat_path)}"
+
 # -------------------------------
 # LightEffect Export Helpers
 # -------------------------------
@@ -351,6 +460,15 @@ class SBUTIL_StoryboardBatchSettings(bpy.types.PropertyGroup):
         name="Include Transitions",
         description="Add gaps between storyboard entries as transition ranges",
         default=True,
+    )
+    export_format: EnumProperty(
+        name="Export As",
+        description="Choose between Skybrush CSV archives or VAT/CAT textures",
+        items=(
+            ("CSV", "CSV", "Export Skybrush CSV archive files"),
+            ("VAT", "VAT/CAT", "Export VAT position/color and CAT textures"),
+        ),
+        default="CSV",
     )
 
 class TIMEBIND_UL_entries(bpy.types.UIList):
@@ -507,24 +625,33 @@ class SBUTIL_OT_ExportStoryboardBatch(Operator):
             scene.frame_end = end
             scene.frame_set(start)
 
-            filepath = os.path.join(base_dir, f"{item.name}.zip")
+            if settings.export_format == "CSV":
+                filepath = os.path.join(base_dir, f"{item.name}.zip")
 
-            try:
-                result = bpy.ops.export_scene.skybrush_csv(
-                    filepath=filepath,
-                    check_existing=False,
-                    export_selected=False,
-                    frame_range='RENDER',
-                    redraw='AUTO',
-                    output_fps=24.0,
+                try:
+                    result = bpy.ops.export_scene.skybrush_csv(
+                        filepath=filepath,
+                        check_existing=False,
+                        export_selected=False,
+                        frame_range='RENDER',
+                        redraw='AUTO',
+                        output_fps=24.0,
+                    )
+                except Exception as exc:
+                    self.report({'ERROR'}, f"Export failed for {item.name}: {exc}")
+                    return {'CANCELLED'}
+
+                if 'FINISHED' not in result:
+                    self.report({'ERROR'}, f"Export failed for {item.name}")
+                    return {'CANCELLED'}
+            else:
+                success, message = _export_vat_cat(
+                    context, item.name, start, end, export_dir=base_dir
                 )
-            except Exception as exc:
-                self.report({'ERROR'}, f"Export failed for {item.name}: {exc}")
-                return {'CANCELLED'}
-
-            if 'FINISHED' not in result:
-                self.report({'ERROR'}, f"Export failed for {item.name}")
-                return {'CANCELLED'}
+                if not success:
+                    self.report({'ERROR'}, message)
+                    return {'CANCELLED'}
+                self.report({'INFO'}, f"{item.name}: {message}")
 
             exported += 1
 
@@ -2888,6 +3015,8 @@ class SBUTIL_PT_StoryboardBatchExport(Panel):
         row = layout.row(align=True)
         row.operator(SBUTIL_OT_LoadStoryboardBatch.bl_idname, icon='FILE_REFRESH')
         row.prop(settings, "include_transitions", text="Transitions")
+        row = layout.row(align=True)
+        row.prop(settings, "export_format", expand=True)
 
         header = layout.row(align=True)
         header.label(text="")

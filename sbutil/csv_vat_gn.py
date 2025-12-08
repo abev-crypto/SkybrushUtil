@@ -8,6 +8,7 @@ import bpy
 __all__ = [
     "build_vat_images_from_tracks",
     "create_vat_animation_from_tracks",
+    "create_vat_animation_from_images",
     "update_vat_animation_for_object",
 ]
 
@@ -401,3 +402,47 @@ def create_vat_animation_from_tracks(
     _apply_gn_to_object(obj, node_group)
 
     return obj, col_img, pos_img
+
+
+def create_vat_animation_from_images(
+    pos_img,
+    col_img,
+    pos_min,
+    pos_max,
+    *,
+    start_frame: int,
+    base_name: str,
+):
+    frame_count = int(getattr(pos_img, "size", (0, 0))[0] or 0)
+    drone_count = int(getattr(pos_img, "size", (0, 0))[1] or 0)
+
+    try:
+        pixels = np.array(pos_img.pixels[:], dtype=np.float32)
+        pixels = pixels.reshape(drone_count, frame_count, 4)
+        rx = (pos_max[0] - pos_min[0]) or 1.0
+        ry = (pos_max[1] - pos_min[1]) or 1.0
+        rz = (pos_max[2] - pos_min[2]) or 1.0
+        first_positions = [
+            (
+                pos_min[0] + float(pixels[row, 0, 0]) * rx,
+                pos_min[1] + float(pixels[row, 0, 1]) * ry,
+                pos_min[2] + float(pixels[row, 0, 2]) * rz,
+            )
+            for row in range(drone_count)
+        ]
+    except Exception:
+        first_positions = None
+
+    obj = _create_drone_points_object(drone_count, base_name, first_positions)
+    node_group = _create_gn_vat_group(
+        pos_img,
+        pos_min,
+        pos_max,
+        frame_count,
+        drone_count,
+        start_frame=start_frame,
+        base_name=base_name,
+    )
+    _apply_gn_to_object(obj, node_group)
+
+    return obj
