@@ -395,11 +395,12 @@ def setup_for_collection(controller_collection: bpy.types.Collection) -> bpy.typ
 
     scene = bpy.context.scene
     render_range = get_render_range(scene)
+    vertex_count = len(controller_collection.objects)
 
     mat = create_drone_material(MATERIAL_NAME, render_range)
     gn_group = create_gn_group(GN_GROUP_NAME, controller_collection, render_range, mat)
 
-    system_obj = ensure_system_object("DroneSystem")
+    system_obj = ensure_system_object("DroneSystem", vertex_count)
     mod = system_obj.modifiers.get("DroneInstances")
     if mod is None:
         mod = system_obj.modifiers.new(name="DroneInstances", type='NODES')

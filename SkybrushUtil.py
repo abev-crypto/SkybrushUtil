@@ -194,7 +194,9 @@ def _find_drone_collection():
 def _iter_drone_mesh_objects(collection):
     objects = getattr(collection, "all_objects", None) or collection.objects
     for obj in objects:
-        if obj.type == 'MESH':
+        if obj is None:
+            continue
+        if getattr(obj, "type", None) == 'MESH':
             yield obj
 
 # -------------------------------
