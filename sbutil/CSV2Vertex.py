@@ -562,6 +562,72 @@ def build_tracks_from_folder(folder, delimiter="auto"):
     return tracks
 
 
+def _parse_bounds_suffix(suffix: str):
+    tokens = suffix.split("_")
+    if len(tokens) != 8 or tokens[0] != "Start" or tokens[4] != "End":
+        return None
+    try:
+        pos_min = (float(tokens[1]), float(tokens[2]), float(tokens[3]))
+        pos_max = (float(tokens[5]), float(tokens[6]), float(tokens[7]))
+        return pos_min, pos_max
+    except Exception:
+        return None
+
+
+def _find_vat_cat_set(folder: str):
+    for filename in os.listdir(folder):
+        name, ext = os.path.splitext(filename)
+        if ext.lower() != ".exr" or "_VAT_" not in name.upper():
+            continue
+        if not name.endswith("_Pos"):
+            continue
+
+        base_and_suffix = name.split("_VAT_", 1)
+        if len(base_and_suffix) != 2:
+            continue
+        base_name, suffix = base_and_suffix
+        if not suffix.endswith("_Pos"):
+            continue
+        bounds_suffix = suffix[: -len("_Pos")]
+        bounds = _parse_bounds_suffix(bounds_suffix)
+        if bounds is None:
+            continue
+
+        color_candidate = os.path.join(
+            folder, f"{base_name}_VAT_{bounds_suffix}_Color.png"
+        )
+        cat_candidate = os.path.join(folder, f"{base_name}_CAT.png")
+        pos_path = os.path.join(folder, filename)
+
+        if os.path.isfile(color_candidate) and os.path.isfile(cat_candidate):
+            return {
+                "base_name": base_name,
+                "pos_path": pos_path,
+                "color_path": color_candidate,
+                "cat_path": cat_candidate,
+                "pos_min": bounds[0],
+                "pos_max": bounds[1],
+            }
+
+    return None
+
+
+def _load_vat_assets(folder: str):
+    found = _find_vat_cat_set(folder)
+    if not found:
+        return None
+
+    try:
+        pos_img = bpy.data.images.load(found["pos_path"])
+        color_img = bpy.data.images.load(found["color_path"])
+        cat_img = bpy.data.images.load(found["cat_path"])
+    except Exception:
+        return None
+
+    duration = max(int(getattr(pos_img, "size", (1,))[0] or 1) - 1, 0)
+    return pos_img, color_img, cat_img, found["pos_min"], found["pos_max"], duration
+
+
 def calculate_duration_from_tracks(tracks, fps):
     """Return the duration in frames for ``tracks`` at the given ``fps``."""
 
@@ -1428,60 +1494,77 @@ def import_csv_folder(
     folder_name = os.path.basename(os.path.normpath(folder))
     folder_name, _gap = split_name_and_gap(folder_name, fps)
     tracks = build_tracks_from_folder(folder)
-    if not tracks:
+    vat_assets = None
+    color_image_for_le = None
+    if not tracks and use_vat:
+        vat_assets = _load_vat_assets(folder)
+    if not tracks and vat_assets is None:
         return None, 0, None
 
 
-    # Determine total animation duration strictly from the CSV content
-    duration = calculate_duration_from_tracks(tracks, fps)
-
-
-    # Build initial positions array
-    first_positions = []
-    for tr in tracks:
-        d0 = tr["data"][0]
-        first_positions.append((d0["x"], d0["y"], d0["z"]))
-
-    if use_vat:
-        obj, color_image, pos_image = csv_vat_gn.create_vat_animation_from_tracks(
-            tracks,
-            fps,
+    if vat_assets is not None:
+        pos_img, color_img, cat_img, pos_min, pos_max, duration = vat_assets
+        obj = csv_vat_gn.create_vat_animation_from_images(
+            pos_img,
+            color_img,
+            pos_min,
+            pos_max,
             start_frame=start_frame,
             base_name=f"{folder_name}_CSV",
-            storyboard_name=folder_name,
         )
-        export_dir = image_export_dir
-        if export_dir and pos_image is not None and color_image is not None:
-            _export_vat_images(pos_image, color_image, export_dir)
+        color_image_for_le = cat_img or color_img
         key_entries = None
-        color_image_for_le = color_image
     else:
-        # Create mesh and armature with N bones/vertices
-        # Name it after the storyboard entry + "_CSV" for clarity
-        obj = ensure_mesh_with_armature(
-            name=f"{folder_name}_CSV",
-            count=len(tracks),
-            first_positions=first_positions,
-        )
+        # Determine total animation duration strictly from the CSV content
+        duration = calculate_duration_from_tracks(tracks, fps)
 
-        # Animate bones directly with keyframes
-        arm_obj = obj.parent
-        for i, tr in enumerate(tracks):
-            pb = arm_obj.pose.bones.get(f"Bone_{i}")
-            if not pb:
-                continue
-            for row in tr["data"]:
-                frame = start_frame + ms_to_frame(row["t_ms"], fps)
-                pb.location = (row["x"], row["y"], row["z"])
-                pb.keyframe_insert(data_path="location", frame=frame)
 
-        if arm_obj.animation_data and arm_obj.animation_data.action:
-            for fcurve in arm_obj.animation_data.action.fcurves:
-                for key in fcurve.keyframe_points:
-                    key.interpolation = 'LINEAR'
+        # Build initial positions array
+        first_positions = []
+        for tr in tracks:
+            d0 = tr["data"][0]
+            first_positions.append((d0["x"], d0["y"], d0["z"]))
 
-        # Prepare color keyframe data for later application
-        key_entries = tracks_to_keydata(tracks, fps)
+        if use_vat:
+            obj, color_image, pos_image = csv_vat_gn.create_vat_animation_from_tracks(
+                tracks,
+                fps,
+                start_frame=start_frame,
+                base_name=f"{folder_name}_CSV",
+                storyboard_name=folder_name,
+            )
+            export_dir = image_export_dir
+            if export_dir and pos_image is not None and color_image is not None:
+                _export_vat_images(pos_image, color_image, export_dir)
+            key_entries = None
+            color_image_for_le = color_image
+        else:
+            # Create mesh and armature with N bones/vertices
+            # Name it after the storyboard entry + "_CSV" for clarity
+            obj = ensure_mesh_with_armature(
+                name=f"{folder_name}_CSV",
+                count=len(tracks),
+                first_positions=first_positions,
+            )
+
+            # Animate bones directly with keyframes
+            arm_obj = obj.parent
+            for i, tr in enumerate(tracks):
+                pb = arm_obj.pose.bones.get(f"Bone_{i}")
+                if not pb:
+                    continue
+                for row in tr["data"]:
+                    frame = start_frame + ms_to_frame(row["t_ms"], fps)
+                    pb.location = (row["x"], row["y"], row["z"])
+                    pb.keyframe_insert(data_path="location", frame=frame)
+
+            if arm_obj.animation_data and arm_obj.animation_data.action:
+                for fcurve in arm_obj.animation_data.action.fcurves:
+                    for key in fcurve.keyframe_points:
+                        key.interpolation = 'LINEAR'
+
+            # Prepare color keyframe data for later application
+            key_entries = tracks_to_keydata(tracks, fps)
 
     if obj is None:
         return None, duration, None
