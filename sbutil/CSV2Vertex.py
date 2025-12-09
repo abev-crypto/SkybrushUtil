@@ -558,32 +558,25 @@ def build_tracks_from_folder(folder, delimiter="auto"):
 
 def _parse_bounds_suffix(suffix: str):
     tokens = suffix.split("_")
-    if len(tokens) != 8 or tokens[0] != "Start" or tokens[4] != "End":
+    if tokens[0] != "S" or tokens[4] != "E":
         return None
-    try:
-        pos_min = (float(tokens[1]), float(tokens[2]), float(tokens[3]))
-        pos_max = (float(tokens[5]), float(tokens[6]), float(tokens[7]))
-        return pos_min, pos_max
-    except Exception:
-        return None
+    pos_min = (float(tokens[1]), float(tokens[2]), float(tokens[3]))
+    pos_max = (float(tokens[5]), float(tokens[6]), float(tokens[7]))
+    return pos_min, pos_max
 
 
 def _find_vat_cat_set(folder: str):
     for filename in os.listdir(folder):
+        print(filename)
         name, ext = os.path.splitext(filename)
-        if ext.lower() != ".exr" or "_VAT_" not in name.upper():
-            continue
-        if not name.endswith("_Pos"):
+        if ext.lower() != ".exr":
             continue
 
         base_and_suffix = name.split("_VAT_", 1)
         if len(base_and_suffix) != 2:
             continue
         base_name, suffix = base_and_suffix
-        if not suffix.endswith("_Pos"):
-            continue
-        bounds_suffix = suffix[: -len("_Pos")]
-        bounds = _parse_bounds_suffix(bounds_suffix)
+        bounds = _parse_bounds_suffix(suffix)
         if bounds is None:
             continue
 
@@ -2021,8 +2014,8 @@ def _format_bounds_suffix(pos_min, pos_max):
         return (f"{value:.3f}").rstrip("0").rstrip(".")
 
     return (
-        f"Start_{_fmt(pos_min[0])}_{_fmt(pos_min[1])}_{_fmt(pos_min[2])}_"
-        f"End_{_fmt(pos_max[0])}_{_fmt(pos_max[1])}_{_fmt(pos_max[2])}"
+        f"S_{_fmt(pos_min[0])}_{_fmt(pos_min[1])}_{_fmt(pos_min[2])}_"
+        f"E_{_fmt(pos_max[0])}_{_fmt(pos_max[1])}_{_fmt(pos_max[2])}"
     )
 
 
@@ -2066,7 +2059,7 @@ def _ensure_export_directory(report_fn, export_dir):
 def _default_image_extension(image):
     name = image.name.upper()
     file_format = getattr(image, "file_format", "").upper()
-    if "POS" in name or file_format == "OPEN_EXR":
+    if "P" in name or file_format == "OPEN_EXR":
         return ".exr"
     if file_format == "PNG":
         return ".png"
@@ -2138,7 +2131,7 @@ class CSVVA_OT_GenerateImages(Operator):
             bounds_suffix = _format_bounds_suffix(pos_min, pos_max)
             vat_base = f"{item.name}_VAT_{bounds_suffix}"
 
-            pos_img.name = f"{vat_base}_Pos"
+            pos_img.name = f"{vat_base}_P"
             vat_col_img.name = f"{vat_base}_Color"
 
             pos_path = os.path.join(export_dir, f"{pos_img.name}.exr")

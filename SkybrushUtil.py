@@ -309,8 +309,8 @@ def _export_vat_cat(
     short_name = name[:7]
     vat_base = f"{short_name}_VAT_{bounds_suffix}"
 
-    pos_img.name = f"{vat_base}_Pos"
-    vat_color_img.name = f"{name}_Color"
+    pos_img.name = f"{vat_base}"
+    vat_color_img.name = f"{short_name}_Color"
 
     pos_path = os.path.join(export_dir, f"{pos_img.name}.exr")
     vat_color_path = os.path.join(export_dir, f"{vat_color_img.name}.png")
