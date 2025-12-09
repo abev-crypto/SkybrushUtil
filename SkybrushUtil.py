@@ -281,17 +281,7 @@ def _build_tracks_from_scene(
     return tracks
 
 
-def _shorten_id(name: str, max_len: int = 60) -> str:
-    """Shorten Blender ID names to avoid silent truncation."""
 
-    if len(name) <= max_len:
-        return name
-
-    import hashlib
-
-    digest = hashlib.blake2s(name.encode("utf-8"), digest_size=3).hexdigest()
-    keep = max_len - len(digest) - 1
-    return f"{name[:keep]}_{digest}"
 
 
 def _export_vat_cat(
@@ -316,10 +306,11 @@ def _export_vat_cat(
     )
 
     bounds_suffix = CSV2Vertex._format_bounds_suffix(pos_min, pos_max)
-    vat_base = _shorten_id(f"{name}_VAT_{bounds_suffix}")
+    short_name = name[:7]
+    vat_base = f"{short_name}_VAT_{bounds_suffix}"
 
-    pos_img.name = _shorten_id(f"{vat_base}_Pos")
-    vat_color_img.name = _shorten_id(f"{name}_Color")
+    pos_img.name = f"{vat_base}_Pos"
+    vat_color_img.name = f"{name}_Color"
 
     pos_path = os.path.join(export_dir, f"{pos_img.name}.exr")
     vat_color_path = os.path.join(export_dir, f"{vat_color_img.name}.png")
