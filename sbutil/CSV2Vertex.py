@@ -6,7 +6,7 @@ from mathutils import Vector
 import numpy as np
 
 from sbutil import csv_vat_gn
-from sbutil.light_effects import OUTPUT_VERTEX_COLOR
+from sbutil.light_effects import OUTPUT_VERTEX_COLOR, _normalize_float_sequence
 
 from sbutil.color_key_utils import apply_color_keys_from_key_data
 from sbutil.copyloc_utils import shape_copyloc_influence_curve
@@ -109,7 +109,7 @@ def load_import_metadata(directory, report):
     (optional), ``middur`` (optional mid-pose duration), ``midpose`` (optional
     flag to disable mid-poses), ``fhandle`` (optional CopyLoc handle frames for
     the formation), and ``mhandle`` (optional CopyLoc handle frames for the
-    mid-pose). ``StartFrame`` can be added either at the top level or per-entry
+    mid-pose). ``startframe`` can be added either at the top level or per-entry
     to control the starting frame offset for storyboard placement.
     ``duration`` represents the transition duration leading into the formation.
     It defaults to :data:`DEFAULT_FOLDER_DURATION`, ``midlayer`` defaults to
@@ -138,11 +138,11 @@ def load_import_metadata(directory, report):
 
     # Global defaults that can be overridden by top-level keys
     default_start_frame = None
-    if "StartFrame" in data and not isinstance(data["StartFrame"], dict):
+    if "startframe" in data and not isinstance(data["startframe"], dict):
         try:
-            default_start_frame = int(data["StartFrame"])
+            default_start_frame = int(data["startframe"])
         except Exception:
-            report({"WARNING"}, "Invalid top-level StartFrame in prefix_map.json, using default")
+            report({"WARNING"}, "Invalid top-level startframe in prefix_map.json, using default")
 
     default_duration = DEFAULT_FOLDER_DURATION
     if "duration" in data and not isinstance(data["duration"], dict):
@@ -191,10 +191,25 @@ def load_import_metadata(directory, report):
     default_tracolor = None
     if "tracolor" in data and not isinstance(data["tracolor"], dict):
         default_tracolor = str(data["tracolor"])
-
-        metadata = {}
+    default_ledsubdur = 0
+    if "ledsubdur" in data and not isinstance(data["ledsubdur"], dict):
+        default_ledsubdur = str(data["ledsubdur"])
+    default_ledfifo = 0
+    if "ledfifo" in data and not isinstance(data["ledfifo"], dict):
+        default_ledfifo = str(data["ledfifo"])
+    default_ledloop = 0
+    if "ledloop" in data and not isinstance(data["ledloop"], dict):
+        default_ledloop = str(data["ledloop"])
+    default_ledmode = "LAST_COLOR"
+    if "ledmode" in data and not isinstance(data["ledmode"], dict):
+        default_ledmode = str(data["ledmode"])
+    default_ledrandom = 0
+    if "ledrandom" in data and not isinstance(data["ledrandom"], dict):
+        default_ledrandom = float(data["ledrandom"])
+    metadata = {}   
     for key, value in data.items():
-        if key in {"duration", "midlayer", "middur", "midpose", "fhandle", "mhandle", "ydepth", "StartFrame"}:
+        if key in {"duration", "midlayer", "middur", "midpose", "fhandle", "mhandle", "ydepth", "startframe", 
+                   "traled", "tracolor", "ledsubdur", "ledfifo", "ledloop", "ledmode", "ledrandom"}:
             continue
 
         if not isinstance(value, dict):
@@ -216,7 +231,12 @@ def load_import_metadata(directory, report):
         ydepth = value.get("ydepth", default_ydepth)
         traled = value.get("traled", default_traled)
         tracolor = value.get("tracolor", default_tracolor)
-        start_frame = value.get("StartFrame", default_start_frame)
+        ledsubdur = value.get("ledsubdur", default_ledsubdur)
+        ledfifo = value.get("ledfifo", default_ledfifo)
+        ledloop = value.get("ledloop", default_ledloop)
+        ledmode = value.get("ledmode", default_ledmode)
+        ledrandom = value.get("ledrandom", default_ledrandom)
+        start_frame = value.get("startframe", default_start_frame)
 
         try:
             duration = int(duration)
@@ -265,6 +285,11 @@ def load_import_metadata(directory, report):
             "ydepth": ydepth,
             "traled": traled,
             "tracolor": tracolor,
+            "ledsubdur": ledsubdur,
+            "ledfifo": ledfifo,
+            "ledloop": ledloop,
+            "ledmode": ledmode,
+            "ledrandom": ledrandom,
             "start_frame": start_frame,
         }
 
@@ -359,10 +384,7 @@ def _colors_with_black_endpoints(colors):
     black = (0.0, 0.0, 0.0, 1.0)
     normalized = []
     for color in colors or []:
-        try:
-            normalized.append(tuple(_normalize_float_sequence(color, 4, 1.0)))
-        except Exception:
-            continue
+        normalized.append(tuple(_normalize_float_sequence(color, 4, 1.0)))
     if not normalized:
         normalized = [black]
     if normalized[0] != black:
@@ -448,48 +470,26 @@ def _apply_transition_metadata(
         ):
             applied_colors = [tuple(color) for color in colors_to_apply]
 
-    try:
-        fifo = meta.get("ledfifo", None)
-        if fifo is not None:
-            value = max(0.0, float(fifo))
-            if hasattr(light_effect_entry, "fade_in_duration"):
-                light_effect_entry.fade_in_duration = value
-            if hasattr(light_effect_entry, "fade_out_duration"):
-                light_effect_entry.fade_out_duration = value
-    except Exception:
-        pass
+    fifo = meta.get("ledfifo", None)
+    if fifo is not None:
+        value = max(0.0, float(fifo))
+        if hasattr(light_effect_entry, "fade_in_duration"):
+            light_effect_entry.fade_in_duration = int(value)
+        if hasattr(light_effect_entry, "fade_out_duration"):
+            light_effect_entry.fade_out_duration = int(value)
 
-    try:
-        loop_count = meta.get("ledloop", None)
-        if loop_count is not None and hasattr(light_effect_entry, "loop_count"):
-            light_effect_entry.loop_count = max(0, int(loop_count))
-    except Exception:
-        pass
+    loop_count = meta.get("ledloop", None)
+    if loop_count is not None and hasattr(light_effect_entry, "loop_count"):
+        light_effect_entry.loop_count = max(0, int(loop_count))
 
-    try:
-        randomness = meta.get("ledrandom", None)
-        if randomness is not None and hasattr(light_effect_entry, "randomness"):
-            light_effect_entry.randomness = float(randomness)
-    except Exception:
-        pass
+    randomness = meta.get("ledrandom", None)
+    if randomness is not None and hasattr(light_effect_entry, "randomness"):
+        light_effect_entry.randomness = float(randomness)
 
     mode = meta.get("ledmode")
     if mode and hasattr(light_effect_entry, "output"):
-        target_mode = str(mode).upper()
-        try:
-            items = getattr(
-                getattr(light_effect_entry, "bl_rna", None).properties.get("output", None),
-                "enum_items",
-                None,
-            )
-            valid = {item.identifier for item in items} if items else None
-            if not valid or target_mode in valid:
-                light_effect_entry.output = target_mode
-        except Exception:
-            try:
-                light_effect_entry.output = target_mode
-            except Exception:
-                pass
+        light_effect_entry.output = mode
+            
 
     return applied_colors
 
@@ -498,10 +498,7 @@ def _adjust_transition_timing(frame_start: int, duration: int, meta: dict | None
     """Adjust transition timing using ``ledsubdur`` metadata if present."""
 
     meta = meta or {}
-    try:
-        subdur = max(0, int(meta.get("ledsubdur", 0) or 0))
-    except Exception:
-        subdur = 0
+    subdur = max(0, int(meta.get("ledsubdur", 0) or 0))
 
     if subdur <= 0:
         return frame_start, duration
@@ -521,10 +518,7 @@ def _sample_colors_from_cat_effect(context, candidates: list[str], sample_count:
         if image is None:
             continue
 
-        try:
-            pixels = np.array(image.pixels[:], dtype=float)
-        except Exception:
-            continue
+        pixels = np.array(image.pixels[:], dtype=float)
 
         if pixels.size == 0:
             continue
@@ -1261,45 +1255,39 @@ def _create_color_light_effect(
 ):
     """Create a simple COLOR_RAMP light effect with a flat color."""
 
-    try:
-        skybrush = getattr(context.scene, "skybrush", None)
-        light_effects = getattr(skybrush, "light_effects", None)
-        entries = getattr(light_effects, "entries", None)
-        if entries is None:
-            return None
-
-        append_entry = getattr(light_effects, "append_new_entry", None)
-        le_entry = None
-        if callable(append_entry):
-            try:
-                le_entry = append_entry(
-                    name,
-                    frame_start=int(frame_start),
-                    duration=int(duration),
-                    select=False,
-                    context=context,
-                )
-            except Exception:
-                le_entry = None
-
-        if le_entry is None:
-            le_entry = entries.add()
-            le_entry.name = name
-            le_entry.frame_start = int(frame_start)
-            le_entry.duration = int(duration)
-            if hasattr(le_entry, "type"):
-                le_entry.type = "COLOR_RAMP"
-            tex = getattr(le_entry, "texture", None)
-            if tex is None:
-                tex = bpy.data.textures.new(name=f"{name}_ColorTex", type="IMAGE")
-                le_entry.texture = tex
-        else:
-            tex = getattr(le_entry, "texture", None)
-        _apply_colors_to_color_ramp(
-            le_entry, ramp_colors if ramp_colors else [color]
-        )
-    except Exception:
+    skybrush = getattr(context.scene, "skybrush", None)
+    light_effects = getattr(skybrush, "light_effects", None)
+    entries = getattr(light_effects, "entries", None)
+    if entries is None:
         return None
+
+    append_entry = getattr(light_effects, "append_new_entry", None)
+    le_entry = None
+    if callable(append_entry):
+        le_entry = append_entry(
+            name,
+            frame_start=int(frame_start),
+            duration=int(duration),
+            select=False,
+            context=context,
+        )
+
+    if le_entry is None:
+        le_entry = entries.add()
+        le_entry.name = name
+        le_entry.frame_start = int(frame_start)
+        le_entry.duration = int(duration)
+        if hasattr(le_entry, "type"):
+            le_entry.type = "COLOR_RAMP"
+        tex = getattr(le_entry, "texture", None)
+        if tex is None:
+            tex = bpy.data.textures.new(name=f"{name}_ColorTex", type="IMAGE")
+            le_entry.texture = tex
+    else:
+        tex = getattr(le_entry, "texture", None)
+    _apply_colors_to_color_ramp(
+        le_entry, ramp_colors if ramp_colors else [color]
+    )
 
     if le_entry:
         _apply_transition_metadata(
@@ -2520,20 +2508,16 @@ class CSVVA_OT_ApplyTransitionMetadata(Operator):
             transition_name = f"{display_name}_TransitionLE"
             le_entry = _find_light_effect_entry(context.scene, transition_name)
             if le_entry is None:
-                self.report({"WARNING"}, f"Missing transition effect: {transition_name}")
                 continue
 
             sample_mode, sample_count = _sample_info_from_tracolor(meta.get("tracolor"))
             tracolor = _hex_to_rgba(meta.get("tracolor")) or (1.0, 1.0, 1.0, 1.0)
 
-            try:
-                start, duration = _adjust_transition_timing(
-                    getattr(le_entry, "frame_start", 0), getattr(le_entry, "duration", 1), meta
-                )
-                le_entry.frame_start = start
-                le_entry.duration = duration
-            except Exception:
-                pass
+            start, duration = _adjust_transition_timing(
+                getattr(le_entry, "frame_start", 0), getattr(le_entry, "duration", 1), meta
+            )
+            le_entry.frame_start = start
+            le_entry.duration = duration
 
             applied_colors = None
             if sample_mode == "presampled":
