@@ -2380,9 +2380,16 @@ class CSVVA_OT_Update(Operator):
                 target_start = keep_start if not item.frame_mismatch else item.start_frame
 
             tracks = build_tracks_from_folder(item.folder)
+            vat_assets = None
             duration = calculate_duration_from_tracks(tracks, fps)
             if duration == 0:
-                self.report({"WARNING"}, f"No CSV/TSV files found in {item.folder}")
+                vat_assets = _load_vat_assets(item.folder)
+                if vat_assets is not None:
+                    duration = vat_assets[4]
+                elif _has_vat_cat_images(item.folder):
+                    duration = DEFAULT_FOLDER_DURATION
+            if duration == 0:
+                self.report({"WARNING"}, f"No CSV/TSV or VAT/CAT data found in {item.folder}")
                 continue
 
             if existing_entry:
@@ -2391,23 +2398,54 @@ class CSVVA_OT_Update(Operator):
             _remove_light_effect_entries(context.scene, item.name)
             _remove_vat_images_for_storyboard(item.name)
             if existing_index is not None:
-                try:
-                    storyboard.entries.remove(existing_index)
-                except Exception:
-                    pass
+                storyboard.entries.remove(existing_index)
 
-            obj, imported_duration, key_entries = import_csv_folder(
-                context,
-                item.folder,
-                target_start,
-                use_vat=prefs.use_vat,
-                image_export_dir=export_dir,
-            )
+            entry = None
+            if vat_assets is not None and prefs.use_vat:
+                pos_img, color_img, pos_min, pos_max, duration_from_img = vat_assets
+                duration = duration_from_img or duration
+                obj = csv_vat_gn.create_vat_animation_from_images(
+                    pos_img,
+                    color_img,
+                    pos_min,
+                    pos_max,
+                    start_frame=target_start,
+                    base_name=f"{item.name}_CSV",
+                )
+                key_entries = None
+                imported_duration = duration
+                # create storyboard entry and light effect
+                bpy.ops.object.select_all(action='DESELECT')
+                obj.select_set(True)
+                context.view_layer.objects.active = obj
+                bpy.ops.skybrush.create_formation(name=obj.name, contents='SELECTED_OBJECTS')
+                bpy.ops.skybrush.append_formation_to_storyboard()
+                entry = storyboard.entries[-1]
+                entry.name = item.name
+                entry.frame_start = target_start
+                entry.duration = imported_duration or duration or 1
+                _create_light_effect_for_storyboard(
+                    context,
+                    obj,
+                    entry,
+                    effect_type="CAT",
+                    color_image=color_img,
+                    assign_mesh=False,
+                )
+            else:
+                obj, imported_duration, key_entries = import_csv_folder(
+                    context,
+                    item.folder,
+                    target_start,
+                    use_vat=prefs.use_vat,
+                    image_export_dir=export_dir,
+                )
             if not obj:
                 self.report({"WARNING"}, f"Failed to import from {item.folder}")
                 continue
 
-            entry = storyboard.entries[-1]
+            if entry is None:
+                entry = storyboard.entries[-1]
             entry_index = len(storyboard.entries) - 1
             if existing_entry is not None and existing_index is not None:
                 entry_index = min(existing_index, len(storyboard.entries) - 1)
