@@ -4352,10 +4352,7 @@ class BakeLightEffectsToCatOperator(bpy.types.Operator):  # pragma: no cover - B
                     original_blends[entries[0].as_pointer()] = getattr(
                         entries[0], "blend_mode", "NORMAL"
                     )
-                    try:
-                        entries[0].blend_mode = "NORMAL"
-                    except Exception:
-                        pass
+                    entries[0].blend_mode = "NORMAL"
 
             if hasattr(context, "view_layer") and context.view_layer is not None:
                 context.view_layer.update()
@@ -4412,10 +4409,43 @@ class BakeLightEffectsToCatOperator(bpy.types.Operator):  # pragma: no cover - B
         return {'FINISHED'}
 
 
-class BakeCurrentFrameToCatOperator(BakeLightEffectsToCatOperator):  # pragma: no cover - Blender UI
+class BakeCurrentFrameToCatOperator(bpy.types.Operator):  # pragma: no cover - Blender UI
     bl_idname = "skybrush.bake_current_frame_to_cat"
     bl_label = "Bake CAT (Frame)"
     bl_description = "Bake only the current frame's light colors into a CAT image"
+
+    scope: EnumProperty(
+        name="Scope",
+        description="Choose whether to bake only the active effect or all visible ones",
+        items=[
+            ("ACTIVE", "Active only", "Bake only the currently selected effect"),
+            (
+                "VISIBLE",
+                "All visible",
+                "Bake all light effects that are currently visible in the list",
+            ),
+        ],
+        default="ACTIVE",
+    )
+
+    def _gather_drones(self):
+        return getattr(bpy.data.collections.get("Drones"), "objects", [])
+
+    def _resolve_row_order(self, scene, drones, frame_start):
+        return list(range(len(drones)))
+
+    def _collect_colors(self, context, drones, rows, frame_start, frame_end):
+        # Reuse the helper from the main bake operator
+        op = BakeLightEffectsToCatOperator()
+        op.scope = self.scope
+        return op._collect_colors(context, drones, rows, frame_start, frame_end)
+
+    def _create_cat_entry(self, context, light_effects, entries, pixels, width, height, frame_start):
+        op = BakeLightEffectsToCatOperator()
+        op.scope = self.scope
+        return op._create_cat_entry(
+            context, light_effects, entries, pixels, width, height, frame_start
+        )
 
     def execute(self, context):
         light_effects = context.scene.skybrush.light_effects
@@ -6614,7 +6644,7 @@ def register():  # pragma: no cover - executed in Blender
     bpy.utils.register_class(BakeColorRampOperator)
     bpy.utils.register_class(BakeLightEffectToKeysOperator)
     bpy.utils.register_class(BakeLightEffectsToCatOperator)
-    bpy.utils.register_class(BakeCurrentFrameToCatOperator)
+    #bpy.utils.register_class(BakeCurrentFrameToCatOperator)
     bpy.utils.register_class(BakeMeshUVToVertexColorOperator)
     bpy.utils.register_class(GeneratePathGradientMeshOperator)
     bpy.utils.register_class(SetupFollowCurveOperator)
