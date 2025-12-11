@@ -1058,22 +1058,18 @@ def _create_slice_mid_pose(context, frame_start, base_name, *, mid_handle=None):
             pass
 
 
-def _create_midpose_slices_for_transitions(context, storyboard, plans, entries_meta):
+def _create_midpose_slices_for_transitions(context, plans, entries_meta):
     """Create mid-pose slices along transitions based on ``plans``."""
 
-    transitions = getattr(storyboard, "transitions", None)
-    if not transitions:
-        return
-
     for plan in plans:
-        idx = plan.get("transition_index")
-        if idx is None or idx >= len(transitions):
+        start = plan.get("start")
+        duration = plan.get("duration")
+        if start is None or duration is None:
             continue
 
-        transition = transitions[idx]
         try:
-            duration = int(getattr(transition, "duration", 0))
-            start = int(getattr(transition, "frame_start", 0))
+            duration = int(duration)
+            start = int(start)
         except Exception:
             continue
 
@@ -1958,9 +1954,12 @@ class CSVVA_OT_Import(Operator):
                         and not midpose_disabled
                     ):
                         if midpose_slice:
+                            trans_start = int(sf or 0) + int(effective_duration or 0) + int(gap_for_next or 0)
+                            trans_duration = int(transition_duration or 0)
                             midpose_slice_plans.append(
                                 {
-                                    "transition_index": formation_index,
+                                    "start": trans_start,
+                                    "duration": trans_duration,
                                     "base_name": display_name,
                                     "midlayer": mid_layers,
                                     "mid_handle": mid_handle,
@@ -2058,11 +2057,11 @@ class CSVVA_OT_Import(Operator):
             except Exception:
                 pass
             _apply_transition_durations(storyboard, entries_meta)
+            _apply_copyloc_handles_from_metadata(context, storyboard, entries_meta)
             if midpose_slice_plans:
                 _create_midpose_slices_for_transitions(
-                    context, storyboard, midpose_slice_plans, entries_meta
+                    context, midpose_slice_plans, entries_meta
                 )
-            _apply_copyloc_handles_from_metadata(context, storyboard, entries_meta)
             for key_entries, sf, obj, sub_path in key_data_collection:
                 current_frame = context.scene.frame_current
                 context.scene.frame_set(sf)
