@@ -6644,7 +6644,7 @@ def register():  # pragma: no cover - executed in Blender
     bpy.utils.register_class(BakeColorRampOperator)
     bpy.utils.register_class(BakeLightEffectToKeysOperator)
     bpy.utils.register_class(BakeLightEffectsToCatOperator)
-    #bpy.utils.register_class(BakeCurrentFrameToCatOperator)
+    bpy.utils.register_class(BakeCurrentFrameToCatOperator)
     bpy.utils.register_class(BakeMeshUVToVertexColorOperator)
     bpy.utils.register_class(GeneratePathGradientMeshOperator)
     bpy.utils.register_class(SetupFollowCurveOperator)
