@@ -107,15 +107,17 @@ def load_import_metadata(directory, report):
     The file is expected to contain a mapping from folder names to an object
     with the keys ``id`` (required), ``duration`` (optional), ``midlayer``
     (optional), ``middur`` (optional mid-pose duration), ``midpose`` (optional
-    flag to disable mid-poses), ``fhandle`` (optional CopyLoc handle frames for
-    the formation), and ``mhandle`` (optional CopyLoc handle frames for the
+    flag to disable mid-poses), ``midposeslice`` (optional flag to enable
+    sliced mid-pose generation), ``fhandle`` (optional CopyLoc handle frames
+    for the formation), and ``mhandle`` (optional CopyLoc handle frames for the
     mid-pose). ``startframe`` can be added either at the top level or per-entry
     to control the starting frame offset for storyboard placement.
     ``duration`` represents the transition duration leading into the formation.
     It defaults to :data:`DEFAULT_FOLDER_DURATION`, ``midlayer`` defaults to
     ``1``, ``middur`` defaults to ``1`` and ``midpose`` defaults to ``True``
     when missing, but these defaults can be overridden by top-level keys in the
-    JSON.
+    JSON. ``midposeslice`` defaults to ``False`` and follows the same override
+    rules.
     """
 
     mapping_path = os.path.join(directory, PREFIX_MAP_FILENAME)
@@ -185,6 +187,9 @@ def load_import_metadata(directory, report):
             default_mhandle = float(data["mhandle"])
         except Exception:
             report({"WARNING"}, "Invalid top-level mhandle in prefix_map.json, using default")
+    default_midposeslice = False
+    if "midposeslice" in data and not isinstance(data["midposeslice"], dict):
+        default_midposeslice = bool(data["midposeslice"])
     default_traled = False
     if "traled" in data and not isinstance(data["traled"], dict):
         default_traled = bool(data["traled"])
@@ -208,7 +213,7 @@ def load_import_metadata(directory, report):
         default_ledrandom = float(data["ledrandom"])
     metadata = {}   
     for key, value in data.items():
-        if key in {"duration", "midlayer", "middur", "midpose", "fhandle", "mhandle", "ydepth", "startframe", 
+        if key in {"duration", "midlayer", "middur", "midpose", "midposeslice", "fhandle", "mhandle", "ydepth", "startframe",
                    "traled", "tracolor", "ledsubdur", "ledfifo", "ledloop", "ledmode", "ledrandom"}:
             continue
 
@@ -226,6 +231,7 @@ def load_import_metadata(directory, report):
         midlayer = value.get("midlayer", default_midlayer)
         middur = value.get("middur", default_middur)
         midpose = value.get("midpose", default_midpose)
+        midposeslice = value.get("midposeslice", default_midposeslice)
         fhandle = value.get("fhandle", default_fhandle)
         mhandle = value.get("mhandle", default_mhandle)
         ydepth = value.get("ydepth", default_ydepth)
@@ -253,6 +259,7 @@ def load_import_metadata(directory, report):
         except Exception:
             middur = default_middur
         midpose = bool(midpose)
+        midposeslice = bool(midposeslice)
         try:
             fhandle = float(fhandle)
         except Exception:
@@ -280,6 +287,7 @@ def load_import_metadata(directory, report):
             "midlayer": midlayer,
             "middur": middur,
             "midpose": midpose,
+            "midposeslice": midposeslice,
             "fhandle": fhandle,
             "mhandle": mhandle,
             "ydepth": ydepth,
@@ -973,6 +981,122 @@ def create_grid_mid_pose(
         return entry
     except Exception:
         return None
+
+
+def _create_slice_mid_pose(context, frame_start, base_name, *, mid_handle=None):
+    """Create a mid-pose mesh from the current drone positions."""
+
+    drones = bpy.data.collections.get("Drones")
+    if not drones or not drones.objects:
+        return None
+
+    scene = context.scene
+    current_frame = scene.frame_current
+    try:
+        scene.frame_set(int(frame_start))
+    except Exception:
+        pass
+
+    positions = []
+    for obj in drones.objects:
+        try:
+            pos = obj.matrix_world.translation.copy()
+        except Exception:
+            continue
+        positions.append(Vector(pos))
+
+    if not positions:
+        try:
+            scene.frame_set(current_frame)
+        except Exception:
+            pass
+        return None
+
+    mesh = bpy.data.meshes.new(f"{base_name}_mesh")
+    mesh.from_pydata(positions, [], [])
+    mesh.update()
+
+    obj = bpy.data.objects.new(base_name, mesh)
+    bpy.context.scene.collection.objects.link(obj)
+
+    obj.rotation_euler = (0.0, 0.0, 0.0)
+    obj.location = (0.0, 0.0, 0.0)
+
+    vg = obj.vertex_groups.new(name="Drones")
+    vg.add(range(len(mesh.vertices)), 1.0, "REPLACE")
+    if hasattr(obj, "skybrush"):
+        obj.skybrush.formation_vertex_group = "Drones"
+
+    bpy.ops.object.select_all(action="DESELECT")
+    obj.select_set(True)
+    context.view_layer.objects.active = obj
+
+    meta = None
+    if mid_handle is not None:
+        meta = {"copyloc_handle": mid_handle}
+
+    try:
+        bpy.ops.skybrush.create_formation(name=obj.name, contents="SELECTED_OBJECTS")
+        bpy.ops.skybrush.append_formation_to_storyboard()
+        storyboard = context.scene.skybrush.storyboard
+        entry = storyboard.entries[-1]
+        entry.name = base_name
+        entry.frame_start = int(frame_start)
+        entry.duration = 1
+        if meta is not None:
+            try:
+                entry["metadata"] = json.dumps(meta)
+            except Exception:
+                pass
+        return entry
+    except Exception:
+        return None
+    finally:
+        try:
+            scene.frame_set(current_frame)
+        except Exception:
+            pass
+
+
+def _create_midpose_slices_for_transitions(context, storyboard, plans, entries_meta):
+    """Create mid-pose slices along transitions based on ``plans``."""
+
+    transitions = getattr(storyboard, "transitions", None)
+    if not transitions:
+        return
+
+    for plan in plans:
+        idx = plan.get("transition_index")
+        if idx is None or idx >= len(transitions):
+            continue
+
+        transition = transitions[idx]
+        try:
+            duration = int(getattr(transition, "duration", 0))
+            start = int(getattr(transition, "frame_start", 0))
+        except Exception:
+            continue
+
+        midlayer = max(1, int(plan.get("midlayer", 1) or 1))
+        if duration <= 0 or midlayer <= 0:
+            continue
+
+        step = 1.0 / (2 * midlayer)
+        fractions = [step * i for i in range(1, 2 * midlayer)]
+        base_name = plan.get("base_name", "MidPose")
+        mid_handle = plan.get("mid_handle")
+        slice_count = len(fractions)
+
+        for slice_idx, fraction in enumerate(fractions):
+            offset = max(1, int(round(duration * fraction)))
+            frame = start + offset
+            if slice_count == 1:
+                name = f"{base_name}_MidPose"
+            else:
+                name = f"{base_name}_MidPose{slice_idx + 1}_MidPose"
+            entry = _create_slice_mid_pose(context, frame, name, mid_handle=mid_handle)
+            if entry is not None:
+                entries_meta.append({"copyloc_handle": mid_handle})
 
 # ---------- Utilities for Replacement ----------
 
@@ -1761,6 +1885,7 @@ class CSVVA_OT_Import(Operator):
             pending_sampled_transitions: list[dict] = []
             transition_color_cache: dict[str, list[tuple[float, float, float, float]]] = {}
             last_transition_colors: list[tuple[float, float, float, float]] | None = None
+            midpose_slice_plans: list[dict] = []
             for idx, d in enumerate(ordered_subdirs):
                 sub_path = os.path.join(folder, d)
                 base_name, gap_frames = split_name_and_gap(d, context.scene.render.fps)
@@ -1768,6 +1893,7 @@ class CSVVA_OT_Import(Operator):
                 display_name = _storyboard_name(base_name, meta)
                 mid_layers = meta.get("midlayer", 1) or 1
                 midpose_enabled = bool(meta.get("midpose", True))
+                midpose_slice = bool(meta.get("midposeslice", False))
                 mid_duration = max(1, int(meta.get("middur", 1) or 1))
                 ydepth = meta.get("ydepth", None)
                 mid_handle = _metadata_handle(meta, "mhandle", None)
@@ -1811,6 +1937,7 @@ class CSVVA_OT_Import(Operator):
 
                     effective_duration = dur or DEFAULT_FOLDER_DURATION
 
+                    formation_index = None
                     try:
                         entry = storyboard.entries[-1]
                         entry.name = (
@@ -1820,26 +1947,41 @@ class CSVVA_OT_Import(Operator):
                         )
                         entry.duration = effective_duration
                         entries_meta.append(meta)
+                        formation_index = len(entries_meta) - 1
                     except Exception:
                         pass
 
                     gap_for_next = gap_frames if gap_frames is not None else 0
-                    if idx < len(ordered_subdirs) - 1 and not midpose_disabled:
-                        mid_offset = max(1, int(round(transition_duration * 0.5)))
-                        mid_frame = int(sf or 0) + int(effective_duration or 0) + mid_offset
-                        mid_entry = create_grid_mid_pose(
-                            context,
-                            mid_frame,
-                            base_name=f"{display_name}_MidPose",
-                            reference_obj=obj,
-                            layers=mid_layers,
-                            duration=mid_duration,
-                            meta={"copyloc_handle": mid_handle} if mid_handle is not None else None,
-                            next_bounds=next_bounds,
-                            layer_depth=ydepth,
-                        )
-                        if mid_entry:
-                            entries_meta.append({"copyloc_handle": mid_handle})
+                    if (
+                        formation_index is not None
+                        and idx < len(ordered_subdirs) - 1
+                        and not midpose_disabled
+                    ):
+                        if midpose_slice:
+                            midpose_slice_plans.append(
+                                {
+                                    "transition_index": formation_index,
+                                    "base_name": display_name,
+                                    "midlayer": mid_layers,
+                                    "mid_handle": mid_handle,
+                                }
+                            )
+                        else:
+                            mid_offset = max(1, int(round(transition_duration * 0.5)))
+                            mid_frame = int(sf or 0) + int(effective_duration or 0) + mid_offset
+                            mid_entry = create_grid_mid_pose(
+                                context,
+                                mid_frame,
+                                base_name=f"{display_name}_MidPose",
+                                reference_obj=obj,
+                                layers=mid_layers,
+                                duration=mid_duration,
+                                meta={"copyloc_handle": mid_handle} if mid_handle is not None else None,
+                                next_bounds=next_bounds,
+                                layer_depth=ydepth,
+                            )
+                            if mid_entry:
+                                entries_meta.append({"copyloc_handle": mid_handle})
                     if traled and idx < len(ordered_subdirs) - 1:
                         trans_start = int(sf or 0) + int(effective_duration or 0)
                         trans_duration = max(1, int(gap_for_next or 0) + int(transition_duration or 0))
@@ -1916,6 +2058,10 @@ class CSVVA_OT_Import(Operator):
             except Exception:
                 pass
             _apply_transition_durations(storyboard, entries_meta)
+            if midpose_slice_plans:
+                _create_midpose_slices_for_transitions(
+                    context, storyboard, midpose_slice_plans, entries_meta
+                )
             _apply_copyloc_handles_from_metadata(context, storyboard, entries_meta)
             for key_entries, sf, obj, sub_path in key_data_collection:
                 current_frame = context.scene.frame_current
