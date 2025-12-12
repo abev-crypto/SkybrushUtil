@@ -251,23 +251,17 @@ def _build_tracks_from_scene(
         # Use absolute frame counts so VAT starts at the render range start, not frame 0
         frame_value = float(frame)
         if time_sec is not None:
-            try:
-                frame_value = float(time_sec) * fps
-            except Exception:
-                pass
+            frame_value = float(time_sec) * fps
 
         for idx, obj in enumerate(drones):
-            try:
-                location = obj.matrix_world.translation
-            except Exception:
-                continue
-                color = _color_to_255(_get_emission_color(obj))
-                tracks[idx]["data"].append(
-                    {
-                        "frame": frame_value,
-                        "x": float(location.x),
-                        "y": float(location.y),
-                        "z": float(location.z),
+            location = obj.matrix_world.translation
+            color = _color_to_255(_get_emission_color(obj))
+            tracks[idx]["data"].append(
+                {
+                    "frame": frame_value,
+                    "x": float(location.x),
+                    "y": float(location.y),
+                    "z": float(location.z),
                     "r": color[0],
                     "g": color[1],
                     "b": color[2],
