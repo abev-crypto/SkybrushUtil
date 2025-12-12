@@ -2427,7 +2427,7 @@ class CSVVA_OT_Preview(Operator):
                 if vat_assets is not None:
                     duration = vat_assets[4]
                 elif _has_vat_cat_images(path):
-                    duration = DEFAULT_FOLDER_DURATION
+                    self.report({"ERROR"}, f"Could not determine VAT duration for '{folder_name}'")
             if duration == 0:
                 continue
 
