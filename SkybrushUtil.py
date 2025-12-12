@@ -248,11 +248,11 @@ def _build_tracks_from_scene(
         if view_layer is not None:
             view_layer.update()
 
-        # Use absolute scene time so VAT starts at the render range start, not frame 0
-        t_ms = (frame / fps) * 1000.0
+        # Use absolute frame counts so VAT starts at the render range start, not frame 0
+        frame_value = float(frame)
         if time_sec is not None:
             try:
-                t_ms = float(time_sec) * 1000.0
+                frame_value = float(time_sec) * fps
             except Exception:
                 pass
 
@@ -261,13 +261,13 @@ def _build_tracks_from_scene(
                 location = obj.matrix_world.translation
             except Exception:
                 continue
-            color = _color_to_255(_get_emission_color(obj))
-            tracks[idx]["data"].append(
-                {
-                    "t_ms": t_ms,
-                    "x": float(location.x),
-                    "y": float(location.y),
-                    "z": float(location.z),
+                color = _color_to_255(_get_emission_color(obj))
+                tracks[idx]["data"].append(
+                    {
+                        "frame": frame_value,
+                        "x": float(location.x),
+                        "y": float(location.y),
+                        "z": float(location.z),
                     "r": color[0],
                     "g": color[1],
                     "b": color[2],
