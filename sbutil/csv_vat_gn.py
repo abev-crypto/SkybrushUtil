@@ -17,10 +17,22 @@ def ms_to_frame(ms: float, fps: float) -> float:
     return (ms / 1000.0) * fps
 
 
+def _row_frame(row: dict, fps: float) -> float:
+    if "frame" in row:
+        try:
+            return float(row.get("frame", 0.0))
+        except Exception:
+            return 0.0
+    try:
+        return ms_to_frame(float(row.get("t_ms", 0.0)), fps)
+    except Exception:
+        return 0.0
+
+
 def _gather_samples(
     tracks: Sequence[dict], fps: float, frame_count: int
 ) -> list[dict[str, np.ndarray]]:
-    target_ms = (np.arange(frame_count, dtype=np.float32) / fps) * 1000.0
+    target_frames = np.arange(frame_count, dtype=np.float32)
     samples: list[dict[str, np.ndarray]] = []
 
     for track in tracks:
@@ -30,10 +42,12 @@ def _gather_samples(
             samples.append({key: zeros for key in ("x", "y", "z", "r", "g", "b")})
             continue
 
-        times = np.array([row["t_ms"] for row in data], dtype=np.float32)
+        times = np.array([_row_frame(row, fps) for row in data], dtype=np.float32)
 
         def _interp(values: np.ndarray) -> np.ndarray:
-            return np.interp(target_ms, times, values, left=values[0], right=values[-1])
+            return np.interp(
+                target_frames, times, values, left=values[0], right=values[-1]
+            )
 
         samples.append(
             {
@@ -87,8 +101,11 @@ def build_vat_images_from_tracks(
     if not tracks:
         raise RuntimeError("No CSV tracks supplied for VAT generation")
 
-    # Normalize times to start at the earliest sample so VAT starts at the render range
-    min_t_ms = min((tr["data"][0]["t_ms"] for tr in tracks if tr.get("data")), default=0.0)
+    # Normalize frames to start at the earliest sample so VAT starts at the render range
+    min_frame = min(
+        (_row_frame(tr["data"][0], fps) for tr in tracks if tr.get("data")),
+        default=0.0,
+    )
     adjusted_tracks = []
     for tr in tracks:
         data = tr.get("data") or []
@@ -97,18 +114,15 @@ def build_vat_images_from_tracks(
             continue
         adjusted = []
         for row in data:
-            adjusted.append(
-                {
-                    **row,
-                    "t_ms": float(row.get("t_ms", 0.0)) - float(min_t_ms),
-                }
-            )
+            frame = _row_frame(row, fps) - float(min_frame)
+            adjusted.append({**row, "frame": frame})
         adjusted_tracks.append({"name": tr.get("name", ""), "data": adjusted})
 
-    max_t_ms = max(
-        (tr["data"][-1]["t_ms"] for tr in adjusted_tracks if tr["data"]), default=0.0
+    max_frame = max(
+        (tr["data"][-1]["frame"] for tr in adjusted_tracks if tr["data"]),
+        default=0.0,
     )
-    duration = int(ms_to_frame(max_t_ms, fps))
+    duration = int(max_frame)
     frame_count = max(duration + 1, 1)
     samples = _gather_samples(adjusted_tracks, fps, frame_count)
     pos_min, pos_max = _determine_bounds(samples)
