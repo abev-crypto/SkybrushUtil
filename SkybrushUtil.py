@@ -20,7 +20,7 @@ from typing import Iterable
 from sbstudio.plugin.operators import RecalculateTransitionsOperator
 from sbstudio.plugin.operators.base import StoryboardOperator
 from sbstudio.plugin.constants import Collections
-from sbstudio.plugin.utils.sampling import each_frame_in
+from sbutil.sampling import each_frame_in
 
 from sbutil import CSV2Vertex
 from sbutil import formation_patch
@@ -241,17 +241,16 @@ def _build_tracks_from_scene(
     drones = list(drones)
     tracks = [{"name": obj.name, "data": []} for obj in drones]
 
-    for frame, time_sec in each_frame_in(
-        range(frame_start, frame_end + 1), context=context, redraw=True
+    for offset, (frame, _) in enumerate(
+        each_frame_in(range(frame_start, frame_end + 1), context=context, redraw=True)
     ):
+        output_frame = frame_start + offset
         scene.frame_set(frame)
         if view_layer is not None:
             view_layer.update()
 
-        # Use absolute frame counts so VAT starts at the render range start, not frame 0
-        frame_value = float(frame)
-        if time_sec is not None:
-            frame_value = float(time_sec) * fps
+        # Use sequential output frames so the loop tail lands after frame_end.
+        frame_value = float(output_frame)
 
         for idx, obj in enumerate(drones):
             location = obj.matrix_world.translation

@@ -51,7 +51,7 @@ from sbstudio.plugin.utils import remove_if_unused, with_context
 from sbstudio.plugin.utils.collections import pick_unique_name
 from sbstudio.plugin.utils.color_ramp import update_color_ramp_from
 from sbstudio.plugin.utils.evaluator import get_position_of_object
-from sbstudio.plugin.utils.sampling import each_frame_in
+from sbutil.sampling import each_frame_in
 from sbstudio.plugin.utils.image import convert_from_srgb_to_linear
 from sbstudio.utils import distance_sq_of, load_module
 from bpy.path import abspath as bpy_abspath
@@ -4089,14 +4089,17 @@ class BakeLightEffectToKeysOperator(bpy.types.Operator):  # pragma: no cover - B
         view_layer = context.view_layer
         inserted = False
         try:
-            for frame, _ in each_frame_in(
-                range(frame_start, frame_end + 1), context=context, redraw=True
+            for offset, _ in enumerate(
+                each_frame_in(
+                    range(frame_start, frame_end + 1), context=context, redraw=True
+                )
             ):
+                output_frame = frame_start + offset
                 if view_layer is not None:
                     view_layer.update()
                 for obj in drones:
                     try:
-                        if _insert_emission_color_keyframe(obj, frame):
+                        if _insert_emission_color_keyframe(obj, output_frame):
                             inserted = True
                     except Exception as exc:  # pragma: no cover - Blender runtime
                         raise RuntimeError(str(exc)) from exc
@@ -4242,12 +4245,17 @@ class BakeLightEffectsToCatOperator(bpy.types.Operator):  # pragma: no cover - B
         scene = context.scene
         view_layer = context.view_layer
         original_frame = scene.frame_current
-        width = frame_end - frame_start + 1
+        base_width = max(frame_end - frame_start + 1, 0)
+        # Add loop-tail columns for the repeated 0F/1F samples.
+        tail_width = min(2, base_width)
+        width = base_width + tail_width
         height = len(rows)
         data = np.zeros((height, width, 4), dtype=np.float32)
         print(drones)
         print(rows)
-        for column, (frame, time) in enumerate(each_frame_in(range(frame_start, frame_end + 1), context=context, redraw=True)):
+        for column, (frame, _) in enumerate(
+            each_frame_in(range(frame_start, frame_end + 1), context=context, redraw=True)
+        ):
             scene.frame_set(frame)
             if view_layer is not None:
                 view_layer.update()
