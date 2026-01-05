@@ -2797,7 +2797,7 @@ def try_patch():
             return None
         patch_recalculate_operator()
         patch_storyboard_panel_extras()
-        #recalculate_transitions_patch.patch_recalculate_transitions()
+        recalculate_transitions_patch.patch_recalculate_transitions()
         formation_patch.patch_create_formation_operator()
         storyboard_patch.patch_storyboard_entry_removal()
         light_effects_patch.patch_light_effect_collection()
@@ -2825,7 +2825,7 @@ def _on_load_post(_dummy):
 def _restore_originals():
     try:
         unpatch_recalculate_operator()
-        #recalculate_transitions_patch.unpatch_recalculate_transitions()
+        recalculate_transitions_patch.unpatch_recalculate_transitions()
         formation_patch.unpatch_create_formation_operator()
         storyboard_patch.unpatch_storyboard_entry_removal()
         unpatch_storyboard_panel_extras()

@@ -8,7 +8,13 @@ from __future__ import annotations
 
 from functools import partial
 import json
+import math
 from typing import Callable, List, Mapping, Optional
+
+try:  # pragma: no cover - optional dependency
+    import numpy as np
+except Exception:  # pragma: no cover - allows import without NumPy
+    np = None
 
 try:  # pragma: no cover - Blender dependency
     import bpy
@@ -30,6 +36,127 @@ __all__ = (
     "patch_recalculate_transitions",
     "unpatch_recalculate_transitions",
 )
+
+
+def _points_to_array(points):
+    return np.array([tuple(point) for point in points], dtype=float)
+
+
+def _linear_sum_assignment(cost_matrix):
+    n_rows = len(cost_matrix)
+    if n_rows == 0:
+        return []
+    n_cols = len(cost_matrix[0])
+    if n_cols == 0:
+        return []
+
+    u = [0.0] * (n_rows + 1)
+    v = [0.0] * (n_cols + 1)
+    p = [0] * (n_cols + 1)
+    way = [0] * (n_cols + 1)
+
+    for i in range(1, n_rows + 1):
+        p[0] = i
+        j0 = 0
+        minv = [math.inf] * (n_cols + 1)
+        used = [False] * (n_cols + 1)
+        while True:
+            used[j0] = True
+            i0 = p[j0]
+            delta = math.inf
+            j1 = 0
+            row = cost_matrix[i0 - 1]
+            for j in range(1, n_cols + 1):
+                if used[j]:
+                    continue
+                cur = row[j - 1] - u[i0] - v[j]
+                if cur < minv[j]:
+                    minv[j] = cur
+                    way[j] = j0
+                if minv[j] < delta:
+                    delta = minv[j]
+                    j1 = j
+            for j in range(n_cols + 1):
+                if used[j]:
+                    u[p[j]] += delta
+                    v[j] -= delta
+                else:
+                    minv[j] -= delta
+            j0 = j1
+            if p[j0] == 0:
+                break
+        while True:
+            j1 = way[j0]
+            p[j0] = p[j1]
+            j0 = j1
+            if j0 == 0:
+                break
+
+    assignment = [-1] * n_rows
+    for j in range(1, n_cols + 1):
+        if p[j] != 0:
+            assignment[p[j] - 1] = j - 1
+    return assignment
+
+
+def _match_points_hungarian(source, target):
+    if np is None:
+        raise RuntimeError("NumPy is required for local point matching.")
+    source_list = list(source)
+    target_list = list(target)
+    num_sources = len(source_list)
+    num_targets = len(target_list)
+
+    if num_sources == 0 or num_targets == 0:
+        return [None] * num_targets
+
+    source_points = _points_to_array(source_list)
+    target_points = _points_to_array(target_list)
+
+    diff = target_points[:, None, :] - source_points[None, :, :]
+    cost_matrix = np.sum(diff * diff, axis=2)
+
+    if num_targets <= num_sources:
+        assignment = _linear_sum_assignment(cost_matrix.tolist())
+        return [int(idx) if idx >= 0 else None for idx in assignment]
+
+    assignment = _linear_sum_assignment(cost_matrix.T.tolist())
+    match = [None] * num_targets
+    for source_index, target_index in enumerate(assignment):
+        if target_index >= 0:
+            match[target_index] = source_index
+    return match
+
+
+def _patched_calculate_mapping_for_transition_into_storyboard_entry(
+    entry: _rct.StoryboardEntry, source, *, num_targets: int
+) -> Mapping:  # pragma: no cover - depends on sbstudio/blender
+    formation = entry.formation
+    if formation is None:
+        raise RuntimeError(
+            "mapping function called for storyboard entry with no formation"
+        )
+
+    num_drones = len(source)
+    result: Mapping = [None] * num_drones
+
+    if entry.transition_type == "AUTO":
+        target = _rct.get_coordinates_of_formation(formation, frame=entry.frame_start)
+        match = _match_points_hungarian(source, target)
+        if len(match) != num_targets:
+            if len(match) < num_targets:
+                match.extend([None] * (num_targets - len(match)))
+            else:
+                match = match[:num_targets]
+
+        for target_index, drone_index in enumerate(match):
+            if drone_index is not None and 0 <= drone_index < num_drones:
+                result[drone_index] = target_index
+    else:
+        length = min(num_drones, num_targets)
+        result[:length] = range(length)
+
+    return result
 
 
 def _handle_recognized_point_mapping_change(
@@ -273,17 +400,17 @@ def patch_recalculate_transitions():
     if _rct is None:
         return
 
-    _install_recognized_point_mapping_property()
+    # recognized_point_mapping patch is intentionally disabled.
 
-    if getattr(_rct, "_original_update_transition_for_storyboard_entry", None):
-        return
-
-    _rct._original_update_transition_for_storyboard_entry = (
-        _rct.update_transition_for_storyboard_entry
-    )
-    _rct.update_transition_for_storyboard_entry = (
-        _patched_update_transition_for_storyboard_entry
-    )
+    if not getattr(
+        _rct, "_original_calculate_mapping_for_transition_into_storyboard_entry", None
+    ):
+        _rct._original_calculate_mapping_for_transition_into_storyboard_entry = (
+            _rct.calculate_mapping_for_transition_into_storyboard_entry
+        )
+        _rct.calculate_mapping_for_transition_into_storyboard_entry = (
+            _patched_calculate_mapping_for_transition_into_storyboard_entry
+        )
 
 
 def unpatch_recalculate_transitions():
@@ -296,3 +423,10 @@ def unpatch_recalculate_transitions():
     if original:
         _rct.update_transition_for_storyboard_entry = original
         _rct._original_update_transition_for_storyboard_entry = None
+
+    original = getattr(
+        _rct, "_original_calculate_mapping_for_transition_into_storyboard_entry", None
+    )
+    if original:
+        _rct.calculate_mapping_for_transition_into_storyboard_entry = original
+        _rct._original_calculate_mapping_for_transition_into_storyboard_entry = None
