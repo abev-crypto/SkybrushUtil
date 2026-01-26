@@ -4245,10 +4245,7 @@ class BakeLightEffectsToCatOperator(bpy.types.Operator):  # pragma: no cover - B
         scene = context.scene
         view_layer = context.view_layer
         original_frame = scene.frame_current
-        base_width = max(frame_end - frame_start + 1, 0)
-        # Add loop-tail columns for the repeated 0F/1F samples.
-        tail_width = min(2, base_width)
-        width = base_width + tail_width
+        width = max(frame_end - frame_start + 1, 0)
         height = len(rows)
         data = np.zeros((height, width, 4), dtype=np.float32)
         print(drones)

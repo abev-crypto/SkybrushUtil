@@ -249,7 +249,7 @@ def _build_tracks_from_scene(
         if view_layer is not None:
             view_layer.update()
 
-        # Use sequential output frames so the loop tail lands after frame_end.
+        # Use sequential output frames so sampled output frames stay contiguous.
         frame_value = float(output_frame)
 
         for idx, obj in enumerate(drones):
