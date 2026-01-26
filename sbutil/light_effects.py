@@ -4227,7 +4227,8 @@ class BakeLightEffectsToCatOperator(bpy.types.Operator):  # pragma: no cover - B
                 drones.append(obj)
         return drones
 
-    def _resolve_row_order(self, scene, drones, frame_start):
+    @staticmethod
+    def _resolve_row_order(scene, drones, frame_start):
         mapping  = None
         suggestion = _get_storyboard_range_for_frame(scene, frame_start)
         if suggestion is not None:
@@ -4241,7 +4242,8 @@ class BakeLightEffectsToCatOperator(bpy.types.Operator):  # pragma: no cover - B
 
         return list(range(len(drones)))
 
-    def _collect_colors(self, context, drones, rows, frame_start, frame_end):
+    @staticmethod
+    def _collect_colors(context, drones, rows, frame_start, frame_end):
         scene = context.scene
         view_layer = context.view_layer
         original_frame = scene.frame_current
@@ -4269,7 +4271,8 @@ class BakeLightEffectsToCatOperator(bpy.types.Operator):  # pragma: no cover - B
 
         return data, width, height
 
-    def _create_cat_entry(self, context, light_effects, entries, pixels, width, height, frame_start):
+    @staticmethod
+    def _create_cat_entry(context, light_effects, entries, pixels, width, height, frame_start):
         source = entries[0]
         image_name = pick_unique_name(f"{source.name}_CAT", bpy.data.images)
         image = bpy.data.images.new(
@@ -4437,18 +4440,17 @@ class BakeCurrentFrameToCatOperator(bpy.types.Operator):  # pragma: no cover - B
         return getattr(bpy.data.collections.get("Drones"), "objects", [])
 
     def _resolve_row_order(self, scene, drones, frame_start):
-        return list(range(len(drones)))
+        return BakeLightEffectsToCatOperator._resolve_row_order(
+            scene, drones, frame_start
+        )
 
     def _collect_colors(self, context, drones, rows, frame_start, frame_end):
-        # Reuse the helper from the main bake operator
-        op = BakeLightEffectsToCatOperator()
-        op.scope = self.scope
-        return op._collect_colors(context, drones, rows, frame_start, frame_end)
+        return BakeLightEffectsToCatOperator._collect_colors(
+            context, drones, rows, frame_start, frame_end
+        )
 
     def _create_cat_entry(self, context, light_effects, entries, pixels, width, height, frame_start):
-        op = BakeLightEffectsToCatOperator()
-        op.scope = self.scope
-        return op._create_cat_entry(
+        return BakeLightEffectsToCatOperator._create_cat_entry(
             context, light_effects, entries, pixels, width, height, frame_start
         )
 
