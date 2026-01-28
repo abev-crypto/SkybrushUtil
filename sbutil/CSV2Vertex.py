@@ -1094,6 +1094,81 @@ def _create_midpose_slices_for_transitions(context, plans, entries_meta):
             if entry is not None:
                 entries_meta.append({"copyloc_handle": mid_handle})
 
+# ---------- VAT GN Sync ----------
+
+def _set_vat_start_frame(modifier, start_frame: int) -> bool:
+    node_group = getattr(modifier, "node_group", None)
+    if node_group is None:
+        return False
+
+    interface = getattr(node_group, "interface", None)
+    if interface is None:
+        return False
+
+    for item in getattr(interface, "items_tree", []):
+        if (
+            getattr(item, "name", "") == "Start Frame"
+            and getattr(item, "in_out", "") == "INPUT"
+        ):
+            try:
+                item.default_value = float(start_frame)
+                return True
+            except Exception:
+                return False
+    return False
+
+
+def _sync_vat_start_frames_for_storyboard(storyboard) -> tuple[int, int]:
+    """Align VAT GN start frames with storyboard entry frame_start."""
+
+    entries = getattr(storyboard, "entries", None)
+    if not entries:
+        return 0, 0
+
+    updated = 0
+    skipped = 0
+
+    for entry in entries:
+        try:
+            target_start = int(getattr(entry, "frame_start", 0))
+        except Exception:
+            skipped += 1
+            continue
+
+        obj = None
+        for candidate in (getattr(entry, "name", None), f"{getattr(entry, 'name', '')}_CSV"):
+            if not candidate:
+                continue
+            obj = bpy.data.objects.get(candidate)
+            if obj is not None:
+                break
+
+        if obj is None:
+            skipped += 1
+            continue
+
+        modifier = next(
+            (
+                m
+                for m in obj.modifiers
+                if m.type == "NODES"
+                and getattr(getattr(m, "node_group", None), "name", "").startswith(
+                    "GN_DroneVAT_"
+                )
+            ),
+            None,
+        )
+        if modifier is None:
+            skipped += 1
+            continue
+
+        if _set_vat_start_frame(modifier, target_start):
+            updated += 1
+        else:
+            skipped += 1
+
+    return updated, skipped
+
 # ---------- Utilities for Replacement ----------
 
 def clear_drone_keys(start_frame, duration):
@@ -1872,6 +1947,33 @@ class CSVVA_OT_Import(Operator):
             for d in subdirs:
                 if d not in metadata_map:
                     ordered_subdirs.append(d)
+        else:
+            subdir_set = set(subdirs)
+
+        checked_items = [item for item in prefs.preview_items if item.checked]
+        if checked_items:
+            selected = []
+            seen = set()
+            for item in checked_items:
+                base = os.path.basename(os.path.normpath(item.folder))
+                if base in seen:
+                    continue
+                selected.append(base)
+                seen.add(base)
+
+            if subdirs:
+                selected = [d for d in selected if d in subdir_set]
+                if not selected:
+                    self.report({"ERROR"}, "No checked entries match subfolders to import")
+                    return {"CANCELLED"}
+                ordered_subdirs = selected
+            else:
+                if not any(
+                    os.path.normpath(item.folder) == os.path.normpath(folder)
+                    for item in checked_items
+                ):
+                    self.report({"ERROR"}, "Checked entries do not match the selected folder")
+                    return {"CANCELLED"}
 
         if subdirs:
             created = []
@@ -2062,6 +2164,7 @@ class CSVVA_OT_Import(Operator):
                 _create_midpose_slices_for_transitions(
                     context, midpose_slice_plans, entries_meta
                 )
+            _sync_vat_start_frames_for_storyboard(storyboard)
             for key_entries, sf, obj, sub_path in key_data_collection:
                 current_frame = context.scene.frame_current
                 context.scene.frame_set(sf)
@@ -2112,6 +2215,7 @@ class CSVVA_OT_Import(Operator):
             storyboard, entries_meta
         )
         _apply_copyloc_handles_from_metadata(context, storyboard, entries_meta)
+        _sync_vat_start_frames_for_storyboard(storyboard)
         try:
             entry = storyboard.entries[-1]
             entry.name = (
