@@ -16,6 +16,11 @@ try:  # pragma: no cover - optional dependency
 except Exception:  # pragma: no cover - allows import without NumPy
     np = None
 
+try:  # pragma: no cover - optional dependency
+    from scipy.optimize import linear_sum_assignment as _scipy_linear_sum_assignment
+except Exception:  # pragma: no cover - allows import without SciPy
+    _scipy_linear_sum_assignment = None
+
 try:  # pragma: no cover - Blender dependency
     import bpy
     from bpy.props import StringProperty
@@ -42,7 +47,26 @@ def _points_to_array(points):
     return np.array([tuple(point) for point in points], dtype=float)
 
 
+def is_scipy_available():
+    return _scipy_linear_sum_assignment is not None
+
+
 def _linear_sum_assignment(cost_matrix):
+    if _scipy_linear_sum_assignment is not None:
+        if np is None:
+            raise RuntimeError("NumPy is required for SciPy linear_sum_assignment.")
+        cost = np.asarray(cost_matrix)
+        if cost.size == 0:
+            return []
+        rows, cols = _scipy_linear_sum_assignment(cost)
+        assignment = [-1] * cost.shape[0]
+        for row, col in zip(rows, cols):
+            assignment[int(row)] = int(col)
+        return assignment
+
+    if np is not None and hasattr(cost_matrix, "tolist"):
+        cost_matrix = cost_matrix.tolist()
+
     n_rows = len(cost_matrix)
     if n_rows == 0:
         return []
@@ -117,10 +141,10 @@ def _match_points_hungarian(source, target):
     cost_matrix = np.sum(diff * diff, axis=2)
 
     if num_targets <= num_sources:
-        assignment = _linear_sum_assignment(cost_matrix.tolist())
+        assignment = _linear_sum_assignment(cost_matrix)
         return [int(idx) if idx >= 0 else None for idx in assignment]
 
-    assignment = _linear_sum_assignment(cost_matrix.T.tolist())
+    assignment = _linear_sum_assignment(cost_matrix.T)
     match = [None] * num_targets
     for source_index, target_index in enumerate(assignment):
         if target_index >= 0:

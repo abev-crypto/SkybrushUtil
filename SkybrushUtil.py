@@ -2789,6 +2789,32 @@ def _auto_run_proximity_check(scene, _depsgraph):  # pragma: no cover - Blender 
         pass
 
 
+def _get_addon_preferences():
+    addon = bpy.context.preferences.addons.get(__name__)
+    return addon.preferences if addon else None
+
+
+def _should_patch_recalculate_transitions():
+    prefs = _get_addon_preferences()
+    if not prefs or not getattr(prefs, "dev_mode", False):
+        return False
+    return recalculate_transitions_patch.is_scipy_available()
+
+
+def _sync_recalculate_transitions_patch():
+    if _should_patch_recalculate_transitions():
+        recalculate_transitions_patch.patch_recalculate_transitions()
+    else:
+        recalculate_transitions_patch.unpatch_recalculate_transitions()
+
+
+def _on_dev_mode_update(_self, _context):
+    try:
+        _sync_recalculate_transitions_patch()
+    except Exception as exc:
+        print(f"Dev mode patch update failed: {exc}")
+
+
 def try_patch():
     global _PATCHED
     try:
@@ -2797,7 +2823,7 @@ def try_patch():
             return None
         patch_recalculate_operator()
         patch_storyboard_panel_extras()
-        recalculate_transitions_patch.patch_recalculate_transitions()
+        _sync_recalculate_transitions_patch()
         formation_patch.patch_create_formation_operator()
         storyboard_patch.patch_storyboard_entry_removal()
         light_effects_patch.patch_light_effect_collection()
@@ -3054,9 +3080,20 @@ class SBUTIL_AddonPreferences(AddonPreferences):
     bl_idname = __name__
     bl_label = "SkyBrush Util Preferences"
 
+    dev_mode: BoolProperty(
+        name="Dev Mode",
+        description="Enable developer-only patches (requires SciPy)",
+        default=False,
+        update=_on_dev_mode_update,
+    )
+
     def draw(self, context):
         layout = self.layout
         layout.operator("drone.update_addon", text="Update Add-on")
+        layout.separator()
+        box = layout.box()
+        box.label(text="Developer Options")
+        box.prop(self, "dev_mode")
 
 # -------------------------------
 # 登録
