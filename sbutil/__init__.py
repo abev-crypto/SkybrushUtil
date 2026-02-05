@@ -1,7 +1,7 @@
 bl_info = {
     "name": "SkyBrushUtil",
     "author": "ABEYUYA",
-    "version": (3, 0, 0),
+    "version": (3, 1, 0),
     "blender": (4, 3, 2),
     "location": "3D View > Sidebar > SBUtil",
     "description": "SkybrushTransfarUtil",
@@ -14,27 +14,28 @@ from bpy.app.handlers import persistent
 from bpy.props import BoolProperty, EnumProperty, StringProperty
 from bpy.types import Panel, Operator, PropertyGroup, AddonPreferences
 from mathutils import Vector
-import json, os, shutil, tempfile, urllib.request
+import json, os, shutil
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Iterable
 from sbstudio.plugin.operators import RecalculateTransitionsOperator
 from sbstudio.plugin.operators.base import StoryboardOperator
 from sbstudio.plugin.constants import Collections
-from sbutil.sampling import each_frame_in
+from .sampling import each_frame_in
 
-from sbutil import CSV2Vertex
-from sbutil import formation_patch
-from sbutil import light_effects as light_effects_patch
-from sbutil import light_effects_result_patch
-from sbutil import recalculate_transitions_patch
-from sbutil import drone_mesh_gn
-from sbutil import reflow_vertex
-from sbutil import drone_check_gn
-from sbutil import view_setup
-from sbutil import storyboard_patch
-from sbutil.copyloc_utils import shape_copyloc_influence_curve
-from sbutil.csv_vat_gn import build_vat_images_from_tracks
-from sbutil.light_effects import _get_emission_color
+from . import CSV2Vertex
+from . import formation_patch
+from . import light_effects as light_effects_patch
+from . import light_effects_result_patch
+from . import recalculate_transitions_patch
+from . import update as update_github_main
+from . import drone_mesh_gn
+from . import reflow_vertex
+from . import drone_check_gn
+from . import view_setup
+from . import storyboard_patch
+from .copyloc_utils import shape_copyloc_influence_curve
+from .csv_vat_gn import build_vat_images_from_tracks
+from .light_effects import _get_emission_color
 
 try:  # pragma: no cover - depends on sbstudio
     from sbstudio.plugin.operators.safety_check import RunFullProximityCheckOperator
@@ -56,58 +57,82 @@ LightdataStr = "_LightData.json"
 
 
 class DRONE_OT_UpdateAddon(Operator):
-    """Fetch and install the latest release of the add-on from GitHub."""
+    """Fetch and install the latest add-on version from GitHub."""
 
     bl_idname = "drone.update_addon"
     bl_label = "Update Add-on"
-    bl_description = "Download and install the latest version of SkyBrushUtil"
-
-    RELEASE_API = (
-        "https://api.github.com/repos/abev-crypto/SkybrushUtil/releases/latest"
-    )
+    bl_description = "Download and install the latest version from GitHub"
 
     def execute(self, context):
-        current = tuple(bl_info.get("version", (0, 0)))
         try:
-            with urllib.request.urlopen(self.RELEASE_API) as response:
-                data = json.load(response)
-        except Exception as exc:  # pragma: no cover - network failure
-            self.report({'ERROR'}, f"Update check failed: {exc}")
+            prefs = update_github_main._get_prefs()
+        except Exception:
+            self.report({'ERROR'}, "Addon preferences not found")
             return {'CANCELLED'}
 
-        tag = data.get("tag_name") or ""
-        try:
-            latest = tuple(int(x) for x in tag.lstrip("vV").split("."))
-        except ValueError:
-            self.report({'ERROR'}, f"Invalid version format: {tag}")
-            return {'CANCELLED'}
-
-        if latest <= current:
-            self.report({'INFO'}, "Add-on is up to date")
-            return {'CANCELLED'}
-
-        zip_url = data.get("zipball_url")
-        if not zip_url:
-            self.report({'ERROR'}, "Release package not found")
-            return {'CANCELLED'}
+        repo = update_github_main.GithubRepo(
+            owner=prefs.gh_owner,
+            repo=prefs.gh_repo,
+            branch=prefs.gh_branch,
+            addon_subdir=prefs.gh_addon_subdir,
+        )
 
         try:
-            with urllib.request.urlopen(zip_url) as resp:
-                with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
-                    tmp.write(resp.read())
-                    zip_path = tmp.name
-            bpy.ops.preferences.addon_install(filepath=zip_path, overwrite=True)
-            bpy.ops.preferences.addon_enable(module=__name__)
-            self.report({'INFO'}, f"Updated to {'.'.join(map(str, latest))}")
+            addon_key = update_github_main._addon_key()
+            local_v = update_github_main.get_local_version(addon_key)
+            remote_v = update_github_main.get_remote_version(repo)
+            prefs.last_local_version = str(local_v) if local_v else "None"
+            prefs.last_remote_version = str(remote_v) if remote_v else "None"
+
+            if not local_v or not remote_v:
+                prefs.update_available = False
+                self.report({'ERROR'}, "Missing version info")
+                return {'CANCELLED'}
+
+            if not update_github_main._version_gt(remote_v, local_v):
+                prefs.update_available = False
+                self.report({'INFO'}, "Add-on is up to date")
+                return {'CANCELLED'}
+
+            zip_bytes = update_github_main.download_main_zip(repo)
+            target_dir = update_github_main._addon_root_dir_from_module(addon_key)
+            update_github_main.install_from_zip_bytes(zip_bytes, repo, target_dir)
+
+            prefs.update_available = False
+            try:
+                bpy.ops.preferences.addon_disable(module=__name__)
+            except Exception:
+                pass
+            try:
+                bpy.ops.preferences.addon_enable(module=__name__)
+            except Exception:
+                pass
+            self.report({'INFO'}, f"Updated to {remote_v}")
             return {'FINISHED'}
         except Exception as exc:  # pragma: no cover - installation failure
             self.report({'ERROR'}, f"Update failed: {exc}")
             return {'CANCELLED'}
-        finally:
-            try:
-                os.remove(zip_path)
-            except Exception:
-                pass
+
+
+class SBUTIL_OT_CheckUpdate(Operator):
+    """Check GitHub for a newer add-on version."""
+
+    bl_idname = "sbutil.check_update"
+    bl_label = "Check for Updates"
+    bl_description = "Check GitHub for newer versions"
+
+    def execute(self, context):
+        try:
+            prefs = update_github_main._get_prefs()
+        except Exception:
+            self.report({'ERROR'}, "Addon preferences not found")
+            return {'CANCELLED'}
+        ok, message = update_github_main._check_update_for_prefs(prefs)
+        if ok:
+            self.report({'INFO'}, message)
+            return {'FINISHED'}
+        self.report({'WARNING'}, message)
+        return {'CANCELLED'}
 
 
 def ensure_json_files(blend_dir, prefix):
@@ -317,7 +342,7 @@ def _export_vat_cat(
 # LightEffect Export Helpers
 # -------------------------------
 def convert_value(value):
-    """Blender固有型やPropertyGroupをJSON化可能な値に変換"""
+    """Blender蝗ｺ譛牙梛繧ПropertyGroup繧谷SON蛹門庄閭ｽ縺ｪ蛟､縺ｫ螟画鋤"""
     if hasattr(value, "__annotations__"):
         return propertygroup_to_dict(value)
 
@@ -333,7 +358,7 @@ def convert_value(value):
 
 
 def convert_color_ramp(texture):
-    """ColorRamp情報を辞書化"""
+    """Convert ColorRamp data to a serializable dict."""
     if not texture or not getattr(texture, "use_color_ramp", False):
         return None
 
@@ -363,10 +388,10 @@ def convert_color_ramp(texture):
 
 
 def propertygroup_to_dict(pg):
-    """PropertyGroupを辞書化（name含める）"""
+    """Convert PropertyGroup to a dict (include name)."""
     data = {"name": pg.name}
 
-    # 新しいプロパティ(loop_count, loop_method)を含めた全プロパティ名を収集
+    # 譁ｰ縺励＞繝励Ο繝代ユ繧｣(loop_count, loop_method)繧貞性繧√◆蜈ｨ繝励Ο繝代ユ繧｣蜷阪ｒ蜿朱寔
     props = set(getattr(pg, "__annotations__", {}).keys())
     for extra in ("loop_count", "loop_method"):
         if hasattr(pg, extra):
@@ -420,7 +445,7 @@ def active_timebind_prefix(context, default_name):
     return default_name.rstrip("_")
 
 # -------------------------------
-# プロパティ
+# 繝励Ο繝代ユ繧｣
 # -------------------------------
 class DroneKeyTransferProperties(PropertyGroup):
     file_name : StringProperty(
@@ -429,7 +454,7 @@ class DroneKeyTransferProperties(PropertyGroup):
         description="Save/Load JSON file name"
     )
 
-# TimeBind用のPropertyGroup
+# TimeBind逕ｨ縺ｮPropertyGroup
 class TimeBindEntry(bpy.types.PropertyGroup):
     Prefix : StringProperty(name="Prefix")
     StartFrame : bpy.props.IntProperty(name="Start Frame")
@@ -437,7 +462,7 @@ class TimeBindEntry(bpy.types.PropertyGroup):
 class ShiftPrefixEntry(bpy.types.PropertyGroup):
     Prefix : StringProperty(name="Prefix")
 
-# コレクション全体の管理用
+# 繧ｳ繝ｬ繧ｯ繧ｷ繝ｧ繝ｳ蜈ｨ菴薙・邂｡逅・畑
 class TimeBindCollection(bpy.types.PropertyGroup):
     entries : bpy.props.CollectionProperty(type=TimeBindEntry)
     active_index : bpy.props.IntProperty()
@@ -477,7 +502,7 @@ class SBUTIL_StoryboardBatchSettings(bpy.types.PropertyGroup):
     )
 
 class TIMEBIND_UL_entries(bpy.types.UIList):
-    """TimeBind entriesを表示するUIList"""
+    """TimeBind entries繧定｡ｨ遉ｺ縺吶ｋUIList"""
     def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
         # item: TimeBindEntry
         split = layout.split(factor=0.5)
@@ -485,7 +510,7 @@ class TIMEBIND_UL_entries(bpy.types.UIList):
 
 
 class TIMEBIND_UL_shift_prefixes(bpy.types.UIList):
-    """Shift prefix entriesを表示するUIList"""
+    """Shift prefix entries繧定｡ｨ遉ｺ縺吶ｋUIList"""
     def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
         split = layout.split(factor=1.0)
         split.label(text=item.Prefix if item.Prefix else "-")
@@ -781,7 +806,7 @@ class SBUTIL_OT_IsolateActiveFormation(Operator):
         return {'FINISHED'}
 
 # -------------------------------
-# 抽出（保存）オペレーター
+# 謚ｽ蜃ｺ・井ｿ晏ｭ假ｼ峨が繝壹Ξ繝ｼ繧ｿ繝ｼ
 # -------------------------------
 class DRONE_OT_SaveKeys(Operator):
     bl_idname = "drone.save_keys"
@@ -869,7 +894,7 @@ class DRONE_OT_LoadLightEffects(Operator):
         return {'FINISHED'}
 
 # -------------------------------
-# 移植（ロード）オペレーター
+# 遘ｻ讀搾ｼ医Ο繝ｼ繝会ｼ峨が繝壹Ξ繝ｼ繧ｿ繝ｼ
 # -------------------------------
 class DRONE_OT_LoadKeys(Operator):
     bl_idname = "drone.load_keys"
@@ -1961,7 +1986,7 @@ class DRONE_OT_shift_collecion(bpy.types.Operator):
 
     def execute(self, context):
         """Create an "_Animated" collection, link selected objects, shift keys, and finish."""
-        # 新しいコレクションを作成
+        # 譁ｰ縺励＞繧ｳ繝ｬ繧ｯ繧ｷ繝ｧ繝ｳ繧剃ｽ懈・
         shift_collection_name = context.scene.drone_key_props.file_name + "_Animated"
         shift_collection = bpy.data.collections.new(shift_collection_name)
         bpy.context.scene.collection.children.link(shift_collection)
@@ -2053,11 +2078,11 @@ class TIMEBIND_OT_refresh(bpy.types.Operator):
         storyboard = scene.skybrush.storyboard
         light_effects = scene.skybrush.light_effects
 
-        # Dronesコレクション参照
+        # Drones繧ｳ繝ｬ繧ｯ繧ｷ繝ｧ繝ｳ蜿ら・
         drones_collection = bpy.data.collections.get("Drones")
 
         for bind_entry in scene.time_bind.entries:
-            # Storyboardエントリ検索
+            # Storyboard繧ｨ繝ｳ繝医Μ讀懃ｴ｢
             for sb_entry in storyboard.entries:
                 if sb_entry.name.startswith(bind_entry.Prefix):
                     # Calculate frame offset between storyboard and TimeBind entry
@@ -2077,15 +2102,15 @@ class TIMEBIND_OT_refresh(bpy.types.Operator):
                             bind_entry.StartFrame,
                             sb_entry.duration,
                         )
-                    # Drones内のオブジェクトキーを移動
+                    # Drones蜀・・繧ｪ繝悶ず繧ｧ繧ｯ繝医く繝ｼ繧堤ｧｻ蜍・
                     if drones_collection:
                         move_material_keys(
                             drones_collection.objects,
                             bind_entry.StartFrame,
-                            sb_entry.duration,  # Duration使う
+                            sb_entry.duration,  # Duration菴ｿ縺・
                             diff,
                         )
-                    # TimeBindをStoryboardに同期
+                    # TimeBind繧担toryboard縺ｫ蜷梧悄
                     bind_entry.StartFrame = sb_entry.frame_start
         return {'FINISHED'}
 
@@ -2228,7 +2253,7 @@ class TIMEBIND_OT_create_animated_collection(bpy.types.Operator):
 
 
 def shift_collection_key(shift_collection, diff=None, start_frame=None, duration=None):
-    # === 設定 ===
+    # === 險ｭ螳・===
     shift_amount = bpy.context.scene.frame_current if diff is None else diff
 
     end_frame = start_frame + duration if start_frame is not None and duration is not None else None
@@ -2243,12 +2268,12 @@ def shift_collection_key(shift_collection, diff=None, start_frame=None, duration
                         keyframe.handle_left.x += amount
                         keyframe.handle_right.x += amount
 
-    # --- コレクション内すべてのオブジェクト処理 ---
+    # --- 繧ｳ繝ｬ繧ｯ繧ｷ繝ｧ繝ｳ蜀・☆縺ｹ縺ｦ縺ｮ繧ｪ繝悶ず繧ｧ繧ｯ繝亥・逅・---
     for obj in shift_collection.all_objects:
-        # オブジェクト本体
+        # 繧ｪ繝悶ず繧ｧ繧ｯ繝域悽菴・
         shift_keyframes(obj.animation_data, shift_amount, start_frame, end_frame)
 
-        # シェイプキー
+        # 繧ｷ繧ｧ繧､繝励く繝ｼ
         if obj.data and hasattr(obj.data, "shape_keys") and obj.data.shape_keys:
             shift_keyframes(obj.data.shape_keys.animation_data, shift_amount, start_frame, end_frame)
 
@@ -2314,10 +2339,10 @@ def add_timebind_prop(context, prefix, frame):
     tb.active_index = len(tb.entries) - 1
 
 def update_texture_key(prefix, diff, start_frame=None, duration=None):
-    # 全テクスチャをチェック
+    # 蜈ｨ繝・け繧ｹ繝√Ε繧偵メ繧ｧ繝・け
     end_frame = start_frame + duration if start_frame is not None and duration is not None else None
     for tex in bpy.data.textures:
-        # 名前が prefix で始まる場合のみ処理
+        # 蜷榊燕縺・prefix 縺ｧ蟋九∪繧句ｴ蜷医・縺ｿ蜃ｦ逅・
         if tex.name.startswith(prefix):
             if tex.animation_data and tex.animation_data.action:
                 action = tex.animation_data.action
@@ -2329,42 +2354,42 @@ def update_texture_key(prefix, diff, start_frame=None, duration=None):
                             keyframe.handle_left.x += diff
                             keyframe.handle_right.x += diff
 
-                # 更新を通知
+                # 譖ｴ譁ｰ繧帝夂衍
                 for fcurve in action.fcurves:
                     fcurve.update()
 
 def add_prefix_le_tex(context):
     def prefix_light_effect_names(prefix):
         """
-        LightEffectCollection 内の全 name にプレフィックスを追加する
+        LightEffectCollection 蜀・・蜈ｨ name 縺ｫ繝励Ξ繝輔ぅ繝・け繧ｹ繧定ｿｽ蜉縺吶ｋ
         """
         entries = bpy.context.scene.skybrush.light_effects.entries
 
         for effect in entries:
-            # 既に prefix が付いている場合は重複しないようにする（任意）
+            # 譌｢縺ｫ prefix 縺御ｻ倥＞縺ｦ縺・ｋ蝣ｴ蜷医・驥崎､・＠縺ｪ縺・ｈ縺・↓縺吶ｋ・井ｻｻ諢擾ｼ・
             if not effect.name.startswith(prefix):
                 effect.name = prefix + effect.name
     props = context.scene.drone_key_props
     prefix_light_effect_names(props.file_name + "_")
     for tex in bpy.data.textures:
-        # すでにプレフィックスが付いていない場合のみ追加
+        # 縺吶〒縺ｫ繝励Ξ繝輔ぅ繝・け繧ｹ縺御ｻ倥＞縺ｦ縺・↑縺・ｴ蜷医・縺ｿ霑ｽ蜉
         if not tex.name.startswith(props.file_name + "_"):
             tex.name = props.file_name + "_" + tex.name
 
 def set_propertygroup_from_dict(pg, data):
-    """辞書データをPropertyGroupにセット（texture/meshのみ特殊処理）"""
+    """Restore PropertyGroup from a dict (supports texture/mesh refs)."""
     annotations = getattr(pg, "__annotations__", {}) or {}
 
     for key, value in data.items():
         annotation = annotations.get(key)
         if annotation is None and not hasattr(pg, key):
-            continue  # JSONに余分なキーがあっても無視
+            continue  # JSON縺ｫ菴吝・縺ｪ繧ｭ繝ｼ縺後≠縺｣縺ｦ繧ら┌隕・
 
-        # 空文字や None はスキップ
+        # 遨ｺ譁・ｭ励ｄ None 縺ｯ繧ｹ繧ｭ繝・・
         if value == "" or value is None:
             continue
 
-        # texture / mesh は名前から検索して代入
+        # texture / mesh 縺ｯ蜷榊燕縺九ｉ讀懃ｴ｢縺励※莉｣蜈･
         if key == "texture":
             tex = bpy.data.textures.get(value)
             if tex is None:
@@ -2386,12 +2411,12 @@ def set_propertygroup_from_dict(pg, data):
 
         current_value = getattr(pg, key)
 
-        # ネストしたPropertyGroupの場合
+        # 繝阪せ繝医＠縺蘖ropertyGroup縺ｮ蝣ｴ蜷・
         if hasattr(current_value, "__annotations__") and isinstance(value, dict):
             set_propertygroup_from_dict(current_value, value)
             continue
 
-        # EnumProperty の場合（候補外はスキップ）
+        # EnumProperty 縺ｮ蝣ｴ蜷茨ｼ亥呵｣懷､悶・繧ｹ繧ｭ繝・・・・
         if annotation is not None and "EnumProperty" in str(type(annotation)):
             enum_items = annotation.keywords["items"]
             if value not in [item[0] for item in enum_items]:
@@ -2402,7 +2427,7 @@ def set_propertygroup_from_dict(pg, data):
                 continue  # read-only or incompatible, skip safely
             continue
 
-        # 通常プロパティ
+        # 騾壼ｸｸ繝励Ο繝代ユ繧｣
         try:
             setattr(pg, key, value)
         except (AttributeError, TypeError, ValueError):
@@ -2435,7 +2460,7 @@ def _ensure_color_ramp_texture(effect, ramp_data):
 
 
 def apply_color_ramp(texture, ramp_data):
-    """ColorRamp情報をTextureに適用"""
+    """ColorRamp諠・ｱ繧探exture縺ｫ驕ｩ逕ｨ"""
     if not texture or not hasattr(texture, "color_ramp"):
         return
     if texture and texture.animation_data and texture.animation_data.action:
@@ -2461,26 +2486,26 @@ def apply_color_ramp(texture, ramp_data):
     else:
         elements = ramp_data or []
 
-    # 1つだけ残して全削除
+    # 1縺､縺縺第ｮ九＠縺ｦ蜈ｨ蜑企勁
     while len(color_ramp.elements) > 1:
         color_ramp.elements.remove(color_ramp.elements[-1])
 
     if not elements:
         return
 
-    # 残した要素を最初のJSONデータで上書き
+    # 谿九＠縺溯ｦ∫ｴ繧呈怙蛻昴・JSON繝・・繧ｿ縺ｧ荳頑嶌縺・
     color_ramp.elements[0].position = elements[0]["position"]
     color_ramp.elements[0].color = elements[0]["color"]
 
-    # 2番目以降の要素を追加
+    # 2逡ｪ逶ｮ莉･髯阪・隕∫ｴ繧定ｿｽ蜉
     for point in elements[1:]:
         elem = color_ramp.elements.new(point["position"])
         elem.color = point["color"]
 
 def import_light_effects_from_json(filepath, frame_offset, context):
     """
-    JSONからLightEffectsを復元する
-    frame_offset: frame_start / frame_end に加算するオフセット
+    JSON縺九ｉLightEffects繧貞ｾｩ蜈・☆繧・
+    frame_offset: frame_start / frame_end 縺ｫ蜉邂励☆繧九が繝輔そ繝・ヨ
     """
     scene = bpy.context.scene
     entries = scene.skybrush.light_effects.entries
@@ -2489,18 +2514,18 @@ def import_light_effects_from_json(filepath, frame_offset, context):
         if entries[i].name.startswith(props.file_name):
             entries.remove(i)
 
-    # JSON読み込み
+    # JSON隱ｭ縺ｿ霎ｼ縺ｿ
     with open(filepath, 'r', encoding='utf-8') as f:
         data = json.load(f)
 
     for effect_data in data:
         effect = entries.add()
 
-        # JSONのnameキーをUIリストの名前に反映
+        # JSON縺ｮname繧ｭ繝ｼ繧旦I繝ｪ繧ｹ繝医・蜷榊燕縺ｫ蜿肴丐
         if "name" in effect_data:
             effect.name = effect_data["name"]
 
-        # color_rampデータを一時退避
+        # color_ramp繝・・繧ｿ繧剃ｸ譎る驕ｿ
         color_ramp_data = effect_data.pop("color_ramp", [])
 
         if "frame_start" in effect_data:
@@ -2508,16 +2533,16 @@ def import_light_effects_from_json(filepath, frame_offset, context):
         if "frame_end" in effect_data:
             effect_data["frame_end"] += frame_offset
 
-        # プロパティをセット
+        # 繝励Ο繝代ユ繧｣繧偵そ繝・ヨ
         set_propertygroup_from_dict(effect, effect_data)
 
-        # ColorRamp復元
+        # ColorRamp蠕ｩ蜈・
         if effect.type == "COLOR_RAMP" and color_ramp_data:
             texture = _ensure_color_ramp_texture(effect, color_ramp_data)
             apply_color_ramp(texture, color_ramp_data)
 
 def apply_key(filepath, frame_offset, duration=0):
-    from sbutil.color_key_utils import apply_color_keys_to_nearest
+    from .color_key_utils import apply_color_keys_to_nearest
 
     drones_collection = bpy.data.collections.get("Drones")
     available_objects = list(drones_collection.objects)
@@ -2534,7 +2559,7 @@ def apply_key(filepath, frame_offset, duration=0):
     with open(filepath, "r") as f:
         color_key_data = json.load(f)
 
-    # JSONキーをintに変換
+    # JSON繧ｭ繝ｼ繧段nt縺ｫ螟画鋤
     for d in color_key_data:
         d["keys"] = {int(k): v for k, v in d["keys"].items()}
 
@@ -2559,7 +2584,7 @@ def export_key(context, br_path, pref):
             if not action:
                 continue
 
-            # inputs[0].default_value を持つFカーブを抽出
+            # inputs[0].default_value 繧呈戟縺､F繧ｫ繝ｼ繝悶ｒ謚ｽ蜃ｺ
             node_color_curves = [fc for fc in action.fcurves if 'inputs[0].default_value' in fc.data_path]
             if not node_color_curves:
                 continue
@@ -2569,7 +2594,7 @@ def export_key(context, br_path, pref):
                 for kp in fc.keyframe_points:
                         frame = kp.co.x
                         value = kp.co.y
-                        # 指定範囲のみ保存
+                        # 謖・ｮ夂ｯ・峇縺ｮ縺ｿ菫晏ｭ・
                         if frame_start <= frame <= frame_start + duration:
                             keys[fc.array_index].append((frame - frame_start, value))
                         elif duration == 0:
@@ -2841,11 +2866,11 @@ def try_patch():
     bpy.app.timers.unregister(try_patch)
     return None
 
-# --- ファイル読み込み後にも再適用したい場合（原状復帰→再適用が安全） ---
+# --- 繝輔ぃ繧､繝ｫ隱ｭ縺ｿ霎ｼ縺ｿ蠕後↓繧ょ・驕ｩ逕ｨ縺励◆縺・ｴ蜷茨ｼ亥次迥ｶ蠕ｩ蟶ｰ竊貞・驕ｩ逕ｨ縺悟ｮ牙・・・---
 def _on_load_post(_dummy):
-    # 原状復帰→再適用（複数回読み込みに強くする）
+    # 蜴溽憾蠕ｩ蟶ｰ竊貞・驕ｩ逕ｨ・郁､・焚蝗櫁ｪｭ縺ｿ霎ｼ縺ｿ縺ｫ蠑ｷ縺上☆繧具ｼ・
     _restore_originals()
-    # 遅延パッチも再スケジュール
+    # 驕・ｻｶ繝代ャ繝√ｂ蜀阪せ繧ｱ繧ｸ繝･繝ｼ繝ｫ
     bpy.app.timers.register(try_patch, first_interval=0.1)
 
 def _restore_originals():
@@ -2863,7 +2888,7 @@ def _restore_originals():
     except:
         return
 # -------------------------------
-# UIパネル
+# UI繝代ロ繝ｫ
 # -------------------------------
 class DRONE_PT_KeyTransfer(Panel):
     bl_label = "Drone Transfer"
@@ -3080,6 +3105,41 @@ class SBUTIL_AddonPreferences(AddonPreferences):
     bl_idname = __name__
     bl_label = "SkyBrush Util Preferences"
 
+    gh_owner: StringProperty(
+        name="GitHub Owner",
+        default="abev-crypto",
+    )
+    gh_repo: StringProperty(
+        name="GitHub Repo",
+        default="SkybrushUtil",
+    )
+    gh_branch: StringProperty(
+        name="GitHub Branch",
+        default="main",
+    )
+    gh_addon_subdir: StringProperty(
+        name="Addon Subdir",
+        default="sbutil",
+    )
+    auto_check: BoolProperty(
+        name="Auto Check Updates",
+        default=True,
+    )
+    update_available: BoolProperty(
+        name="Update Available",
+        default=False,
+        options={"HIDDEN"},
+    )
+    last_local_version: StringProperty(
+        name="Last Local Version",
+        default="",
+        options={"HIDDEN"},
+    )
+    last_remote_version: StringProperty(
+        name="Last Remote Version",
+        default="",
+        options={"HIDDEN"},
+    )
     dev_mode: BoolProperty(
         name="Dev Mode",
         description="Enable developer-only patches (requires SciPy)",
@@ -3089,14 +3149,28 @@ class SBUTIL_AddonPreferences(AddonPreferences):
 
     def draw(self, context):
         layout = self.layout
+        layout.operator("sbutil.check_update", text="Check for Updates")
         layout.operator("drone.update_addon", text="Update Add-on")
+        row = layout.row(align=True)
+        row.label(text=f"Local: {self.last_local_version or 'None'}")
+        row.label(text=f"Remote: {self.last_remote_version or 'None'}")
+        if self.update_available:
+            layout.label(text="Update available", icon='INFO')
+        layout.prop(self, "auto_check", text="Auto Check on Load")
+
+        box = layout.box()
+        box.label(text="GitHub Update Source")
+        box.prop(self, "gh_owner")
+        box.prop(self, "gh_repo")
+        box.prop(self, "gh_branch")
+        box.prop(self, "gh_addon_subdir")
         layout.separator()
         box = layout.box()
         box.label(text="Developer Options")
         box.prop(self, "dev_mode")
 
 # -------------------------------
-# 登録
+# 逋ｻ骭ｲ
 # -------------------------------
 classes = (
     DroneKeyTransferProperties,
@@ -3107,6 +3181,7 @@ classes = (
     DRONE_OT_LoadLightEffects,
     DRONE_OT_LoadKeys,
     SBUTIL_AddonPreferences,
+    SBUTIL_OT_CheckUpdate,
     DRONE_OT_UpdateAddon,
     DRONE_PT_KeyTransfer,
     DRONE_PT_Utilities,
@@ -3252,6 +3327,7 @@ def register():
     view_setup.register()
     bpy.app.timers.register(try_patch)
     bpy.app.handlers.load_post.append(_on_load_post)
+    update_github_main.register()
     if _auto_run_proximity_check not in bpy.app.handlers.frame_change_post:
         bpy.app.handlers.frame_change_post.append(_auto_run_proximity_check)
 
@@ -3288,17 +3364,24 @@ def unregister():
     reflow_vertex.unregister()
     drone_check_gn.unregister()
     view_setup.unregister()
+    update_github_main.unregister()
 
-    # ハンドラ除去（存在チェック）
+    # 繝上Φ繝峨Λ髯､蜴ｻ・亥ｭ伜惠繝√ぉ繝・け・・
     if _on_load_post in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.remove(_on_load_post)
     if _auto_run_proximity_check in bpy.app.handlers.frame_change_post:
         bpy.app.handlers.frame_change_post.remove(_auto_run_proximity_check)
 
-    # 元に戻す
+    # 蜈・↓謌ｻ縺・
     _restore_originals()
     if bpy.app.timers.is_registered(try_patch):
         bpy.app.timers.unregister(try_patch)
 
 if __name__ == "__main__":
     register()
+
+
+
+
+
+
